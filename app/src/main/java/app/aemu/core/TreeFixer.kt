@@ -1727,6 +1727,99 @@ class TreeFixer(
         useEngineAllocatorOnA17()
         restoreFirmwareAidlDeclarations()
         useSoftwareKeymasterOnPure32()
+        installRadioHal()
+    }
+
+    private val RADIO_HAL_ASSET = "engines/radio-hal/vendor#bin#hw#android.hardware.radio@1.0-service.aemu"
+    private val RADIO_HAL_BIN = "android.hardware.radio@1.0-service.aemu"
+
+    private val RADIO_HAL_XML = """    <hal format="hidl">
+        <name>android.hardware.radio</name>
+        <transport>hwbinder</transport>
+        <version>1.0</version>
+        <interface>
+            <name>IRadio</name>
+            <instance>slot1</instance>
+        </interface>
+    </hal>
+"""
+
+    private fun firmwareDeclaresHidl(halName: String): Boolean {
+        val legacy = listOf("vendor/manifest.xml", "system/vendor/manifest.xml", "odm/manifest.xml").map { File(root, it) }
+        val seen = HashSet<String>()
+        return (deviceManifestFiles() + skuManifests() + legacy).any { f ->
+            f.isFile && seen.add(runCatching { f.canonicalPath }.getOrDefault(f.path)) && runCatching {
+                val text = f.readText().replace(RADIO_HAL_XML, "")
+                manifestHalBlock.findAll(text).any { b ->
+                    manifestHalName.find(b.value)?.groupValues?.get(1) == halName && manifestHalFormat.find(b.value)?.groupValues?.get(1) == "hidl"
+                }
+            }.getOrDefault(false)
+        }
+    }
+
+    fun writeRadioHalConfig(config: (secbridge: Boolean) -> String) {
+        if (img.api < 26 || !File(root, "vendor/bin/hw/$RADIO_HAL_BIN").isFile) return
+        runCatching {
+            val f = File(root, "vendor/etc/aemu-radio.conf")
+            f.parentFile?.mkdirs()
+            f.writeText(config(firmwareDeclaresHidl("vendor.samsung.hardware.radio.secbridge")))
+            f.setReadable(true, false)
+        }.onFailure { log("radio HAL: configuration not written: ${it.message}") }
+    }
+
+    private fun installRadioHal() {
+        if (img.api < 26 || !img.settings.radio || !kernel.treble || img.arch.foreign || isPure32Tree(root)) return
+        if (!EngineAssets.exists(ctx, RADIO_HAL_ASSET)) { log("radio HAL: no service in the engine set, telephony stays without a modem"); return }
+        if (!File(root, "vendor").isDirectory) return
+        val bin = File(root, "vendor/bin/hw/$RADIO_HAL_BIN")
+        runCatching {
+            bin.parentFile?.mkdirs()
+            val same = bin.isFile && bin.length() == EngineAssets.size(ctx, RADIO_HAL_ASSET) &&
+                bin.readBytes().contentEquals(EngineAssets.open(ctx, RADIO_HAL_ASSET).use { it.readBytes() })
+            if (!same) {
+                bin.delete()
+                EngineAssets.open(ctx, RADIO_HAL_ASSET).use { src -> bin.outputStream().use { src.copyTo(it) } }
+            }
+            bin.setReadable(true, false); bin.setExecutable(true, false)
+            val rc = File(root, "vendor/etc/init/$RADIO_HAL_BIN.rc")
+            rc.parentFile?.mkdirs()
+            val rcText = "service aemu-radio /vendor/bin/hw/$RADIO_HAL_BIN\n    class hal\n    user radio\n    group radio\n"
+            if (!rc.isFile || rc.readText() != rcText) rc.writeText(rcText)
+            rc.setReadable(true, false)
+        }.onFailure { log("radio HAL: service not installed: ${it.message}"); return }
+        val frag = File(root, "vendor/etc/vintf/manifest/aemu-radio.xml")
+        val hal = RADIO_HAL_XML
+        val monolithic = listOf("vendor/etc/vintf/manifest.xml", "system/vendor/etc/vintf/manifest.xml", "odm/etc/vintf/manifest.xml")
+        val legacy = listOf("vendor/manifest.xml", "system/vendor/manifest.xml")
+        val ours = fun(f: File) = f.isFile && runCatching { f.readText().contains(hal) }.getOrDefault(false)
+        val already = (monolithic + legacy).map { File(root, it) }.any(ours) || frag.isFile
+        if (!already && firmwareDeclaresHidl("android.hardware.radio")) { log("radio HAL: the firmware already declares android.hardware.radio, not declared again"); return }
+        if (img.api >= 29) {
+            runCatching {
+                frag.parentFile?.mkdirs()
+                val xml = "<manifest version=\"1.0\" type=\"device\">\n" + hal + "</manifest>\n"
+                if (!frag.isFile || frag.readText() != xml) { frag.writeText(xml); frag.setReadable(true, false) }
+            }.onFailure { log("radio HAL: fragment not written: ${it.message}"); return }
+            declareInMonolithicManifests("android.hardware.radio", hal)
+        } else {
+            frag.delete()
+            val target = (monolithic.take(2) + legacy).map { File(root, it) }.firstOrNull { it.isFile }
+            for (rel in monolithic + legacy) {
+                val f = File(root, rel)
+                if (f == target || !ours(f)) continue
+                runCatching { f.setWritable(true); f.writeText(f.readText().replace(hal, "")); f.setReadable(true, false) }
+            }
+            if (target == null) { log("radio HAL: no device manifest to declare in"); return }
+            runCatching {
+                val text = target.readText()
+                if (text.contains(hal)) return@runCatching
+                val at = text.lastIndexOf("</manifest>")
+                if (at < 0) return@runCatching
+                target.setWritable(true); target.writeText(text.substring(0, at) + hal + text.substring(at)); target.setReadable(true, false)
+                log("${target.name}: radio@1.0 declared")
+            }.onFailure { log("radio HAL: declaration not added: ${it.message}"); return }
+        }
+        log("radio HAL: android.hardware.radio@1.0::IRadio/slot1 installed")
     }
 
     /**

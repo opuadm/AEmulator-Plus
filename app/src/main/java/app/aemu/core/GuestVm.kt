@@ -1270,6 +1270,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         if (s.radio) {
             if (cdmaPlan.cdma) log("radio: CDMA emulation on (" + (if (cdmaPlan.lteOnCdma) "firmware is LTE on CDMA" else "CDMA-only phone") + ")")
             else if (cdmaPlan.firmwareLteOnCdma) log("radio: firmware declares LTE on CDMA, CDMA emulation is off in settings: telephony.lteOnCdmaDevice cleared, GSM phone")
+            if (img.api >= 26) TreeFixer(ctx, paths, img, ::log).writeRadioHalConfig { ril.halConfig(it) }
             ril.serve()
         } else log("radio: emulation disabled in settings")
         vold.serve()
