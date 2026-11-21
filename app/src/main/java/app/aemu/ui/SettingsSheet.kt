@@ -68,7 +68,9 @@ import app.aemu.core.RamChoice
 import kotlin.math.roundToInt
 import app.aemu.core.VmSettings
 import app.aemu.core.WifiNetworkDef
+import app.aemu.core.WifiBand
 import app.aemu.core.WifiSecurity
+import app.aemu.core.WifiStandard
 import app.aemu.core.WifiEmu
 import app.aemu.core.VmStorageLease
 import app.aemu.core.VmDataReset
@@ -254,7 +256,7 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
             if (img.api in 29..33) Toggle(stringResource(R.string.vs_skip_perm_wait), stringResource(R.string.vs_skip_perm_wait_sub), s.skipPermissionWait) { s = s.copy(skipPermissionWait = it) }
             if (wifiOffered) {
                 Toggle(stringResource(R.string.vs_wifi), stringResource(R.string.vs_wifi_sub), s.wifi) { s = s.copy(wifi = it) }
-                if (s.wifi) WifiFields(s) { s = it }
+                if (s.wifi) WifiFields(s, img.api) { s = it }
             }
             if (img.api in 14..25) {
                 Toggle(stringResource(R.string.vs_camera), stringResource(R.string.vs_camera_sub), s.camera) { s = s.copy(camera = it) }
@@ -437,6 +439,47 @@ private fun SecurityPicker(sec: WifiSecurity, set: (WifiSecurity) -> Unit) {
     )
 }
 
+@Composable
+private fun <T> ChoicePicker(title: Int, value: T, options: List<T>, label: (T) -> Int, set: (T) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ListItem(
+        headlineContent = { Text(stringResource(title)) },
+        trailingContent = {
+            Box {
+                TextButton(onClick = { open = true }) { Text(stringResource(label(value))) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    for (v in options) DropdownMenuItem(text = { Text(stringResource(label(v))) }, onClick = { open = false; set(v) })
+                }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+private fun bandLabel(b: WifiBand) = when (b) {
+    WifiBand.GHZ24 -> R.string.vs_wifi_band_24
+    WifiBand.GHZ5 -> R.string.vs_wifi_band_5
+    WifiBand.DUAL -> R.string.vs_wifi_band_dual
+    WifiBand.GHZ6 -> R.string.vs_wifi_band_6
+}
+
+private fun standardLabel(v: WifiStandard) = when (v) {
+    WifiStandard.AUTO -> R.string.vs_wifi_std_auto
+    WifiStandard.N -> R.string.vs_wifi_std_n
+    WifiStandard.AC -> R.string.vs_wifi_std_ac
+    WifiStandard.AX -> R.string.vs_wifi_std_ax
+    WifiStandard.BE -> R.string.vs_wifi_std_be
+}
+
+@Composable
+private fun BandPicker(band: WifiBand, api: Int, set: (WifiBand) -> Unit) =
+    ChoicePicker(R.string.vs_wifi_band, band, WifiBand.entries.filter { it != WifiBand.GHZ6 || api >= WifiEmu.BAND6_API }, ::bandLabel, set)
+
+@Composable
+private fun StandardPicker(v: WifiStandard, api: Int, set: (WifiStandard) -> Unit) =
+    ChoicePicker(R.string.vs_wifi_standard, v, WifiStandard.entries.filter { it != WifiStandard.BE || api >= WifiEmu.WIFI7_API }, ::standardLabel, set)
+
 private fun signalBars(n: Int) = "▂▄▆█".take(n) + "·".repeat(WifiEmu.MAX_BARS - n)
 
 @Composable
@@ -496,7 +539,7 @@ private fun NetworkHeader(title: String, onRemove: (() -> Unit)?) {
 
 /** The emulated Wi-Fi networks: a count with + / -, then one block per network (name, security, password, signal). */
 @Composable
-private fun WifiFields(s: VmSettings, set: (VmSettings) -> Unit) {
+private fun WifiFields(s: VmSettings, api: Int, set: (VmSettings) -> Unit) {
     var show by remember { mutableStateOf(false) }
     ListItem(
         headlineContent = { Text(stringResource(R.string.vs_wifi_count)) },
@@ -527,6 +570,8 @@ private fun WifiFields(s: VmSettings, set: (VmSettings) -> Unit) {
         trailingIcon = { TextButton(onClick = { show = !show }) { Text(stringResource(if (show) R.string.vs_wifi_hide else R.string.vs_wifi_show)) } },
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
     SignalPicker(s.wifiSignal) { set(s.copy(wifiSignal = it)) }
+    BandPicker(s.wifiBand, api) { set(s.copy(wifiBand = it)) }
+    if (api >= WifiEmu.STANDARD_API) StandardPicker(s.wifiStandard, api) { set(s.copy(wifiStandard = it)) }
     SpeedField(s.wifiSpeed) { set(s.copy(wifiSpeed = it)) }
     s.wifiExtra.forEachIndexed { i, n ->
         fun upd(v: WifiNetworkDef) = set(s.copy(wifiExtra = s.wifiExtra.toMutableList().also { it[i] = v }))
@@ -545,6 +590,8 @@ private fun WifiFields(s: VmSettings, set: (VmSettings) -> Unit) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
         SignalPicker(n.signal) { upd(n.copy(signal = it)) }
+        BandPicker(n.band, api) { upd(n.copy(band = it)) }
+        if (api >= WifiEmu.STANDARD_API) StandardPicker(n.standard, api) { upd(n.copy(standard = it)) }
         SpeedField(n.speed) { upd(n.copy(speed = it)) }
     }
     HorizontalDivider(Modifier.padding(top = 8.dp))

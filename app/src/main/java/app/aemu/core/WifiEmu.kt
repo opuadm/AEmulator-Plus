@@ -167,6 +167,8 @@ object WifiEmu {
             setProperty("psk", if (secured(s)) s.wifiPassword else "")
             setProperty("bssid", bssid(ssid))
             setProperty("autoconnect", s.wifiAutoConnect.toString())
+            setProperty("band", s.wifiBand.id)
+            setProperty("standard", s.wifiStandard.id)
             setProperty("speedkbps", (speedKbps(s.wifiSpeed) ?: 0).toString())
             setProperty("mac", MAC)
             setProperty("ip", IP)
@@ -176,15 +178,20 @@ object WifiEmu {
             setProperty("dns2", DNS2)
             setProperty("rssi", rssiFor(s.wifiSignal).toString())
             setProperty("speed", "72")
-            setProperty("frequency", "2437")
+            setProperty("frequency", when (s.wifiBand) { WifiBand.GHZ24 -> "2437"; WifiBand.GHZ6 -> "5955"; else -> "5180" })
             val extras = usableExtras(s)
             if (extras.isNotEmpty()) setProperty("extras", extras.joinToString("\n") {
                 val n = cleanSsid(it.ssid)
                 val sec = if (it.security == WifiSecurity.NONE) "none" else it.security.id
-                "${hex(n)}|${if (it.security == WifiSecurity.NONE) "" else hex(it.password)}|${rssiFor(it.signal)}|${bssid(n)}|$sec|${speedKbps(it.speed) ?: 0}"
+                "${hex(n)}|${if (it.security == WifiSecurity.NONE) "" else hex(it.password)}|${rssiFor(it.signal)}|${bssid(n)}|$sec|${speedKbps(it.speed) ?: 0}|${it.band.id}|${it.standard.id}"
             })
         }
     }
+
+    /** Android 11: the Wi-Fi standard in WifiInfo and ScanResult. Android 12: 6 GHz (the public band constant). Android 13: Wi-Fi 7. */
+    const val STANDARD_API = 30
+    const val BAND6_API = 31
+    const val WIFI7_API = 33
 
     const val MAX_BARS = 4
     const val MAX_EXTRA = 31

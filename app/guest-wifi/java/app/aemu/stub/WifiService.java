@@ -59,6 +59,8 @@ final class WifiService extends Binder {
     private volatile int activeRssi;
     private volatile String activeBssid;
     private volatile int activeKbps;
+    private volatile int activeFreq = 2437;
+    private volatile int activeStd = 4;
     static final int DEFAULT_KBPS = 100000;
 
     private boolean enabled = true;
@@ -101,6 +103,10 @@ final class WifiService extends Binder {
         WifiConfig old = cfg;
         cfg = n;
         String a = activeSsid;
+        if (a != null) {
+            if (a.equals(n.ssid)) adoptMain();
+            else for (WifiConfig.Extra x : n.extras) if (x.ssid.equals(a)) adoptExtra(x);
+        }
         boolean drop = false;
         synchronized (this) {
             if (a != null && connected) {
@@ -196,13 +202,13 @@ final class WifiService extends Binder {
         String psk = unquote(c.preSharedKey);
         if (cfg.ssid.equals(name)) {
             boolean ok = cfg.secured ? psk != null && psk.equals(cfg.psk) : psk == null || psk.length() == 0;
-            if (ok) { activeSsid = cfg.ssid; activeSec = cfg.security; activeRssi = cfg.rssi; activeBssid = cfg.bssid; activeKbps = cfg.speedKbps; }
+            if (ok) adoptMain();
             return ok;
         }
         for (WifiConfig.Extra x : cfg.extras) {
             if (!x.ssid.equals(name)) continue;
             boolean ok = x.secured() ? psk != null && psk.equals(x.psk) : psk == null || psk.length() == 0;
-            if (ok) { activeSsid = x.ssid; activeSec = x.security; activeRssi = x.rssi; activeBssid = x.bssid; activeKbps = x.speedKbps; }
+            if (ok) adoptExtra(x);
             return ok;
         }
         // any other name is a network the user typed in: the host's connection is presented under it
@@ -211,7 +217,28 @@ final class WifiService extends Binder {
         activeRssi = cfg.rssi;
         activeBssid = cfg.bssid;
         activeKbps = 0;
+        activeFreq = 2437;
+        activeStd = WifiConfig.standardCode("auto", "24");
         return true;
+    }
+
+    private void adoptMain() {
+        WifiConfig c = cfg;
+        activeSsid = c.ssid; activeSec = c.security; activeRssi = c.rssi; activeBssid = c.bssid; activeKbps = c.speedKbps;
+        activeFreq = c.frequency; activeStd = WifiConfig.standardCode(c.standard, c.band);
+    }
+
+    private void adoptExtra(WifiConfig.Extra x) {
+        activeSsid = x.ssid; activeSec = x.security; activeRssi = x.rssi; activeBssid = x.bssid; activeKbps = x.speedKbps;
+        activeFreq = WifiConfig.connFreq(x.band); activeStd = WifiConfig.standardCode(x.standard, x.band);
+    }
+
+    int frequency() {
+        return activeSsid != null ? activeFreq : cfg.frequency;
+    }
+
+    int wifiStd() {
+        return activeSsid != null ? activeStd : WifiConfig.standardCode(cfg.standard, cfg.band);
     }
 
     private String ssid() {
@@ -297,7 +324,8 @@ final class WifiService extends Binder {
         Refl.call(wi, "setRssi", Integer.valueOf(rssi()));
         int cap = limitKbps();
         Refl.call(wi, "setLinkSpeed", Integer.valueOf(cap > 0 ? Math.max(1, cap / 1000) : cfg.speed));
-        Refl.call(wi, "setFrequency", Integer.valueOf(cfg.frequency));
+        Refl.call(wi, "setFrequency", Integer.valueOf(frequency()));
+        if (android.os.Build.VERSION.SDK_INT >= 30) Refl.call(wi, "setWifiStandard", Integer.valueOf(wifiStd()));
         Refl.call(wi, "setMeteredHint", Boolean.FALSE);
         try {
             Refl.call(wi, "setInetAddress", InetAddress.getByName(cfg.ip));
@@ -310,8 +338,12 @@ final class WifiService extends Binder {
         return wi;
     }
 
-    private Object scanResult() {
-        return scanResult(cfg.ssid, cfg.bssid, WifiConfig.caps(cfg.security), cfg.rssi, cfg.frequency);
+    private static void addScans(List<Parcelable> list, String name, String base, String security, int rssi, String band, String standard) {
+        for (int f : WifiConfig.freqs(band)) {
+            Object o = scanResult(name, WifiConfig.bssidAt(band, f, base), WifiConfig.caps(security), rssi, f,
+                    WifiConfig.standardCode(standard, f >= 5925 ? "6" : f >= 5000 ? "5" : "24"));
+            if (o instanceof Parcelable) list.add((Parcelable) o);
+        }
     }
 
     /** The network the user typed in (neither the configured one nor a listed one), once joined: it is in range too. */
@@ -323,7 +355,7 @@ final class WifiService extends Binder {
     }
 
     /** One entry of the scan list. */
-    private static Object scanResult(String name, String bssid, String caps, int rssi, int frequency) {
+    private static Object scanResult(String name, String bssid, String caps, int rssi, int frequency, int standard) {
         Class<?> ssidClass = Refl.cls("android.net.wifi.WifiSsid");
         Object ssid = wifiSsid(name);
         Object r = null;
@@ -371,6 +403,7 @@ final class WifiService extends Binder {
         Refl.setField(r, "capabilities", caps);
         Refl.setField(r, "level", Integer.valueOf(rssi));
         Refl.setField(r, "frequency", Integer.valueOf(frequency));
+        if (android.os.Build.VERSION.SDK_INT >= 30) Refl.setField(r, "wifiStandard", Integer.valueOf(standard));
         Refl.setField(r, "timestamp", Long.valueOf(SystemClock.elapsedRealtime() * 1000L));
         if (ssid != null) Refl.setField(r, "wifiSsid", ssid);
         return r;
@@ -583,16 +616,9 @@ final class WifiService extends Binder {
             writeParcelable(reply, wi instanceof Parcelable ? (Parcelable) wi : null);
         } else if (name.equals("getScanResults")) {
             List<Parcelable> list = new ArrayList<Parcelable>();
-            Object r = enabled ? scanResult() : null;
-            if (r instanceof Parcelable) list.add((Parcelable) r);
-            if (enabled) for (WifiConfig.Extra x : cfg.extras) {
-                Object o = scanResult(x.ssid, x.bssid, WifiConfig.caps(x.security), x.rssi, cfg.frequency);
-                if (o instanceof Parcelable) list.add((Parcelable) o);
-            }
-            if (enabled && joinedFreeForm()) {
-                Object o = scanResult(ssid(), bssid(), WifiConfig.caps(security()), rssi(), cfg.frequency);
-                if (o instanceof Parcelable) list.add((Parcelable) o);
-            }
+            if (enabled) addScans(list, cfg.ssid, cfg.base, cfg.security, cfg.rssi, cfg.band, cfg.standard);
+            if (enabled) for (WifiConfig.Extra x : cfg.extras) addScans(list, x.ssid, x.base, x.security, x.rssi, x.band, x.standard);
+            if (enabled && joinedFreeForm()) addScans(list, ssid(), bssid(), security(), rssi(), "24", "auto");
             writeList("getScanResults", list, reply);
         } else if (name.equals("getConfiguredNetworks") || name.equals("getPrivilegedConfiguredNetworks")) {
             List<Parcelable> list = new ArrayList<Parcelable>();

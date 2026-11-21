@@ -118,4 +118,16 @@ class WifiEmuTest {
         assertFalse(VmSettings.fromJson(org.json.JSONObject()).wifi)
         assertEquals(WifiEmu.DEFAULT_SSID, VmSettings.fromJson(org.json.JSONObject().put("wifiSsid", "")).wifiSsid)
     }
+    @Test fun bandAndStandardReachTheGuestAndSurviveJson() {
+        val s = VmSettings(wifi = true, wifiBand = WifiBand.DUAL, wifiStandard = WifiStandard.BE,
+            wifiExtra = listOf(WifiNetworkDef("Other", "password123", band = WifiBand.GHZ6, standard = WifiStandard.AC)))
+        val p = WifiEmu.properties(s)
+        assertEquals("dual", p.getProperty("band")); assertEquals("be", p.getProperty("standard"))
+        assertTrue(p.getProperty("extras").endsWith("|6|ac"))
+        val back = VmSettings.fromJson(s.toJson())
+        assertEquals(WifiBand.DUAL, back.wifiBand); assertEquals(WifiStandard.BE, back.wifiStandard)
+        assertEquals(WifiBand.GHZ6, back.wifiExtra[0].band); assertEquals(WifiStandard.AC, back.wifiExtra[0].standard)
+        assertEquals(WifiBand.GHZ24, VmSettings.fromJson(org.json.JSONObject()).wifiBand)
+        assertEquals(WifiStandard.AUTO, WifiStandard.fromId("nonsense"))
+    }
 }

@@ -130,6 +130,10 @@ data class VmSettings(
     val wifiSpeed: String = "",
     /** Security type of the emulated network. */
     val wifiSecurity: WifiSecurity = WifiSecurity.NONE,
+    /** Frequency band(s) of the emulated network (6 GHz only shows on Android 12+ guests). */
+    val wifiBand: WifiBand = WifiBand.GHZ24,
+    /** Wi-Fi standard the guest reports for the network (Android 11+); auto follows the band. */
+    val wifiStandard: WifiStandard = WifiStandard.AUTO,
     /** Fake SIM in slot 1 (see [SimCard]); blank fields = the operator of the firmware's APN list, as before. */
     val sim: SimCard = SimCard(),
     /** Second slot: only used with [dualSim] on firmware built for two SIMs. */
@@ -190,7 +194,7 @@ data class VmSettings(
         .put("disableGoogleApps", disableGoogleApps)
         .put("ramMb", ramMb).put("radio", radio).put("imei", imei).put("serial", serial).put("kernel", kernel).put("kernelBranch", kernelBranch).put("kernelCommit", kernelCommit).put("kernelUser", kernelUser).put("kernelHost", kernelHost).put("kernelCompiler", kernelCompiler).put("kernelBuild", kernelBuild).put("kernelFlags", kernelFlags).put("kernelDate", kernelDate).put("baseband", baseband).put("networkType", networkType).apply { if (cdma != null) put("cdma", cdma) }.put("qemuArgs", qemuArgs).put("straceServices", straceServices)
         .put("hardware", hardware)
-        .put("wifi", wifi).put("wifiSsid", wifiSsid).put("wifiPassword", wifiPassword).put("wifiSecurity", wifiSecurity.id).put("wifiAutoConnect", wifiAutoConnect).put("wifiSpeed", wifiSpeed)
+        .put("wifi", wifi).put("wifiSsid", wifiSsid).put("wifiPassword", wifiPassword).put("wifiSecurity", wifiSecurity.id).put("wifiAutoConnect", wifiAutoConnect).put("wifiSpeed", wifiSpeed).put("wifiBand", wifiBand.id).put("wifiStandard", wifiStandard.id)
         .put("sim", sim.toJson()).put("sim2", sim2.toJson()).put("dualSim", dualSim)
         .put("wifiSignal", wifiSignal)
         .put("wifiExtra", JSONArray(wifiExtra.map { it.toJson() }))
@@ -366,6 +370,8 @@ data class VmSettings(
                 wifiPassword = WifiEmu.cleanPassword(o.optString("wifiPassword", "")),
                 wifiAutoConnect = o.optBoolean("wifiAutoConnect", true),
                 wifiSpeed = WifiEmu.cleanSpeed(o.optString("wifiSpeed", "")),
+                wifiBand = WifiBand.fromId(o.optString("wifiBand", "")),
+                wifiStandard = WifiStandard.fromId(o.optString("wifiStandard", "")),
                 wifiSecurity = WifiSecurity.fromId(o.optString("wifiSecurity", ""), if (o.optString("wifiPassword", "").isEmpty()) WifiSecurity.NONE else WifiSecurity.WPA2),
                 sim = SimCard.fromJson(o.optJSONObject("sim")),
                 sim2 = o.optJSONObject("sim2")?.let { SimCard.fromJson(it) } ?: d.sim2,
@@ -392,14 +398,30 @@ enum class WifiSecurity(val id: String) {
     }
 }
 
-data class WifiNetworkDef(val ssid: String = "", val password: String = "", val signal: Int = WifiEmu.MAX_BARS, val security: WifiSecurity = WifiSecurity.WPA2, val speed: String = "") {
-    fun toJson(): JSONObject = JSONObject().put("ssid", ssid).put("password", password).put("signal", signal).put("security", security.id).put("speed", speed)
+enum class WifiBand(val id: String) {
+    GHZ24("24"), GHZ5("5"), DUAL("dual"), GHZ6("6");
+    companion object {
+        fun fromId(id: String) = entries.firstOrNull { it.id == id } ?: GHZ24
+    }
+}
+
+enum class WifiStandard(val id: String) {
+    AUTO("auto"), N("n"), AC("ac"), AX("ax"), BE("be");
+    companion object {
+        fun fromId(id: String) = entries.firstOrNull { it.id == id } ?: AUTO
+    }
+}
+
+data class WifiNetworkDef(val ssid: String = "", val password: String = "", val signal: Int = WifiEmu.MAX_BARS, val security: WifiSecurity = WifiSecurity.WPA2, val speed: String = "",
+                          val band: WifiBand = WifiBand.GHZ24, val standard: WifiStandard = WifiStandard.AUTO) {
+    fun toJson(): JSONObject = JSONObject().put("ssid", ssid).put("password", password).put("signal", signal).put("security", security.id).put("speed", speed).put("band", band.id).put("standard", standard.id)
     companion object {
         fun fromJson(o: JSONObject) = WifiNetworkDef(
             WifiEmu.cleanSsid(o.optString("ssid", "")), WifiEmu.cleanPassword(o.optString("password", "")),
             o.optInt("signal", WifiEmu.MAX_BARS).coerceIn(1, WifiEmu.MAX_BARS),
             WifiSecurity.fromId(o.optString("security", ""), if (o.optString("password", "").isEmpty()) WifiSecurity.NONE else WifiSecurity.WPA2),
-            WifiEmu.cleanSpeed(o.optString("speed", "")))
+            WifiEmu.cleanSpeed(o.optString("speed", "")),
+            WifiBand.fromId(o.optString("band", "")), WifiStandard.fromId(o.optString("standard", "")))
     }
 }
 

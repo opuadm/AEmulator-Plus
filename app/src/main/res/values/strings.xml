@@ -298,6 +298,17 @@
     <string name="vs_sim_number_sub">Shown in Settings › About phone › Status</string>
     <string name="vs_dual_sim">Dual SIM</string>
     <string name="vs_dual_sim_sub">A second fake SIM. Only works on firmware which supports two SIMs (many Samsung and MediaTek ones). Applies at the next boot.</string>
+    <string name="vs_wifi_band">Frequency band</string>
+    <string name="vs_wifi_band_24">2.4 GHz</string>
+    <string name="vs_wifi_band_5">5 GHz</string>
+    <string name="vs_wifi_band_dual">2.4 + 5 GHz</string>
+    <string name="vs_wifi_band_6">6 GHz</string>
+    <string name="vs_wifi_standard">Wi-Fi standard</string>
+    <string name="vs_wifi_std_auto">Automatic</string>
+    <string name="vs_wifi_std_n">Wi-Fi 4 (802.11n)</string>
+    <string name="vs_wifi_std_ac">Wi-Fi 5 (802.11ac)</string>
+    <string name="vs_wifi_std_ax">Wi-Fi 6 (802.11ax)</string>
+    <string name="vs_wifi_std_be">Wi-Fi 7 (802.11be)</string>
     <string name="vs_wifi_signal">Signal strength</string>
     <string name="vs_wifi_signal_sub">Bars the Wi-Fi icon shows</string>
     <string name="camera_permission_denied">Camera permission denied. The ROM will boot without host-camera access; grant permission in Android app settings and fully restart the VM to retry.</string>
