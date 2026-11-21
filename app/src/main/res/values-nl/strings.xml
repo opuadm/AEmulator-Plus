@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Een tweede nep-simkaart. Alleen firmware die voor twee simkaarten is gebouwd gebruikt deze (veel Samsung- en MediaTek-firmware). Wordt toegepast bij de volgende start.</string>
     <string name="vs_wifi_signal">Signaalsterkte</string>
     <string name="vs_wifi_signal_sub">Aantal streepjes dat het wifi-pictogram toont</string>
-    <string name="vs_wifi_neighbors">Netwerken in de buurt</string>
-    <string name="vs_wifi_neighbors_sub">De wifi-lijst toont ook een paar andere netwerken (vergrendeld, er kan niet mee worden verbonden)</string>
     <string name="camera_permission_denied">Cameratoestemming geweigerd. De ROM start zonder toegang tot de hostcamera; geef toestemming in de Android-app-instellingen en herstart de VM volledig om het opnieuw te proberen.</string>
     <string name="vs_skip_setup">Installatiewizard overslaan</string>
     <string name="vs_skip_setup_sub">Markeer de installatie als voltooid en schakel herkende installatie-apps uit bij de volgende volledige start. Uitzetten maakt een voltooide installatie niet ongedaan. De ondersteuning kan per fabrikant verschillen.</string>

@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">მეორე ყალბი SIM. მუშაობს მხოლოდ ფირმვერზე, რომელიც ორ SIM-ს უჭერს მხარს (ბევრი Samsung-ისა და MediaTek-ის). გამოიყენება შემდეგი ჩატვირთვისას.</string>
     <string name="vs_wifi_signal">სიგნალის სიძლიერე</string>
     <string name="vs_wifi_signal_sub">Wi-Fi-ის ხატულაზე ნაჩვენები დანაყოფები</string>
-    <string name="vs_wifi_neighbors">ახლომდებარე ქსელები</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi ქსელების სიაში აჩვენებს რამდენიმე სხვა ქსელს. (დაბლოკილია, მათთან დაკავშირება შეუძლებელია)</string>
     <string name="camera_permission_denied">კამერის ნებართვა უარყოფილია. ROM ჩაიტვირთება ჰოსტის კამერაზე წვდომის გარეშე; მიანიჭეთ ნებართვა Android-ის აპის პარამეტრებში და VM სრულად გადატვირთეთ ხელახლა საცდელად.</string>
     <string name="vs_skip_setup">საწყისი დაყენების გამოტოვება</string>
     <string name="vs_skip_setup_sub">დაყენებას დასრულებულად მონიშნავს და ცნობილ დაყენების აპებს გამორთავს შემდეგი სრული ჩატვირთვისას. გამორთვა დასრულებულ დაყენებას არ აბრუნებს. OEM-ის მხარდაჭერა შეიძლება განსხვავდებოდეს.</string>

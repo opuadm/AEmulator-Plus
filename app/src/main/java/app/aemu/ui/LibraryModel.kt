@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import app.aemu.core.GuestImage
 import app.aemu.core.ImageStore
 import app.aemu.core.VmSettings
+import app.aemu.core.WifiEmu
 import app.aemu.importer.Importer
 import app.aemu.importer.PartitionChooser
 import app.aemu.importer.PartitionPrompt
@@ -157,7 +158,23 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
     fun rename(img: GuestImage, name: String) = update(img) { it.copy(name = name) }
 
     /** [name] is the new machine name from the settings sheet; null or blank keeps the current one. */
-    fun updateSettings(img: GuestImage, s: VmSettings, name: String? = null) =
+    fun updateSettings(img: GuestImage, s: VmSettings, name: String? = null) {
+        pushWifi(img, s)
+        updateImage(img, s, name)
+    }
+
+    /** A guest that booted with the emulated Wi-Fi picks the rewritten file up within a second (see guest-wifi WifiStub). */
+    private fun pushWifi(img: GuestImage, s: VmSettings) {
+        if (!s.wifi) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val root = app.aemu.core.VmPaths(getApplication(), img.id).root
+                if (java.io.File(root, WifiEmu.FILE).isFile) WifiEmu.write(root, s, true)
+            }
+        }
+    }
+
+    private fun updateImage(img: GuestImage, s: VmSettings, name: String?) =
         update(img) { it.copy(settings = s, name = name?.trim()?.takeIf { n -> n.isNotEmpty() } ?: it.name) }
 
     private fun update(img: GuestImage, f: (GuestImage) -> GuestImage) {

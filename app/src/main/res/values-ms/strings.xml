@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">SIM palsu kedua. Hanya perisian tegar yang dibina untuk dua SIM menggunakannya (banyak yang daripada Samsung dan MediaTek). Berkuat kuasa pada but seterusnya.</string>
     <string name="vs_wifi_signal">Kekuatan isyarat</string>
     <string name="vs_wifi_signal_sub">Bilangan bar yang dipaparkan ikon Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Rangkaian berdekatan</string>
-    <string name="vs_wifi_neighbors_sub">Senarai Wi-Fi turut menunjukkan beberapa rangkaian lain (berkunci, tidak boleh disertai)</string>
     <string name="camera_permission_denied">Kebenaran kamera ditolak. ROM akan but tanpa akses kamera hos; berikan kebenaran dalam tetapan aplikasi Android dan mulakan semula VM sepenuhnya untuk mencuba lagi.</string>
     <string name="vs_skip_setup">Langkau wizard persediaan</string>
     <string name="vs_skip_setup_sub">Tandakan persediaan sebagai selesai dan lumpuhkan aplikasi persediaan yang dikenali pada but penuh seterusnya. Mematikannya tidak menetapkan semula persediaan yang telah selesai. Sokongan OEM mungkin berbeza.</string>

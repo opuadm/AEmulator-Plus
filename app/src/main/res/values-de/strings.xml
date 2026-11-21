@@ -359,8 +359,6 @@
     <string name="vs_dual_sim_sub">Eine zweite gefälschte SIM. Nur Firmware, die für zwei SIMs gebaut wurde, nutzt sie (viele von Samsung und MediaTek). Gilt ab dem nächsten Start.</string>
     <string name="vs_wifi_signal">Signalstärke</string>
     <string name="vs_wifi_signal_sub">Balken, die das WLAN-Symbol anzeigt</string>
-    <string name="vs_wifi_neighbors">Netzwerke in der Nähe</string>
-    <string name="vs_wifi_neighbors_sub">Die WLAN-Liste zeigt auch einige andere Netzwerke (gesperrt, ein Beitritt ist nicht möglich)</string>
     <string name="vs_gyro_lock">Gyroskop-Ausrichtung sperren</string>
     <string name="vs_gyro_lock_sub">0° / 180° fixiert die Bewegungssensoren des Hosts auf eine feste Ausrichtung: Die Schwerkraft bleibt konstant und das Gyroskop meldet null, sodass der Gast nie automatisch dreht. „Kein Gyroskop“ blendet das Gyroskop für den Gast vollständig aus (nützlich, wenn es sich fehlerhaft verhält); Beschleunigungssensor und Magnetometer bleiben echt. Wirkt nach einem vollständigen Neustart der VM.</string>
     <string name="vs_gyro_disabled">Deaktiviert</string>

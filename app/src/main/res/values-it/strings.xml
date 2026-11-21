@@ -360,8 +360,6 @@
     <string name="vs_dual_sim_sub">Una seconda SIM finta. La usano solo i firmware progettati per due SIM (molti Samsung e MediaTek). Si applica al prossimo avvio.</string>
     <string name="vs_wifi_signal">Intensità del segnale</string>
     <string name="vs_wifi_signal_sub">Tacche mostrate dall’icona Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Reti nelle vicinanze</string>
-    <string name="vs_wifi_neighbors_sub">L’elenco Wi-Fi mostra anche alcune altre reti (protette, non è possibile collegarsi)</string>
     <string name="vs_gyro_lock">Blocca l’orientamento del giroscopio</string>
     <string name="vs_gyro_lock_sub">0° / 180° fissa i sensori di movimento dell’host su un orientamento fisso: la gravità resta costante e il giroscopio legge zero, quindi l’ospite non ruota mai automaticamente. «Nessun giroscopio» nasconde completamente il giroscopio all’ospite (usalo se il giroscopio dà problemi); accelerometro e magnetometro restano reali. Ha effetto dopo un riavvio completo della VM.</string>
     <string name="vs_gyro_disabled">Disattivato</string>

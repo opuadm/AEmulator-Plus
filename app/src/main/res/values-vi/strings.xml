@@ -358,8 +358,6 @@
     <string name="vs_dual_sim_sub">Một SIM giả thứ hai. Chỉ firmware được làm cho hai SIM mới dùng nó (nhiều máy Samsung và MediaTek). Áp dụng ở lần khởi động sau.</string>
     <string name="vs_wifi_signal">Cường độ tín hiệu</string>
     <string name="vs_wifi_signal_sub">Số vạch mà biểu tượng Wi-Fi hiển thị</string>
-    <string name="vs_wifi_neighbors">Mạng lân cận</string>
-    <string name="vs_wifi_neighbors_sub">Danh sách Wi-Fi cũng hiển thị một vài mạng khác (bị khóa, không thể tham gia)</string>
     <string name="vs_gyro_lock">Khóa hướng con quay hồi chuyển</string>
     <string name="vs_gyro_lock_sub">0° / 180° cố định các cảm biến chuyển động của máy chủ ở một hướng nhất định: trọng lực giữ nguyên và con quay hồi chuyển đọc ra số không, nên máy khách không bao giờ tự xoay. “Không có con quay hồi chuyển” ẩn hoàn toàn con quay hồi chuyển khỏi máy khách (dùng khi con quay hoạt động bất thường); gia tốc kế và từ kế vẫn là thật. Có hiệu lực sau khi khởi động lại hoàn toàn máy ảo.</string>
     <string name="vs_gyro_disabled">Đã tắt</string>

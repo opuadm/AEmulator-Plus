@@ -361,8 +361,6 @@
     <string name="vs_dual_sim_sub">Druga fałszywa karta SIM. Korzysta z niej tylko firmware zbudowany dla dwóch kart SIM (wiele z Samsunga i MediaTeka). Działa od następnego uruchomienia.</string>
     <string name="vs_wifi_signal">Siła sygnału</string>
     <string name="vs_wifi_signal_sub">Kreski pokazywane przez ikonę Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Pobliskie sieci</string>
-    <string name="vs_wifi_neighbors_sub">Lista Wi-Fi pokazuje też kilka innych sieci (zabezpieczonych, nie można do nich dołączyć)</string>
     <string name="vs_gyro_lock">Zablokuj orientację żyroskopu</string>
     <string name="vs_gyro_lock_sub">0° / 180° przypina czujniki ruchu hosta do stałej orientacji: grawitacja pozostaje bez zmian, a żyroskop odczytuje zero, więc gość nigdy nie obraca się automatycznie. „Brak żyroskopu” całkowicie ukrywa żyroskop przed gościem (użyj, jeśli żyroskop działa nieprawidłowo); akcelerometr i magnetometr pozostają prawdziwe. Zadziała po pełnym restarcie maszyny wirtualnej.</string>
     <string name="vs_gyro_disabled">Wyłączone</string>

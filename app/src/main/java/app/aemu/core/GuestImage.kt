@@ -122,8 +122,14 @@ data class VmSettings(
     val wifi: Boolean = false,
     /** Name of the emulated Wi-Fi network. */
     val wifiSsid: String = WifiEmu.DEFAULT_SSID,
-    /** WPA2 passphrase of the emulated network; blank = open network. */
+    /** Passphrase of the emulated network (not used when [wifiSecurity] is open). */
     val wifiPassword: String = "",
+    /** Joined to [wifiSsid] at boot; off = the guest starts without a connection and joins from its own Settings. */
+    val wifiAutoConnect: Boolean = true,
+    /** Speed limit of the emulated network as typed ("50 Mbps", "800 Kbps", "1 Gbps"); blank = no limit. See [WifiEmu.speedKbps]. */
+    val wifiSpeed: String = "",
+    /** Security type of the emulated network. */
+    val wifiSecurity: WifiSecurity = WifiSecurity.NONE,
     /** Fake SIM in slot 1 (see [SimCard]); blank fields = the operator of the firmware's APN list, as before. */
     val sim: SimCard = SimCard(),
     /** Second slot: only used with [dualSim] on firmware built for two SIMs. */
@@ -131,8 +137,8 @@ data class VmSettings(
     val dualSim: Boolean = false,
     /** Bars the emulated Wi-Fi shows, 1..4 (see [WifiEmu.rssiFor]). */
     val wifiSignal: Int = WifiEmu.MAX_BARS,
-    /** A scan also lists a few other (locked) networks nearby. */
-    val wifiNeighbors: Boolean = true,
+    /** More joinable networks next to [wifiSsid], each with its own name, password and signal (at most [WifiEmu.MAX_EXTRA]). */
+    val wifiExtra: List<WifiNetworkDef> = emptyList(),
     /** Guest thermal_zone17 shows the phone's real sensor; off (default) = a constant cool 30 C (see [ThermalSysfs]). */
     val thermalPassthrough: Boolean = false,
     /** Value of thermal_zone17/temp in millidegrees set by the user; null = follow [thermalPassthrough]. */
@@ -184,9 +190,10 @@ data class VmSettings(
         .put("disableGoogleApps", disableGoogleApps)
         .put("ramMb", ramMb).put("radio", radio).put("imei", imei).put("serial", serial).put("kernel", kernel).put("kernelBranch", kernelBranch).put("kernelCommit", kernelCommit).put("kernelUser", kernelUser).put("kernelHost", kernelHost).put("kernelCompiler", kernelCompiler).put("kernelBuild", kernelBuild).put("kernelFlags", kernelFlags).put("kernelDate", kernelDate).put("baseband", baseband).put("networkType", networkType).apply { if (cdma != null) put("cdma", cdma) }.put("qemuArgs", qemuArgs).put("straceServices", straceServices)
         .put("hardware", hardware)
-        .put("wifi", wifi).put("wifiSsid", wifiSsid).put("wifiPassword", wifiPassword)
+        .put("wifi", wifi).put("wifiSsid", wifiSsid).put("wifiPassword", wifiPassword).put("wifiSecurity", wifiSecurity.id).put("wifiAutoConnect", wifiAutoConnect).put("wifiSpeed", wifiSpeed)
         .put("sim", sim.toJson()).put("sim2", sim2.toJson()).put("dualSim", dualSim)
-        .put("wifiSignal", wifiSignal).put("wifiNeighbors", wifiNeighbors)
+        .put("wifiSignal", wifiSignal)
+        .put("wifiExtra", JSONArray(wifiExtra.map { it.toJson() }))
         .put("thermalPassthrough", thermalPassthrough).put("thermalTemp", thermalTemp ?: JSONObject.NULL)
         .put("disableWatchdog", disableWatchdog)
         .put("skipPermissionWait", skipPermissionWait)
@@ -357,11 +364,14 @@ data class VmSettings(
                 wifi = o.optBoolean("wifi", d.wifi),
                 wifiSsid = WifiEmu.cleanSsid(o.optString("wifiSsid", d.wifiSsid)).ifEmpty { WifiEmu.DEFAULT_SSID },
                 wifiPassword = WifiEmu.cleanPassword(o.optString("wifiPassword", "")),
+                wifiAutoConnect = o.optBoolean("wifiAutoConnect", true),
+                wifiSpeed = WifiEmu.cleanSpeed(o.optString("wifiSpeed", "")),
+                wifiSecurity = WifiSecurity.fromId(o.optString("wifiSecurity", ""), if (o.optString("wifiPassword", "").isEmpty()) WifiSecurity.NONE else WifiSecurity.WPA2),
                 sim = SimCard.fromJson(o.optJSONObject("sim")),
                 sim2 = o.optJSONObject("sim2")?.let { SimCard.fromJson(it) } ?: d.sim2,
                 dualSim = o.optBoolean("dualSim", false),
                 wifiSignal = o.optInt("wifiSignal", d.wifiSignal).coerceIn(1, WifiEmu.MAX_BARS),
-                wifiNeighbors = o.optBoolean("wifiNeighbors", d.wifiNeighbors),
+                wifiExtra = o.optJSONArray("wifiExtra")?.let { a -> (0 until minOf(a.length(), WifiEmu.MAX_EXTRA)).mapNotNull { a.optJSONObject(it)?.let(WifiNetworkDef::fromJson) } } ?: emptyList(),
                 thermalPassthrough = o.optBoolean("thermalPassthrough", d.thermalPassthrough),
                 thermalTemp = if (o.has("thermalTemp") && !o.isNull("thermalTemp")) o.optInt("thermalTemp").coerceIn(ThermalSysfs.MIN_MILLI_C, ThermalSysfs.MAX_MILLI_C) else null,
                 disableWatchdog = o.optBoolean("disableWatchdog", d.disableWatchdog),
@@ -374,6 +384,25 @@ data class VmSettings(
 }
 
 /** Служба гостя, которую мы запускаем вместо init. */
+/** One extra emulated Wi-Fi network: name, WPA2 passphrase (blank = open) and bars. */
+enum class WifiSecurity(val id: String) {
+    NONE("none"), WPA2("wpa2"), WPA_WPA2("wpa"), WPA3("wpa3");
+    companion object {
+        fun fromId(id: String, fallback: WifiSecurity) = entries.firstOrNull { it.id == id } ?: fallback
+    }
+}
+
+data class WifiNetworkDef(val ssid: String = "", val password: String = "", val signal: Int = WifiEmu.MAX_BARS, val security: WifiSecurity = WifiSecurity.WPA2, val speed: String = "") {
+    fun toJson(): JSONObject = JSONObject().put("ssid", ssid).put("password", password).put("signal", signal).put("security", security.id).put("speed", speed)
+    companion object {
+        fun fromJson(o: JSONObject) = WifiNetworkDef(
+            WifiEmu.cleanSsid(o.optString("ssid", "")), WifiEmu.cleanPassword(o.optString("password", "")),
+            o.optInt("signal", WifiEmu.MAX_BARS).coerceIn(1, WifiEmu.MAX_BARS),
+            WifiSecurity.fromId(o.optString("security", ""), if (o.optString("password", "").isEmpty()) WifiSecurity.NONE else WifiSecurity.WPA2),
+            WifiEmu.cleanSpeed(o.optString("speed", "")))
+    }
+}
+
 data class GuestService(
     val name: String,
     val argv: List<String>,

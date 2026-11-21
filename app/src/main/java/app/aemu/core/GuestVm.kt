@@ -1439,7 +1439,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         val wifiOn = settings.wifi && wifiSupported && File(paths.root, WifiEmu.JAR_PATH).isFile
         if (settings.wifi && wifiSupported && !wifiOn) log("wifi: ${WifiEmu.JAR_NAME} is not installed (build guest-wifi/build.sh), the guest keeps its normal network")
         WifiEmu.write(paths.root, settings, wifiOn)
-        if (wifiOn) log("wifi: emulated network \"${settings.wifiSsid}\" (${if (WifiEmu.secured(settings)) "WPA2" else "open"})")
+        if (wifiOn) log("wifi: emulated network \"${settings.wifiSsid}\" (${if (WifiEmu.secured(settings)) settings.wifiSecurity.id else "open"})")
         // (debugging, see Kernel64.syncLog: only the first N services are started, then the guest is left as it is)
         val stopAfter = if (engine == Engine.N64 && kernel.syncLog) runCatching { File(paths.root, "dev/.aemu-stop-after").readText().trim().toInt() }.getOrNull() else null
         if (stopAfter != null) log("stop-after $stopAfter of: " + plan.filter { !it.onDemand }.mapIndexed { i, s -> "$i ${s.name}" }.joinToString())

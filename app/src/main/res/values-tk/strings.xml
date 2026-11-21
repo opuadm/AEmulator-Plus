@@ -276,8 +276,6 @@
     <string name="vs_dual_sim_sub">Ikinji galp SIM. Diňe iki SIM kartany goldaýan proşiwkalarda işleýär (köp Samsung we MediaTek). Indiki ýüklenmede ulanylýar.</string>
     <string name="vs_wifi_signal">Signalyň güýji</string>
     <string name="vs_wifi_signal_sub">Wi-Fi nyşanynda görkezilýän çyzyklar</string>
-    <string name="vs_wifi_neighbors">Ýakyndaky torlar</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi torlarynyň sanawynda ýene birnäçe tory görkezýär. (gulplanan, olara birigip bolmaýar)</string>
     <string name="camera_permission_denied">Kamera rugsady ret edildi. ROM host kamerasyna girelgesiz ýüklener; Android programma sazlamalarynda rugsat beriň we gaýtadan synanyşmak üçin VM-i doly täzeden başladyň.</string>
     <string name="vs_skip_setup">Gurnama ussasyny geç</string>
     <string name="vs_skip_setup_sub">Indiki doly ýüklenmede gurnamany tamamlandy diýip bellär we tanalan gurnama programmalaryny öçürer. Öçürmek tamamlanan gurnamany asyl ýagdaýyna getirmeýär. OEM goldawy tapawutly bolup biler.</string>

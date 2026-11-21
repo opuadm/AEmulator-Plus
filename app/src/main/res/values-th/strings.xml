@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">ซิมปลอมใบที่สอง ใช้ได้เฉพาะเฟิร์มแวร์ที่สร้างมาสำหรับสองซิม (Samsung และ MediaTek หลายรุ่น) มีผลเมื่อบูตครั้งถัดไป</string>
     <string name="vs_wifi_signal">ความแรงสัญญาณ</string>
     <string name="vs_wifi_signal_sub">จำนวนขีดที่ไอคอน Wi-Fi แสดง</string>
-    <string name="vs_wifi_neighbors">เครือข่ายใกล้เคียง</string>
-    <string name="vs_wifi_neighbors_sub">รายการ Wi-Fi จะแสดงเครือข่ายอื่นอีกสองสามเครือข่ายด้วย (ล็อกอยู่ เข้าร่วมไม่ได้)</string>
     <string name="camera_permission_denied">ไม่ได้รับสิทธิ์กล้อง รอมจะบูตโดยไม่มีสิทธิ์เข้าถึงกล้องของโฮสต์; ให้สิทธิ์ในการตั้งค่าแอปของ Android แล้วรีสตาร์ท VM ทั้งหมดเพื่อลองอีกครั้ง</string>
     <string name="vs_skip_setup">ข้ามตัวช่วยตั้งค่า</string>
     <string name="vs_skip_setup_sub">ทำเครื่องหมายว่าตั้งค่าเสร็จแล้วและปิดใช้งานแอปตั้งค่าที่รู้จักเมื่อบูตเต็มรูปแบบครั้งถัดไป การปิดตัวเลือกนี้จะไม่รีเซ็ตการตั้งค่าที่เสร็จแล้ว การรองรับอาจแตกต่างกันไปตามผู้ผลิต</string>

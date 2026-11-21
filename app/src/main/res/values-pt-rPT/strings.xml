@@ -358,8 +358,6 @@
     <string name="vs_wifi_hide">Ocultar</string>
     <string name="vs_wifi_signal">Intensidade do sinal</string>
     <string name="vs_wifi_signal_sub">Barras que o ícone de Wi-Fi mostra</string>
-    <string name="vs_wifi_neighbors">Redes próximas</string>
-    <string name="vs_wifi_neighbors_sub">A lista de Wi-Fi mostra também algumas outras redes (bloqueadas, não é possível ligar-se a elas)</string>
     <string name="vs_sim_title">Cartões SIM</string>
     <string name="vs_sim_present">Cartão SIM inserido</string>
     <string name="vs_sim2_present">Segundo cartão SIM inserido</string>

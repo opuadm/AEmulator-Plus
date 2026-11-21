@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -66,6 +67,8 @@ import app.aemu.core.NetworkType
 import app.aemu.core.RamChoice
 import kotlin.math.roundToInt
 import app.aemu.core.VmSettings
+import app.aemu.core.WifiNetworkDef
+import app.aemu.core.WifiSecurity
 import app.aemu.core.WifiEmu
 import app.aemu.core.VmStorageLease
 import app.aemu.core.VmDataReset
@@ -365,7 +368,7 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
             }
             resetMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             // fields that are not shown cannot hold Save back
-            val wifiOk = !(s.wifi && wifiOffered) || (WifiEmu.cleanSsid(s.wifiSsid).isNotEmpty() && WifiEmu.passwordValid(s.wifiPassword))
+            val wifiOk = !(s.wifi && wifiOffered) || (WifiEmu.cleanSsid(s.wifiSsid).isNotEmpty() && WifiEmu.mainValid(s) && WifiEmu.extrasValid(s))
             Button(enabled = !resetting && wifiOk, onClick = { onSave(s, name) }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(stringResource(R.string.save)) }
             Spacer(Modifier.height(16.dp))
         }
@@ -410,40 +413,142 @@ internal fun Toggle(title: String, sub: String, on: Boolean, set: (Boolean) -> U
     )
 }
 
-/** Name and optional password of the emulated Wi-Fi network (blank password = open network). */
 @Composable
-private fun WifiFields(s: VmSettings, set: (VmSettings) -> Unit) {
-    var show by remember { mutableStateOf(false) }
-    OutlinedTextField(value = s.wifiSsid, onValueChange = { set(s.copy(wifiSsid = WifiEmu.cleanSsid(it))) },
-        label = { Text(stringResource(R.string.vs_wifi_ssid)) }, singleLine = true,
-        isError = s.wifiSsid.isEmpty(),
-        supportingText = { Text(stringResource(if (s.wifiSsid.isEmpty()) R.string.vs_wifi_ssid_error else R.string.vs_wifi_ssid_sub)) },
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
-    OutlinedTextField(value = s.wifiPassword, onValueChange = { set(s.copy(wifiPassword = WifiEmu.cleanPassword(it))) },
-        label = { Text(stringResource(R.string.vs_wifi_password)) }, singleLine = true,
-        isError = !WifiEmu.passwordValid(s.wifiPassword),
-        supportingText = { Text(stringResource(if (WifiEmu.passwordValid(s.wifiPassword)) R.string.vs_wifi_password_sub else R.string.vs_wifi_password_error)) },
-        visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        trailingIcon = { TextButton(onClick = { show = !show }) { Text(stringResource(if (show) R.string.vs_wifi_hide else R.string.vs_wifi_show)) } },
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+private fun SecurityPicker(sec: WifiSecurity, set: (WifiSecurity) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    fun bars(n: Int) = "▂▄▆█".take(n) + "·".repeat(WifiEmu.MAX_BARS - n)
+    fun label(v: WifiSecurity) = when (v) {
+        WifiSecurity.NONE -> R.string.vs_wifi_sec_none
+        WifiSecurity.WPA2 -> R.string.vs_wifi_sec_wpa2
+        WifiSecurity.WPA_WPA2 -> R.string.vs_wifi_sec_wpa
+        WifiSecurity.WPA3 -> R.string.vs_wifi_sec_wpa3
+    }
     ListItem(
-        headlineContent = { Text(stringResource(R.string.vs_wifi_signal)) },
-        supportingContent = { Text(stringResource(R.string.vs_wifi_signal_sub)) },
+        headlineContent = { Text(stringResource(R.string.vs_wifi_security)) },
         trailingContent = {
             Box {
-                TextButton(onClick = { open = true }) { Text(bars(s.wifiSignal)) }
+                TextButton(onClick = { open = true }) { Text(stringResource(label(sec))) }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                    for (n in WifiEmu.MAX_BARS downTo 1) DropdownMenuItem(text = { Text(bars(n)) }, onClick = { open = false; set(s.copy(wifiSignal = n)) })
+                    for (v in WifiSecurity.entries) DropdownMenuItem(text = { Text(stringResource(label(v))) }, onClick = { open = false; set(v) })
                 }
             }
         },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.fillMaxWidth(),
     )
-    Toggle(stringResource(R.string.vs_wifi_neighbors), stringResource(R.string.vs_wifi_neighbors_sub), s.wifiNeighbors) { set(s.copy(wifiNeighbors = it)) }
+}
+
+private fun signalBars(n: Int) = "▂▄▆█".take(n) + "·".repeat(WifiEmu.MAX_BARS - n)
+
+@Composable
+private fun SignalPicker(bars: Int, set: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_wifi_signal)) },
+        supportingContent = { Text(stringResource(R.string.vs_wifi_signal_sub)) },
+        trailingContent = {
+            Box {
+                TextButton(onClick = { open = true }) { Text(signalBars(bars)) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    for (n in WifiEmu.MAX_BARS downTo 1) DropdownMenuItem(text = { Text(signalBars(n)) }, onClick = { open = false; set(n) })
+                }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+@Composable
+private fun SpeedField(text: String, set: (String) -> Unit) {
+    val kbps = WifiEmu.speedKbps(text)
+    val (number, unit) = WifiEmu.speedParts(text)
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.Top) {
+        OutlinedTextField(value = number,
+            onValueChange = { v -> set(WifiEmu.speedJoin(v.filter { it.isDigit() || it == '.' || it == ',' }.take(12), unit)) },
+            label = { Text(stringResource(R.string.vs_wifi_speed)) }, singleLine = true,
+            placeholder = { Text(stringResource(R.string.vs_wifi_speed_hint)) },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            isError = kbps == null,
+            supportingText = { Text(when {
+                kbps == null -> stringResource(R.string.vs_wifi_speed_error)
+                kbps == 0 -> stringResource(R.string.vs_wifi_speed_none)
+                else -> stringResource(R.string.vs_wifi_speed_set, WifiEmu.speedText(kbps))
+            }) },
+            modifier = Modifier.weight(1f))
+        Box(Modifier.padding(start = 8.dp, top = 8.dp)) {
+            OutlinedButton(onClick = { open = true }) { Text(unit) }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                for (u in WifiEmu.SPEED_UNITS) DropdownMenuItem(text = { Text(u) }, onClick = { open = false; set(WifiEmu.speedJoin(number, u)) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun NetworkHeader(title: String, onRemove: (() -> Unit)?) {
+    HorizontalDivider(Modifier.padding(top = 8.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 8.dp))
+        if (onRemove != null) TextButton(onClick = onRemove) { Text(stringResource(R.string.vs_wifi_extra_remove)) }
+    }
+}
+
+/** The emulated Wi-Fi networks: a count with + / -, then one block per network (name, security, password, signal). */
+@Composable
+private fun WifiFields(s: VmSettings, set: (VmSettings) -> Unit) {
+    var show by remember { mutableStateOf(false) }
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_wifi_count)) },
+        supportingContent = { Text(stringResource(R.string.vs_wifi_count_sub)) },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(enabled = s.wifiExtra.isNotEmpty(), onClick = { set(s.copy(wifiExtra = s.wifiExtra.dropLast(1))) }) { Text("−") }
+                Text((s.wifiExtra.size + 1).toString(), modifier = Modifier.padding(horizontal = 12.dp))
+                OutlinedButton(enabled = s.wifiExtra.size < WifiEmu.MAX_EXTRA, onClick = { set(s.copy(wifiExtra = s.wifiExtra + WifiNetworkDef())) }) { Text("+") }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    NetworkHeader(stringResource(R.string.vs_wifi_network_n, 1), null)
+    OutlinedTextField(value = s.wifiSsid, onValueChange = { set(s.copy(wifiSsid = WifiEmu.cleanSsid(it))) },
+        label = { Text(stringResource(R.string.vs_wifi_ssid)) }, singleLine = true,
+        isError = s.wifiSsid.isEmpty(),
+        supportingText = { Text(stringResource(if (s.wifiSsid.isEmpty()) R.string.vs_wifi_ssid_error else R.string.vs_wifi_ssid_sub)) },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+    SecurityPicker(s.wifiSecurity) { set(s.copy(wifiSecurity = it)) }
+    if (s.wifiSecurity != WifiSecurity.NONE) OutlinedTextField(value = s.wifiPassword, onValueChange = { set(s.copy(wifiPassword = WifiEmu.cleanPassword(it))) },
+        label = { Text(stringResource(R.string.vs_wifi_password)) }, singleLine = true,
+        isError = !WifiEmu.mainValid(s),
+        supportingText = { Text(stringResource(if (WifiEmu.mainValid(s)) R.string.vs_wifi_secure_sub else R.string.vs_wifi_password_need)) },
+        visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        trailingIcon = { TextButton(onClick = { show = !show }) { Text(stringResource(if (show) R.string.vs_wifi_hide else R.string.vs_wifi_show)) } },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+    SignalPicker(s.wifiSignal) { set(s.copy(wifiSignal = it)) }
+    SpeedField(s.wifiSpeed) { set(s.copy(wifiSpeed = it)) }
+    s.wifiExtra.forEachIndexed { i, n ->
+        fun upd(v: WifiNetworkDef) = set(s.copy(wifiExtra = s.wifiExtra.toMutableList().also { it[i] = v }))
+        val dup = WifiEmu.cleanSsid(n.ssid).let { it.isNotEmpty() && (it == WifiEmu.cleanSsid(s.wifiSsid) || s.wifiExtra.take(i).any { p -> WifiEmu.cleanSsid(p.ssid) == it }) }
+        NetworkHeader(stringResource(R.string.vs_wifi_network_n, i + 2)) { set(s.copy(wifiExtra = s.wifiExtra.filterIndexed { j, _ -> j != i })) }
+        OutlinedTextField(value = n.ssid, onValueChange = { upd(n.copy(ssid = WifiEmu.cleanSsid(it))) },
+            label = { Text(stringResource(R.string.vs_wifi_ssid)) }, singleLine = true,
+            isError = n.ssid.isEmpty() || dup,
+            supportingText = { Text(stringResource(if (n.ssid.isEmpty()) R.string.vs_wifi_ssid_error else if (dup) R.string.vs_wifi_extra_dup else R.string.vs_wifi_ssid_sub)) },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+        SecurityPicker(n.security) { upd(n.copy(security = it)) }
+        if (n.security != WifiSecurity.NONE) OutlinedTextField(value = n.password, onValueChange = { upd(n.copy(password = WifiEmu.cleanPassword(it))) },
+            label = { Text(stringResource(R.string.vs_wifi_password)) }, singleLine = true,
+            isError = !WifiEmu.credentialValid(n.security, n.password),
+            supportingText = { Text(stringResource(if (WifiEmu.credentialValid(n.security, n.password)) R.string.vs_wifi_secure_sub else R.string.vs_wifi_password_need)) },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+        SignalPicker(n.signal) { upd(n.copy(signal = it)) }
+        SpeedField(n.speed) { upd(n.copy(speed = it)) }
+    }
+    HorizontalDivider(Modifier.padding(top = 8.dp))
+    Toggle(stringResource(R.string.vs_wifi_auto), stringResource(R.string.vs_wifi_auto_sub), s.wifiAutoConnect) { set(s.copy(wifiAutoConnect = it)) }
 }
 
 /** Light / medium / aggressive list for how eagerly the host stops cached guest processes. */

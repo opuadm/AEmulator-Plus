@@ -56,10 +56,13 @@ object WifiEmu {
     const val TREBLE_MIN_API = 26
     const val TREBLE_MAX_API = 37
 
+    /** Firmware of 4.0 - 7.1 that runs on the 64-bit engine (arm64 or x86-64 builds) gets the same service. */
+    const val N64_MIN_API = 14
+
     /** Guests with the Wi-Fi service (the engines that have the guest services). */
     fun supported(engine: Engine, api: Int, recovery: Boolean, nativeUi: Boolean) =
         ((engine == Engine.KK && (api in MIN_API..MAX_API || api in GINGERBREAD_MIN_API..GINGERBREAD_MAX_API)) ||
-            (engine == Engine.N64 && api in TREBLE_MIN_API..TREBLE_MAX_API)) && !recovery && !nativeUi
+            (engine == Engine.N64 && api in N64_MIN_API..TREBLE_MAX_API)) && !recovery && !nativeUi
 
     /**
      * Whether the settings screen offers Wi-Fi for [img]. The engine stored with an image is only the importer's default (the
@@ -92,7 +95,59 @@ object WifiEmu {
 
     /** Blank means an open network; otherwise WPA2 needs 8..63 characters. */
     fun passwordValid(v: String) = v.isEmpty() || v.length in PASSWORD_MIN..PASSWORD_MAX
-    fun secured(s: VmSettings) = passwordValid(s.wifiPassword) && s.wifiPassword.isNotEmpty()
+    fun secured(s: VmSettings) = s.wifiSecurity != WifiSecurity.NONE && s.wifiPassword.length in PASSWORD_MIN..PASSWORD_MAX
+
+    /** An open network needs no passphrase; every other type needs 8..63 characters. */
+    fun credentialValid(sec: WifiSecurity, v: String) = sec == WifiSecurity.NONE || v.length in PASSWORD_MIN..PASSWORD_MAX
+    fun mainValid(s: VmSettings) = credentialValid(s.wifiSecurity, s.wifiPassword) && speedValid(s.wifiSpeed)
+
+    /** Up to 2000 Gbps: the largest value that still fits the kbit/s the guest's link bandwidth is kept in. */
+    const val SPEED_MAX_KBPS = 2_000_000_000L
+
+    val SPEED_UNITS = listOf("Kbps", "Mbps", "Gbps")
+
+    fun cleanSpeed(v: String) = v.filter { it in ' '..'~' }.take(24)
+
+    /** kbit/s per unit as typed (Kbps, k, Mb/s, Mbit/s, G, ...; bits, not bytes); a missing unit is Mbps; null = not a unit. */
+    private fun unitMul(raw: String): Double? {
+        val l = raw.lowercase()
+        val unit = l.removeSuffix("/s").removeSuffix("ps").removeSuffix("its").removeSuffix("it").removeSuffix("b")
+        if (l.isNotEmpty() && unit.isEmpty()) return null
+        return when (unit) { "k" -> 1.0; "", "m" -> 1000.0; "g" -> 1_000_000.0; else -> null }
+    }
+
+    /**
+     * A speed in kbit/s from text such as "50 Mbps", "800 Kbps", "1,5 Gbps" or "50" (Mbps). Blank, or only a unit (the settings
+     * screen keeps the chosen unit while the number is empty) = 0, no limit; null = not understood, zero or above [SPEED_MAX_KBPS].
+     */
+    fun speedKbps(text: String): Int? {
+        val t = text.trim()
+        if (t.isEmpty()) return 0
+        val m = Regex("""^(\d+(?:[.,]\d*)?)?\s*([a-zA-Z/]*)$""").matchEntire(t) ?: return null
+        val mul = unitMul(m.groupValues[2]) ?: return null
+        val num = m.groupValues[1]
+        if (num.isEmpty()) return if (m.groupValues[2].isEmpty()) null else 0
+        val kbps = Math.round((num.replace(',', '.').toDoubleOrNull() ?: return null) * mul)
+        return if (kbps in 1..SPEED_MAX_KBPS) kbps.toInt() else null
+    }
+
+    /** The number and the unit ("Kbps", "Mbps" or "Gbps") of a stored speed text, for the two parts of the settings field. */
+    fun speedParts(text: String): Pair<String, String> {
+        val m = Regex("""^\s*([0-9]*[.,]?[0-9]*)\s*([a-zA-Z/]*)\s*$""").matchEntire(text) ?: return "" to "Mbps"
+        val mul = unitMul(m.groupValues[2]) ?: 1000.0
+        return m.groupValues[1] to (if (mul == 1.0) "Kbps" else if (mul == 1_000_000.0) "Gbps" else "Mbps")
+    }
+
+    fun speedJoin(number: String, unit: String) = if (number.isEmpty()) unit else "$number $unit"
+
+    /** [kbps] as short text: "800 Kbps", "50 Mbps", "1.5 Gbps". */
+    fun speedText(kbps: Int): String = when {
+        kbps >= 1_000_000 -> "${(kbps / 1000.0 / 1000.0).toBigDecimal().stripTrailingZeros().toPlainString()} Gbps"
+        kbps >= 1000 -> "${(kbps / 1000.0).toBigDecimal().stripTrailingZeros().toPlainString()} Mbps"
+        else -> "$kbps Kbps"
+    }
+
+    fun speedValid(text: String) = speedKbps(text) != null
 
     /** Fixed, locally administered BSSID derived from the network name, so it stays the same between boots. */
     fun bssid(ssid: String): String {
@@ -108,8 +163,11 @@ object WifiEmu {
         return Properties().apply {
             setProperty("ssid", ssid)
             setProperty("secured", secured(s).toString())
+            setProperty("security", if (secured(s)) s.wifiSecurity.id else WifiSecurity.NONE.id)
             setProperty("psk", if (secured(s)) s.wifiPassword else "")
             setProperty("bssid", bssid(ssid))
+            setProperty("autoconnect", s.wifiAutoConnect.toString())
+            setProperty("speedkbps", (speedKbps(s.wifiSpeed) ?: 0).toString())
             setProperty("mac", MAC)
             setProperty("ip", IP)
             setProperty("gateway", GATEWAY)
@@ -119,36 +177,34 @@ object WifiEmu {
             setProperty("rssi", rssiFor(s.wifiSignal).toString())
             setProperty("speed", "72")
             setProperty("frequency", "2437")
-            if (s.wifiNeighbors) setProperty("neighbors", neighbors(ssid).joinToString("\n"))
+            val extras = usableExtras(s)
+            if (extras.isNotEmpty()) setProperty("extras", extras.joinToString("\n") {
+                val n = cleanSsid(it.ssid)
+                val sec = if (it.security == WifiSecurity.NONE) "none" else it.security.id
+                "${hex(n)}|${if (it.security == WifiSecurity.NONE) "" else hex(it.password)}|${rssiFor(it.signal)}|${bssid(n)}|$sec|${speedKbps(it.speed) ?: 0}"
+            })
         }
     }
 
     const val MAX_BARS = 4
+    const val MAX_EXTRA = 31
+
+    private fun hex(v: String) = v.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it) }
+
+    /** The extra networks that can actually be offered: named, a valid passphrase, no repeated name. */
+    fun usableExtras(s: VmSettings): List<WifiNetworkDef> {
+        val seen = HashSet<String>().apply { add(cleanSsid(s.wifiSsid).ifEmpty { DEFAULT_SSID }) }
+        return s.wifiExtra.take(MAX_EXTRA).filter { cleanSsid(it.ssid).isNotEmpty() && credentialValid(it.security, it.password) && speedValid(it.speed) && seen.add(cleanSsid(it.ssid)) }
+    }
+
+    /** Whether every extra network on the screen is complete (a name, no short passphrase, no duplicate name). */
+    fun extrasValid(s: VmSettings): Boolean {
+        val names = HashSet<String>().apply { add(cleanSsid(s.wifiSsid)) }
+        return s.wifiExtra.all { cleanSsid(it.ssid).isNotEmpty() && credentialValid(it.security, it.password) && speedValid(it.speed) && names.add(cleanSsid(it.ssid)) }
+    }
 
     /** dBm for [bars] of 4: Android's calculateSignalLevel maps -100..-55 dBm onto the bars, -48 is "full" (the old fixed value). */
     fun rssiFor(bars: Int): Int = when (bars.coerceIn(1, MAX_BARS)) { 1 -> -84; 2 -> -74; 3 -> -63; else -> -48 }
-
-    private val NEIGHBOR_NAMES = listOf(
-        "TP-Link_3F2A", "NETGEAR57", "HUAWEI-B315-9C11", "Vodafone-2A1B", "MEO-48F0C3", "NOS-77D2", "Linksys04821",
-        "DIRECT-7b-HP OfficeJet", "Casa", "FRITZ!Box 7530 QX", "Livebox-61E0", "Guest WiFi",
-    )
-
-    /**
-     * 4-5 other networks "in range", the same ones every boot for a given network name: WPA2 (so they cannot be
-     * joined), weaker than ours, on the usual 2.4 and 5 GHz channels. Format of each line:
-     * ssid|bssid|capabilities|rssi|frequency (read by guest-wifi WifiConfig).
-     */
-    fun neighbors(ownSsid: String): List<String> {
-        val seed = MessageDigest.getInstance("SHA-1").digest(ownSsid.toByteArray(Charsets.UTF_8)).map { it.toInt() and 0xff }
-        val names = NEIGHBOR_NAMES.filter { it != ownSsid }.sortedBy { n -> (n.hashCode() xor seed[0] * 31 xor seed[1]) }
-        val count = 4 + seed[2] % 2
-        val freqs = listOf(2412, 2437, 2462, 5180, 5240, 5745)
-        return names.take(count).mapIndexed { i, n ->
-            val rssi = -58 - (seed[3 + i] % 30)
-            val caps = if (seed[8 + i] % 3 == 0) "[WPA-PSK-TKIP+CCMP][WPA2-PSK-TKIP+CCMP][WPS][ESS]" else "[WPA2-PSK-CCMP][ESS]"
-            "$n|${bssid(n)}|$caps|$rssi|${freqs[seed[13 + i] % freqs.size]}"
-        }
-    }
 
     fun encode(p: Properties): ByteArray = ByteArrayOutputStream().also { p.store(it, "AEmulator Wi-Fi") }.toByteArray()
 

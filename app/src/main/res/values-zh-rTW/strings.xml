@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">第二張模擬 SIM 卡。只有為雙 SIM 卡打造的韌體才會使用（許多 Samsung 與聯發科的韌體）。下次開機時生效。</string>
     <string name="vs_wifi_signal">訊號強度</string>
     <string name="vs_wifi_signal_sub">Wi-Fi 圖示顯示的格數</string>
-    <string name="vs_wifi_neighbors">附近的網路</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi 清單也會顯示其他幾個網路（已上鎖，無法加入）</string>
     <string name="camera_permission_denied">相機權限遭拒。ROM 將在沒有主機相機存取權的情況下開機；請在 Android 應用程式設定中授予權限，並完整重新啟動虛擬機器後重試。</string>
     <string name="vs_skip_setup">略過設定精靈</string>
     <string name="vs_skip_setup_sub">在下次完整開機時，將設定標記為完成，並停用已識別的設定應用程式。關閉此選項不會重設已完成的設定。各家 OEM 的支援情況可能不同。</string>

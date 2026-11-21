@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">Druhá falošná SIM karta. Funguje iba na firmvéri, ktorý podporuje dve SIM (mnoho zariadení Samsung a MediaTek). Použije sa pri ďalšom spustení.</string>
     <string name="vs_wifi_signal">Sila signálu</string>
     <string name="vs_wifi_signal_sub">Počet čiarok, ktoré zobrazuje ikona Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Siete v okolí</string>
-    <string name="vs_wifi_neighbors_sub">Zobrazí v zozname sietí Wi-Fi niekoľko ďalších sietí (zamknuté, nedá sa k nim pripojiť)</string>
     <string name="camera_permission_denied">Povolenie fotoaparátu bolo zamietnuté. ROM sa spustí bez prístupu ku kamere hostiteľa; udeľte povolenie v nastaveniach aplikácií Androidu a pre nový pokus VM úplne reštartujte.</string>
     <string name="vs_skip_setup">Preskočiť sprievodcu nastavením</string>
     <string name="vs_skip_setup_sub">Pri ďalšom úplnom spustení označiť nastavenie za dokončené a zakázať rozpoznané aplikácie sprievodcu. Vypnutie dokončené nastavenie neobnoví. Podpora u výrobcov sa môže líšiť.</string>

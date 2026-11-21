@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Друга лажна SIM картица. Користи је само фирмвер направљен за две SIM картице (многи Samsung и MediaTek). Примењује се при следећем покретању.</string>
     <string name="vs_wifi_signal">Јачина сигнала</string>
     <string name="vs_wifi_signal_sub">Црте које приказује Wi-Fi икона</string>
-    <string name="vs_wifi_neighbors">Оближње мреже</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi листа приказује и неколико других мрежа (закључане су, не могу се придружити)</string>
     <string name="camera_permission_denied">Дозвола за камеру је одбијена. ROM ће се покренути без приступа камери домаћина; дајте дозволу у Android подешавањима апликације и потпуно поново покрените виртуелну машину да покушате поново.</string>
     <string name="vs_skip_setup">Прескочи чаробњак за подешавање</string>
     <string name="vs_skip_setup_sub">Означава подешавање као завршено и онемогућава препознате апликације за подешавање при следећем потпуном покретању. Искључивање не поништава већ завршено подешавање. Подршка за OEM може варирати.</string>

@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Ett andra falskt SIM-kort. Används bara av firmware byggd för två SIM-kort (många från Samsung och MediaTek). Gäller vid nästa start.</string>
     <string name="vs_wifi_signal">Signalstyrka</string>
     <string name="vs_wifi_signal_sub">Antal staplar som Wi-Fi-ikonen visar</string>
-    <string name="vs_wifi_neighbors">Närliggande nätverk</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi-listan visar även några andra nätverk (låsta, de går inte att ansluta till)</string>
     <string name="camera_permission_denied">Kamerabehörighet nekad. ROM:en startar utan åtkomst till värdens kamera; ge behörighet i Androids appinställningar och starta om den virtuella maskinen helt för att försöka igen.</string>
     <string name="vs_skip_setup">Hoppa över startguiden</string>
     <string name="vs_skip_setup_sub">Markera installationen som klar och inaktivera kända installationsappar vid nästa fullständiga start. Att stänga av återställer inte en slutförd installation. Stödet för OEM kan variera.</string>

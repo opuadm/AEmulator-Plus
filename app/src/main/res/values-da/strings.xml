@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">Et andet falsk SIM-kort. Virker kun på firmware med understøttelse af to SIM-kort (mange Samsung og MediaTek). Anvendes ved næste opstart.</string>
     <string name="vs_wifi_signal">Signalstyrke</string>
     <string name="vs_wifi_signal_sub">Hvor mange streger Wi-Fi-ikonet viser</string>
-    <string name="vs_wifi_neighbors">Netværk i nærheden</string>
-    <string name="vs_wifi_neighbors_sub">Viser nogle andre netværk på listen over Wi-Fi-netværk. (De er låst, og du kan ikke oprette forbindelse til dem)</string>
     <string name="camera_permission_denied">Kameratilladelse afvist. ROM\'en starter uden adgang til værtens kamera; giv tilladelse i Androids appindstillinger, og genstart den virtuelle maskine helt for at prøve igen.</string>
     <string name="vs_skip_setup">Spring opsætningsguiden over</string>
     <string name="vs_skip_setup_sub">Markerer opsætningen som færdig og deaktiverer genkendte opsætningsapps ved næste fulde opstart. Slås den fra, nulstilles den færdige opsætning ikke. Understøttelsen kan variere mellem producenter.</string>

@@ -264,8 +264,6 @@
     <string name="vs_dual_sim_sub">Një SIM i dytë i rremë. E përdor vetëm firmware-i i ndërtuar për dy SIM (shumë të Samsung dhe MediaTek). Aplikohet në nisjen e radhës.</string>
     <string name="vs_wifi_signal">Fuqia e sinjalit</string>
     <string name="vs_wifi_signal_sub">Vijat që shfaq ikona e Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Rrjetet përreth</string>
-    <string name="vs_wifi_neighbors_sub">Lista e Wi-Fi shfaq edhe disa rrjete të tjera (të kyçura, nuk mund të lidhen)</string>
     <string name="camera_permission_denied">Leja e kamerës u refuzua. ROM-i do të niset pa qasje te kamera e pritësit; jepni lejen te cilësimet e aplikacionit në Android dhe riniseni plotësisht VM-në për të provuar përsëri.</string>
     <string name="vs_skip_setup">Kapërce magjistarin e konfigurimit</string>
     <string name="vs_skip_setup_sub">Shëno konfigurimin si të përfunduar dhe çaktivizo aplikacionet e njohura të konfigurimit në nisjen e plotë të radhës. Çaktivizimi nuk e rikthen konfigurimin e përfunduar. Mbështetja për OEM-të mund të ndryshojë.</string>

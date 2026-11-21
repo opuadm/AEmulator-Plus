@@ -358,8 +358,6 @@
     <string name="vs_dual_sim_sub">2枚目の偽のSIMです。2枚のSIM向けに作られたファームウェア(多くのSamsungやMediaTek製)のみが使用します。次回の起動時に適用されます。</string>
     <string name="vs_wifi_signal">電波の強さ</string>
     <string name="vs_wifi_signal_sub">Wi-Fiアイコンに表示されるバーの数</string>
-    <string name="vs_wifi_neighbors">周辺のネットワーク</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fiリストに他のネットワークもいくつか表示されます(ロックされており接続はできません)</string>
     <string name="vs_gyro_lock">ジャイロスコープの向きを固定</string>
     <string name="vs_gyro_lock_sub">0° / 180° はホストのモーションセンサーを固定の向きに留めます。重力は一定のままジャイロスコープは0を示すため、ゲストは自動回転しません。「ジャイロなし」はゲストからジャイロスコープを完全に隠します(ジャイロが誤動作する場合に使用)。加速度センサーと磁気センサーは実機のままです。VMを完全に再起動すると有効になります。</string>
     <string name="vs_gyro_disabled">無効</string>

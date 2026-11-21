@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Egy második hamis SIM. Csak a két SIM-hez készült firmware használja (sok Samsung és MediaTek). A következő indításkor lép érvénybe.</string>
     <string name="vs_wifi_signal">Jelerősség</string>
     <string name="vs_wifi_signal_sub">A Wi-Fi ikon által mutatott vonalak</string>
-    <string name="vs_wifi_neighbors">Közeli hálózatok</string>
-    <string name="vs_wifi_neighbors_sub">A Wi-Fi lista néhány más hálózatot is mutat (zároltak, nem lehet csatlakozni hozzájuk)</string>
     <string name="camera_permission_denied">A kameraengedély megtagadva. A ROM a gazdagép kamerájához való hozzáférés nélkül indul; adja meg az engedélyt az Android alkalmazásbeállításaiban, és indítsa újra teljesen a VM-et az újrapróbálkozáshoz.</string>
     <string name="vs_skip_setup">Beállítóvarázsló kihagyása</string>
     <string name="vs_skip_setup_sub">A beállítást késznek jelöli, és a felismert beállító alkalmazásokat letiltja a következő teljes indításkor. A kikapcsolás nem állítja vissza a már elvégzett beállítást. Az OEM-támogatás eltérő lehet.</string>

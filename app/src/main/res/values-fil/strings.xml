@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Isang pangalawang pekeng SIM. Ang firmware lang na ginawa para sa dalawang SIM ang gumagamit nito (maraming Samsung at MediaTek). Ilalapat sa susunod na boot.</string>
     <string name="vs_wifi_signal">Lakas ng signal</string>
     <string name="vs_wifi_signal_sub">Mga bar na ipinapakita ng Wi-Fi icon</string>
-    <string name="vs_wifi_neighbors">Mga kalapit na network</string>
-    <string name="vs_wifi_neighbors_sub">Nagpapakita rin ang listahan ng Wi-Fi ng ilang ibang network (naka-lock, hindi maisasali)</string>
     <string name="camera_permission_denied">Tinanggihan ang pahintulot sa camera. Magbo-boot ang ROM nang walang access sa camera ng host; bigyan ng pahintulot sa mga setting ng Android app at ganap na i-restart ang VM para subukan muli.</string>
     <string name="vs_skip_setup">Laktawan ang setup wizard</string>
     <string name="vs_skip_setup_sub">Markahang tapos na ang setup at i-disable ang mga kilalang setup app sa susunod na buong boot. Hindi nire-reset ng pag-off ang natapos nang setup. Maaaring mag-iba ang suporta ng OEM.</string>

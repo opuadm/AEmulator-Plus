@@ -359,8 +359,6 @@
     <string name="vs_dual_sim_sub">Sahte bir ikinci SIM. Yalnızca iki SIM için geliştirilmiş ürün yazılımları kullanır (birçok Samsung ve MediaTek). Bir sonraki açılışta uygulanır.</string>
     <string name="vs_wifi_signal">Sinyal gücü</string>
     <string name="vs_wifi_signal_sub">Wi-Fi simgesinin gösterdiği çubuklar</string>
-    <string name="vs_wifi_neighbors">Yakındaki ağlar</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi listesi birkaç başka ağı da gösterir (kilitli, katılınamaz)</string>
     <string name="vs_gyro_lock">Jiroskop yönünü kilitle</string>
     <string name="vs_gyro_lock_sub">0° / 180°, ana makinenin hareket sensörlerini sabit bir yöne sabitler: yerçekimi sabit kalır ve jiroskop sıfır okur, böylece misafir hiçbir zaman otomatik dönmez. “Jiroskop yok”, jiroskopu misafirden tamamen gizler (jiroskop sorun çıkarıyorsa kullanın); ivmeölçer ve manyetometre gerçek kalır. VM tamamen yeniden başlatıldıktan sonra etkili olur.</string>
     <string name="vs_gyro_disabled">Devre dışı</string>

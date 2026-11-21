@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">Другая фальшывая SIM-карта. Працуе толькі на прашыўках з падтрымкай дзвюх SIM-карт (многія Samsung і MediaTek). Ужываецца пры наступнай загрузцы.</string>
     <string name="vs_wifi_signal">Узровень сігналу</string>
     <string name="vs_wifi_signal_sub">Колькасць дзяленняў на значку Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Сеткі паблізу</string>
-    <string name="vs_wifi_neighbors_sub">Паказвае некалькі іншых сетак у спісе сетак Wi-Fi. (Яны абароненыя, далучыцца да іх нельга)</string>
     <string name="camera_permission_denied">Дазвол на камеру не атрыманы. ROM загрузіцца без доступу да камеры хоста; дайце дазвол у наладах праграм Android і цалкам перазапусціце віртуальную машыну, каб паўтарыць.</string>
     <string name="vs_skip_setup">Прапусціць майстар налады</string>
     <string name="vs_skip_setup_sub">Пазначае наладу завершанай і адключае распазнаныя праграмы налады пры наступнай поўнай загрузцы. Выключэнне не скідае завершаную наладу. Падтрымка розных вытворцаў можа адрознівацца.</string>

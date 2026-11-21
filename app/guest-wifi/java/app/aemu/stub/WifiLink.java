@@ -5,4 +5,10 @@ package app.aemu.stub;
 interface WifiLink {
     /** Tells ConnectivityService the network is gone; a link cannot come back afterwards, a new one is registered instead. */
     void disconnect();
+
+    /** The Network ConnectivityService knows this link by, or null when the guest's framework does not expose it. */
+    android.net.Network network();
+
+    /** Link bandwidth ConnectivityService (and so apps) see for this network, in kbit/s. */
+    void setBandwidth(int kbps);
 }

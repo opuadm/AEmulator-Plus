@@ -1481,7 +1481,7 @@ class TreeFixer(
         // Installed for 8 - 17 only; GuestVm starts it when the setting is on, and the jar of a guest that was switched off stays unused
         runCatching {
             val jar = File(root, WifiEmu.JAR_PATH)
-            if (img.api in WifiEmu.TREBLE_MIN_API..WifiEmu.TREBLE_MAX_API) {
+            if (img.api in WifiEmu.N64_MIN_API..WifiEmu.TREBLE_MAX_API) {
                 val bytes = eaOpen("engines/kk/${WifiEmu.JAR_NAME}").use { it.readBytes() }
                 if (!jar.isFile || !jar.readBytes().contentEquals(bytes)) {
                     jar.parentFile?.mkdirs()

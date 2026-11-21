@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">An dara cárta SIM bréige. Oibríonn sé ar dhochtearraí a thacaíonn le dhá SIM amháin (go leor Samsung agus MediaTek). Cuirtear i bhfeidhm ag an gcéad tosú eile.</string>
     <string name="vs_wifi_signal">Neart comhartha</string>
     <string name="vs_wifi_signal_sub">Líon na mbarraí a thaispeánann deilbhín an Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Líonraí in aice láimhe</string>
-    <string name="vs_wifi_neighbors_sub">Taispeánann sé cúpla líonra eile sa liosta líonraí Wi-Fi. (faoi ghlas, ní féidir iad a cheangal)</string>
     <string name="camera_permission_denied">Diúltaíodh cead an cheamara. Tosóidh an ROM gan rochtain ar cheamara an óstríomhaire; tabhair cead i socruithe aip Android agus atosaigh an meaisín fíorúil go hiomlán le triail eile a bhaint as.</string>
     <string name="vs_skip_setup">Léim thar an draoi socraithe</string>
     <string name="vs_skip_setup_sub">Marcáil an socrú mar chomhlánaithe agus díchumasaigh aipeanna socraithe aitheanta ag an gcéad tosú iomlán eile. Ní chealaítear socrú comhlánaithe má mhúchtar é. D’fhéadfadh tacaíocht OEM a bheith éagsúil.</string>

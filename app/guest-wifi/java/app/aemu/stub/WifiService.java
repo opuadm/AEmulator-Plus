@@ -49,17 +49,24 @@ final class WifiService extends Binder {
     private static final int STATE_ENABLED = 3;
     private static final int AP_STATE_DISABLED = 11;
 
-    private final WifiConfig cfg;
+    private volatile WifiConfig cfg;
     private final Map<Integer, String> names = new HashMap<Integer, String>();
     private final Map<String, Method> methods = new HashMap<String, Method>();
     private final Map<Integer, Boolean> addedOk = new HashMap<Integer, Boolean>();
     private int nextId = 100;
+    private volatile String activeSsid;
+    private volatile String activeSec = "none";
+    private volatile int activeRssi;
+    private volatile String activeBssid;
+    private volatile int activeKbps;
+    static final int DEFAULT_KBPS = 100000;
 
     private boolean enabled = true;
     private boolean saved = true;
     private boolean down;          // disconnect() was called: stays off until reconnect / enableNetwork / connect
     private boolean connected = true;
     private Listener listener;
+    private volatile android.net.Network currentNetwork;
     private volatile LegacyWifi legacy;
     private final Messenger messenger;
     private final Handler scanHandler;
@@ -69,6 +76,8 @@ final class WifiService extends Binder {
 
     WifiService(WifiConfig cfg, Looper looper) throws Exception {
         this.cfg = cfg;
+        this.saved = cfg.autoConnect;
+        this.connected = cfg.autoConnect;
         Class<?> stub = Class.forName(DESCRIPTOR + "$Stub");
         for (Field f : stub.getDeclaredFields()) {
             if (!f.getName().startsWith("TRANSACTION_")) continue;
@@ -84,7 +93,53 @@ final class WifiService extends Binder {
         for (Map.Entry<Integer, String> e : names.entrySet()) all.append(e.getKey()).append('=').append(e.getValue()).append(' ');
         Refl.log("transactions: " + all.toString().trim());
         Refl.log("IWifiManager: " + names.size() + " transactions, " + (connected ? "connected to " : "ready for ") + cfg.ssid
-                + (cfg.secured ? " (WPA2)" : " (open)"));
+                + (cfg.secured ? " (" + cfg.security + ")" : " (open)"));
+    }
+
+    /** The host rewrote the settings file while the guest runs: new networks, names, passwords and signal show at once. */
+    void reload(WifiConfig n) {
+        WifiConfig old = cfg;
+        cfg = n;
+        String a = activeSsid;
+        boolean drop = false;
+        synchronized (this) {
+            if (a != null && connected) {
+                boolean listed = a.equals(n.ssid);
+                for (WifiConfig.Extra x : n.extras) if (x.ssid.equals(a)) listed = true;
+                boolean wasListed = a.equals(old.ssid);
+                for (WifiConfig.Extra x : old.extras) if (x.ssid.equals(a)) wasListed = true;
+                drop = wasListed && !listed;
+            }
+            if (drop) { down = true; activeSsid = null; }
+        }
+        Refl.log("settings reloaded: " + (1 + n.extras.size()) + " network(s)" + (drop ? ", the connected one was removed" : ""));
+        update();
+        if (android.os.Build.VERSION.SDK_INT >= 21 && scanHandler != null) {
+            scanHandler.post(publishTask);
+            scheduleScanDone();
+        }
+    }
+
+    private long lastKick;
+
+    /**
+     * A Wi-Fi screen scans (it just opened or is refreshing); not tied to the state queries, which the broadcasts themselves trigger. The framework's own Wi-Fi stack, which has no radio, keeps sending
+     * "disabled" and "not connected" broadcasts that such a screen follows, so ours are sent again right away (and once more a
+     * moment later, in case one of those arrives after) instead of at the next periodic one.
+     */
+    private void kick() {
+        if (android.os.Build.VERSION.SDK_INT < 21 || scanHandler == null) return;
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastKick < 5000) return;
+        lastKick = now;
+        scanHandler.post(publishTask);
+        scanHandler.postDelayed(publishTask, 700);
+        scanHandler.postDelayed(publishTask, 2000);
+        scanHandler.postDelayed(publishTask, 4000);
+    }
+
+    void republish() {
+        if (android.os.Build.VERSION.SDK_INT >= 21 && scanHandler != null) scanHandler.post(publishTask);
     }
 
     void setLegacy(LegacyWifi l) {
@@ -97,6 +152,10 @@ final class WifiService extends Binder {
 
     synchronized void setListener(Listener l) {
         listener = l;
+    }
+
+    void setNetwork(android.net.Network n) {
+        currentNetwork = n;
     }
 
     synchronized boolean isConnected() {
@@ -117,7 +176,7 @@ final class WifiService extends Binder {
             connected = now;
             l = listener;
         }
-        Refl.log(now ? "connected to " + cfg.ssid : "disconnected");
+        Refl.log(now ? "connected to " + ssid() : "disconnected");
         if (l != null) l.onConnectionChanged(now);
     }
 
@@ -131,10 +190,61 @@ final class WifiService extends Binder {
 
     /** True when [c] names our network and carries its passphrase (or none, for an open network). */
     private boolean credentialsOk(WifiConfiguration c) {
-        if (c == null || !cfg.ssid.equals(unquote(c.SSID))) return false;
+        if (c == null) return false;
+        String name = unquote(c.SSID);
+        if (name == null || name.length() == 0) return false;
         String psk = unquote(c.preSharedKey);
-        if (cfg.secured) return psk != null && psk.equals(cfg.psk);
-        return psk == null || psk.length() == 0;
+        if (cfg.ssid.equals(name)) {
+            boolean ok = cfg.secured ? psk != null && psk.equals(cfg.psk) : psk == null || psk.length() == 0;
+            if (ok) { activeSsid = cfg.ssid; activeSec = cfg.security; activeRssi = cfg.rssi; activeBssid = cfg.bssid; activeKbps = cfg.speedKbps; }
+            return ok;
+        }
+        for (WifiConfig.Extra x : cfg.extras) {
+            if (!x.ssid.equals(name)) continue;
+            boolean ok = x.secured() ? psk != null && psk.equals(x.psk) : psk == null || psk.length() == 0;
+            if (ok) { activeSsid = x.ssid; activeSec = x.security; activeRssi = x.rssi; activeBssid = x.bssid; activeKbps = x.speedKbps; }
+            return ok;
+        }
+        // any other name is a network the user typed in: the host's connection is presented under it
+        activeSsid = name;
+        activeSec = psk != null && psk.length() >= 8 ? "wpa2" : "none";
+        activeRssi = cfg.rssi;
+        activeBssid = cfg.bssid;
+        activeKbps = 0;
+        return true;
+    }
+
+    private String ssid() {
+        String a = activeSsid;
+        return a != null ? a : cfg.ssid;
+    }
+
+    /** Speed limit of the network in use, kbit/s; 0 = none. */
+    int limitKbps() {
+        WifiConfig c = cfg;
+        String a = activeSsid;
+        if (a == null) return c.speedKbps;
+        if (a.equals(c.ssid)) return c.speedKbps;
+        for (WifiConfig.Extra x : c.extras) if (x.ssid.equals(a)) return x.speedKbps;
+        return activeKbps;
+    }
+
+    int bandwidthKbps() {
+        int k = limitKbps();
+        return k > 0 ? k : DEFAULT_KBPS;
+    }
+
+    int rssi() {
+        return activeSsid != null ? activeRssi : cfg.rssi;
+    }
+
+    String bssid() {
+        String b = activeBssid;
+        return activeSsid != null && b != null ? b : cfg.bssid;
+    }
+
+    private String security() {
+        return activeSsid != null ? activeSec : cfg.security;
     }
 
     private static WifiConfiguration readConfig(Parcel data) {
@@ -152,7 +262,7 @@ final class WifiService extends Binder {
     // ------------------------------------------------------------------ objects handed to apps
 
     private Object wifiSsid() {
-        return wifiSsid(cfg.ssid);
+        return wifiSsid(ssid());
     }
 
     private static Object wifiSsid(String name) {
@@ -180,12 +290,13 @@ final class WifiService extends Binder {
         if (wi == null || !isConnected()) return wi;
         // before 4.2 the name is a plain String, from 4.2 a WifiSsid
         Object ssid = wifiSsid();
-        Refl.call(wi, "setSSID", ssid != null ? ssid : cfg.ssid);
-        Refl.call(wi, "setBSSID", cfg.bssid);
+        Refl.call(wi, "setSSID", ssid != null ? ssid : ssid());
+        Refl.call(wi, "setBSSID", bssid());
         Refl.call(wi, "setMacAddress", cfg.mac);
         Refl.call(wi, "setNetworkId", Integer.valueOf(NET_ID));
-        Refl.call(wi, "setRssi", Integer.valueOf(cfg.rssi));
-        Refl.call(wi, "setLinkSpeed", Integer.valueOf(cfg.speed));
+        Refl.call(wi, "setRssi", Integer.valueOf(rssi()));
+        int cap = limitKbps();
+        Refl.call(wi, "setLinkSpeed", Integer.valueOf(cap > 0 ? Math.max(1, cap / 1000) : cfg.speed));
         Refl.call(wi, "setFrequency", Integer.valueOf(cfg.frequency));
         Refl.call(wi, "setMeteredHint", Boolean.FALSE);
         try {
@@ -200,10 +311,18 @@ final class WifiService extends Binder {
     }
 
     private Object scanResult() {
-        return scanResult(cfg.ssid, cfg.bssid, cfg.secured ? "[WPA2-PSK-CCMP][ESS]" : "[ESS]", cfg.rssi, cfg.frequency);
+        return scanResult(cfg.ssid, cfg.bssid, WifiConfig.caps(cfg.security), cfg.rssi, cfg.frequency);
     }
 
-    /** One entry of the scan list: our network, or one of the visible-but-locked neighbours (WifiConfig.neighbors). */
+    /** The network the user typed in (neither the configured one nor a listed one), once joined: it is in range too. */
+    private boolean joinedFreeForm() {
+        String a = activeSsid;
+        if (a == null || a.equals(cfg.ssid)) return false;
+        for (WifiConfig.Extra x : cfg.extras) if (x.ssid.equals(a)) return false;
+        return true;
+    }
+
+    /** One entry of the scan list. */
     private static Object scanResult(String name, String bssid, String caps, int rssi, int frequency) {
         Class<?> ssidClass = Refl.cls("android.net.wifi.WifiSsid");
         Object ssid = wifiSsid(name);
@@ -259,10 +378,24 @@ final class WifiService extends Binder {
 
     private WifiConfiguration savedConfig() {
         WifiConfiguration c = new WifiConfiguration();
-        c.SSID = "\"" + cfg.ssid + "\"";
+        c.SSID = "\"" + ssid() + "\"";
         c.networkId = NET_ID;
         c.status = isConnected() ? WifiConfiguration.Status.CURRENT : WifiConfiguration.Status.ENABLED;
-        if (cfg.secured) {
+        String sec = security();
+        if ("wpa3".equals(sec)) {
+            c.allowedKeyManagement.set(8); // KeyMgmt.SAE, not in the older SDKs
+            c.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
+            c.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
+            c.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
+        } else if ("wpa".equals(sec)) {
+            c.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
+            c.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
+            c.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
+            c.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.TKIP);
+            c.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
+            c.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
+            c.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
+        } else if ("wpa2".equals(sec)) {
             c.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
             c.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
             c.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
@@ -367,14 +500,14 @@ final class WifiService extends Binder {
                 ws.addFlags(0x10000000);
                 ws.putExtra("wifi_state", en ? 3 : 1);
                 ws.putExtra("previous_wifi_state", en ? 3 : 1);
-                Bcast.send(ws);
+                Bcast.send(ws, true);
 
                 Object ss = enumConst("android.net.wifi.SupplicantState", con ? "COMPLETED" : en ? "DISCONNECTED" : "INACTIVE");
                 if (ss instanceof Parcelable) {
                     Intent si = new Intent("android.net.wifi.supplicant.STATE_CHANGE");
                     si.addFlags(0x10000000);
                     si.putExtra("newState", (Parcelable) ss);
-                    Bcast.send(si);
+                    Bcast.send(si, true);
                 }
 
                 Intent ns = new Intent("android.net.wifi.STATE_CHANGE");
@@ -383,16 +516,16 @@ final class WifiService extends Binder {
                         Integer.valueOf(1), Integer.valueOf(0), "WIFI", "");
                 if (ni != null) {
                     Refl.call(ni, "setDetailedState", enumConst("android.net.NetworkInfo$DetailedState", con ? "CONNECTED" : "DISCONNECTED"),
-                            null, con ? cfg.bssid : null);
+                            null, con ? bssid() : null);
                     Refl.call(ni, "setIsAvailable", Boolean.valueOf(en));
                     if (ni instanceof Parcelable) ns.putExtra("networkInfo", (Parcelable) ni);
                 }
                 if (con) {
-                    ns.putExtra("bssid", cfg.bssid);
+                    ns.putExtra("bssid", bssid());
                     Object wi = wifiInfo();
                     if (wi instanceof Parcelable) ns.putExtra("wifiInfo", (Parcelable) wi);
                 }
-                Bcast.send(ns);
+                Bcast.send(ns, true);
                 Refl.log("state broadcasts: enabled=" + en + " connected=" + con);
             } catch (Throwable t) {
                 Refl.log("state broadcasts failed: " + t);
@@ -419,7 +552,6 @@ final class WifiService extends Binder {
                 List<Object> cbs;
                 synchronized (scanCallbacks) { cbs = new ArrayList<Object>(scanCallbacks); }
                 for (Object c : cbs) Refl.call(c, "onScanResultsAvailable");
-                Refl.log("scan done: broadcast + " + cbs.size() + " callback(s)");
             }
         }, 400);
     }
@@ -431,10 +563,11 @@ final class WifiService extends Binder {
                 || name.equals("disableNetwork") || name.equals("removeNetwork") || name.equals("disconnect")
                 || name.equals("reconnect") || name.equals("reassociate") || name.equals("connect")
                 || name.equals("save") || name.equals("forget") || name.equals("setWifiEnabled")
-                || name.equals("startScan") || name.toLowerCase().contains("suggestion")
+                || name.toLowerCase().contains("suggestion")
                 || name.toLowerCase().contains("networkrequest")) {
             Refl.log("call: " + name);
         }
+        if (name.equals("startScan")) kick();
         if (name.equals("getWifiEnabledState")) {
             reply.writeInt(enabled ? STATE_ENABLED : STATE_DISABLED);
         } else if (name.equals("getWifiApEnabledState")) {
@@ -452,11 +585,14 @@ final class WifiService extends Binder {
             List<Parcelable> list = new ArrayList<Parcelable>();
             Object r = enabled ? scanResult() : null;
             if (r instanceof Parcelable) list.add((Parcelable) r);
-            if (enabled) for (WifiConfig.Neighbor n : cfg.neighbors) {
-                Object o = scanResult(n.ssid, n.bssid, n.caps, n.rssi, n.frequency);
+            if (enabled) for (WifiConfig.Extra x : cfg.extras) {
+                Object o = scanResult(x.ssid, x.bssid, WifiConfig.caps(x.security), x.rssi, cfg.frequency);
                 if (o instanceof Parcelable) list.add((Parcelable) o);
             }
-            Refl.log("getScanResults: answering " + list.size() + " entries");
+            if (enabled && joinedFreeForm()) {
+                Object o = scanResult(ssid(), bssid(), WifiConfig.caps(security()), rssi(), cfg.frequency);
+                if (o instanceof Parcelable) list.add((Parcelable) o);
+            }
             writeList("getScanResults", list, reply);
         } else if (name.equals("getConfiguredNetworks") || name.equals("getPrivilegedConfiguredNetworks")) {
             List<Parcelable> list = new ArrayList<Parcelable>();
@@ -525,7 +661,7 @@ final class WifiService extends Binder {
         } else if (name.equals("getVerboseLoggingLevel") || name.equals("getAggressiveHandover")) {
             reply.writeInt(0);
         } else if (name.equals("getCurrentNetwork")) {
-            writeParcelable(reply, null); // no Network handle is exposed for the emulated link
+            writeParcelable(reply, connected ? currentNetwork : null);
         } else if (name.equals("registerScanResultsCallback") || name.equals("unregisterScanResultsCallback")) {
             // 11+: the guest's WifiManager waits for onScanResultsAvailable() after startScan()
             IBinder b = data.readStrongBinder();

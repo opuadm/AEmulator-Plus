@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">İkinci saxta SIM. Yalnız iki SIM-i dəstəkləyən mikroproqramda işləyir (bir çox Samsung və MediaTek). Növbəti yükləmədə tətbiq olunur.</string>
     <string name="vs_wifi_signal">Siqnal gücü</string>
     <string name="vs_wifi_signal_sub">Wi-Fi nişanının göstərdiyi xətlərin sayı</string>
-    <string name="vs_wifi_neighbors">Yaxınlıqdakı şəbəkələr</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi şəbəkə siyahısında bir neçə başqa şəbəkə göstərir. (kilidlidir, qoşulmaq olmaz)</string>
     <string name="camera_permission_denied">Kamera icazəsi rədd edildi. ROM host kamerasına girişsiz yüklənəcək; Android tətbiq parametrlərində icazə verin və yenidən cəhd üçün virtual maşını tam yenidən başladın.</string>
     <string name="vs_skip_setup">Quraşdırma sehrbazını keç</string>
     <string name="vs_skip_setup_sub">Növbəti tam yükləmədə quraşdırmanı tamamlanmış kimi qeyd edir və tanınan quraşdırma tətbiqlərini söndürür. Söndürmək tamamlanmış quraşdırmanı sıfırlamır. OEM dəstəyi fərqli ola bilər.</string>

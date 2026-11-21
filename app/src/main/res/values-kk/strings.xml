@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Екінші жалған SIM. Оны тек екі SIM-ге арналған микробағдарлама пайдаланады (көптеген Samsung және MediaTek). Келесі жүктелуде қолданылады.</string>
     <string name="vs_wifi_signal">Сигнал деңгейі</string>
     <string name="vs_wifi_signal_sub">Wi-Fi белгішесі көрсететін белгілер саны</string>
-    <string name="vs_wifi_neighbors">Жақын маңдағы желілер</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi тізімінде бірнеше басқа желі де көрсетіледі (құлыпталған, оларға қосылу мүмкін емес)</string>
     <string name="camera_permission_denied">Камераға рұқсат берілмеді. ROM хост камерасына қолжетімділіксіз жүктеледі; Android қолданба параметрлерінде рұқсат беріп, қайталау үшін VM-ді толық қайта іске қосыңыз.</string>
     <string name="vs_skip_setup">Баптау шеберін өткізіп жіберу</string>
     <string name="vs_skip_setup_sub">Келесі толық жүктелуде баптауды аяқталған деп белгілеп, танылған баптау қолданбаларын өшіреді. Өшіру аяқталған баптауды қалпына келтірмейді. OEM қолдауы әртүрлі болуы мүмкін.</string>

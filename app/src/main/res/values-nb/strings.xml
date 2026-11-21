@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Et ekstra falskt SIM-kort. Bare fastvare bygget for to SIM-kort bruker det (mange fra Samsung og MediaTek). Gjelder ved neste oppstart.</string>
     <string name="vs_wifi_signal">Signalstyrke</string>
     <string name="vs_wifi_signal_sub">Streker Wi-Fi-ikonet viser</string>
-    <string name="vs_wifi_neighbors">Nettverk i nærheten</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi-listen viser også noen andre nettverk (låst, de kan ikke kobles til)</string>
     <string name="camera_permission_denied">Kameratillatelse avslått. ROM-en starter uten tilgang til vertens kamera; gi tillatelse i Androids appinnstillinger og start VM-en helt på nytt for å prøve igjen.</string>
     <string name="vs_skip_setup">Hopp over oppsettsveiviseren</string>
     <string name="vs_skip_setup_sub">Marker oppsettet som fullført og deaktiver gjenkjente oppsettsapper ved neste fulle oppstart. Å slå av tilbakestiller ikke fullført oppsett. Støtte for OEM-er kan variere.</string>

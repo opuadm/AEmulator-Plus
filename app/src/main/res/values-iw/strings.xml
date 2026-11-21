@@ -264,8 +264,6 @@
     <string name="vs_dual_sim_sub">כרטיס SIM מדומה שני. רק קושחה שנבנתה לשני כרטיסי SIM משתמשת בו (רבות של Samsung ושל MediaTek). מוחל באתחול הבא.</string>
     <string name="vs_wifi_signal">עוצמת האות</string>
     <string name="vs_wifi_signal_sub">הפסים שסמל ה-Wi-Fi מציג</string>
-    <string name="vs_wifi_neighbors">רשתות סמוכות</string>
-    <string name="vs_wifi_neighbors_sub">רשימת ה-Wi-Fi מציגה גם כמה רשתות אחרות (נעולות, אי אפשר להתחבר אליהן)</string>
     <string name="camera_permission_denied">הרשאת המצלמה נדחתה. ה-ROM יאותחל בלי גישה למצלמת המארח; הענק הרשאה בהגדרות האפליקציה ב-Android והפעל מחדש את המכונה הווירטואלית במלואה כדי לנסות שוב.</string>
     <string name="vs_skip_setup">דלג על אשף ההגדרה</string>
     <string name="vs_skip_setup_sub">סמן את ההגדרה כהושלמה והשבת אפליקציות הגדרה מוכרות באתחול המלא הבא. כיבוי לא מבטל הגדרה שהושלמה. התמיכה ב-OEM עשויה להשתנות.</string>

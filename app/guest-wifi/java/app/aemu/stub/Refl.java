@@ -12,6 +12,9 @@ final class Refl {
     static void log(String s) {
         System.out.println("aemu-wifi: " + s);
         System.out.flush();
+        try {
+            android.util.Log.i("aemu-wifi", s);
+        } catch (Throwable ignored) { }
     }
 
     static Class<?> cls(String name) {
@@ -110,6 +113,8 @@ final class Refl {
         }
     }
 
+    private static final java.util.Set<String> createFailed = java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
     /** Instance made by the declared constructor with exactly these parameter types (null args allowed), or null. */
     static Object create(String className, Class<?>[] types, Object... args) {
         try {
@@ -117,7 +122,7 @@ final class Refl {
             k.setAccessible(true);
             return k.newInstance(args);
         } catch (Throwable t) {
-            log("new " + className + " failed: " + t);
+            if (createFailed.add(className + java.util.Arrays.toString(types))) log("new " + className + " failed: " + t);
             return null;
         }
     }

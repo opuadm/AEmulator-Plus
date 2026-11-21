@@ -133,6 +133,9 @@ public final class WifiStub {
         boolean agentDone = !agent;
         int takeovers = 0;
         int refused = 0;
+        long loaded = cfg.modified;
+        int ticks = 0;
+        int sentKbps = svc != null ? svc.bandwidthKbps() : 0;
         // Gingerbread (API 9-10): ConnectivityService creates the framework's WifiService itself and does
         // ServiceManager.addService("wifi") in its constructor. That servicemanager refuses a second registration
         // ("ALREADY REGISTERED", EPERM -> SecurityException in system_server), so if we own "wifi" first, system_server dies in
@@ -162,6 +165,20 @@ public final class WifiStub {
                     agentDone = true;
                 }
             }
+            if (svc != null) {
+                try {
+                    WifiConfig now = WifiConfig.load();
+                    if (now != null && now.modified != loaded) { loaded = now.modified; svc.reload(now); }
+                } catch (Throwable e) {
+                    Refl.log("settings reload: " + e);
+                }
+                if (++ticks % 20 == 0) svc.republish();
+                final int kbps = svc.bandwidthKbps();
+                if (kbps != sentKbps) {
+                    sentKbps = kbps;
+                    main.post(new Runnable() { @Override public void run() { if (net != null) net.setBandwidth(kbps); } });
+                }
+            }
             if (legacy != null) legacy.tick(checkService("connectivity") != null);
             Thread.sleep(agentDone ? 1000L : 500L);
         }
@@ -174,15 +191,17 @@ public final class WifiStub {
             if (connected && net == null) {
                 Object info = svc != null ? svc.wifiInfo() : null;
                 try {
-                    net = WifiNet.register(looper, connectivity, cfg, WifiNet.Identity.WIFI, info);
+                    net = WifiNet.register(looper, connectivity, cfg, WifiNet.Identity.WIFI, info, svc != null ? svc.bandwidthKbps() : WifiService.DEFAULT_KBPS);
                 } catch (Throwable t) {
                     if (Build.VERSION.SDK_INT < 26) throw t;
                     // 8+: not as a Wi-Fi network; the guest must not lose its internet over that
                     Refl.log("registering as Wi-Fi failed (" + t + "), registering the Ethernet placeholder instead");
                     t.printStackTrace(System.out);
-                    net = WifiNet.register(looper, connectivity, cfg, WifiNet.Identity.ETHERNET, null);
+                    net = WifiNet.register(looper, connectivity, cfg, WifiNet.Identity.ETHERNET, null, WifiService.DEFAULT_KBPS);
                 }
+                if (svc != null) svc.setNetwork(net.network());
             } else if (!connected && net != null) {
+                if (svc != null) svc.setNetwork(null);
                 net.disconnect();
                 net = null;
             }

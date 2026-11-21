@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">အတု SIM ဒုတိယတစ်ခု။ SIM နှစ်ကတ်အတွက် တည်ဆောက်ထားသော ဖမ်းဝဲများသာ အသုံးပြုသည် (Samsung နှင့် MediaTek အများစု)။ နောက်တစ်ကြိမ်စတင်ချိန်တွင် သက်ရောက်သည်။</string>
     <string name="vs_wifi_signal">လိုင်းအား</string>
     <string name="vs_wifi_signal_sub">Wi-Fi အိုင်ကွန်က ပြသမည့် ဘားအရေအတွက်</string>
-    <string name="vs_wifi_neighbors">အနီးရှိ ကွန်ရက်များ</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi စာရင်းတွင် အခြားကွန်ရက်အချို့ကိုလည်း ပြသည် (လော့ခ်ချထားသဖြင့် ချိတ်ဆက်၍ မရပါ)</string>
     <string name="camera_permission_denied">ကင်မရာခွင့်ပြုချက်ကို ငြင်းပယ်ထားသည်။ ROM သည် ဟို့စ်ကင်မရာသို့ ဝင်ခွင့်မရဘဲ စတင်မည်၊ Android အက်ပ်ဆက်တင်များတွင် ခွင့်ပြုပြီး ထပ်စမ်းရန် VM ကို အပြည့်အဝ ပြန်စတင်ပါ။</string>
     <string name="vs_skip_setup">စတင်သတ်မှတ်ခြင်းဝိဇ်ဇတ်ကို ကျော်ရန်</string>
     <string name="vs_skip_setup_sub">နောက်တစ်ကြိမ် အပြည့်အဝစတင်ချိန်တွင် စတင်သတ်မှတ်ခြင်းကို ပြီးစီးသည်ဟု မှတ်ပြီး သိရှိထားသော setup အက်ပ်များကို ပိတ်သည်။ ပိတ်လိုက်ခြင်းက ပြီးစီးပြီးသော setup ကို ပြန်မသတ်မှတ်ပါ။ OEM ပံ့ပိုးမှု ကွဲပြားနိုင်သည်။</string>

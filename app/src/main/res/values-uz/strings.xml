@@ -276,8 +276,6 @@
     <string name="vs_dual_sim_sub">Ikkinchi soxta SIM. Faqat ikkita SIM-kartani qoʻllab-quvvatlaydigan proshivkalarda ishlaydi (koʻp Samsung va MediaTek). Keyingi yuklanishda qoʻllanadi.</string>
     <string name="vs_wifi_signal">Signal kuchi</string>
     <string name="vs_wifi_signal_sub">Wi-Fi belgisida koʻrsatiladigan chiziqlar</string>
-    <string name="vs_wifi_neighbors">Yaqin atrofdagi tarmoqlar</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi tarmoqlari roʻyxatida yana bir nechta tarmoqni koʻrsatadi. (qulflangan, ularga ulanib boʻlmaydi)</string>
     <string name="camera_permission_denied">Kameraga ruxsat rad etildi. ROM xost kamerasiga kirishsiz yuklanadi; Android ilova sozlamalarida ruxsat bering va qayta urinish uchun VM ni toʻliq qayta ishga tushiring.</string>
     <string name="vs_skip_setup">Sozlash ustasini oʻtkazib yuborish</string>
     <string name="vs_skip_setup_sub">Keyingi toʻliq yuklanishda sozlashni tugallangan deb belgilaydi va aniqlangan sozlash ilovalarini oʻchiradi. Oʻchirib qoʻyish tugallangan sozlashni bekor qilmaydi. OEM qoʻllab-quvvatlashi har xil boʻlishi mumkin.</string>

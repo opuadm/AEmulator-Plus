@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">Teine võlts-SIM-kaart. Töötab ainult kahe SIM-kaarti toetava püsivaraga (paljud Samsungi ja MediaTeki seadmed). Rakendub järgmisel käivitusel.</string>
     <string name="vs_wifi_signal">Signaali tugevus</string>
     <string name="vs_wifi_signal_sub">Mitu kriipsu Wi-Fi ikoon näitab</string>
-    <string name="vs_wifi_neighbors">Läheduses olevad võrgud</string>
-    <string name="vs_wifi_neighbors_sub">Näitab Wi-Fi võrkude loendis mõnda muud võrku. (Need on lukus, nendega ühenduda ei saa)</string>
     <string name="camera_permission_denied">Kaamera luba keelati. ROM käivitub ilma juurdepääsuta hosti kaamerale; andke luba Androidi rakenduste seadetes ja taaskäivitage virtuaalmasin täielikult, et uuesti proovida.</string>
     <string name="vs_skip_setup">Jäta seadistusviisard vahele</string>
     <string name="vs_skip_setup_sub">Märgib seadistuse lõpetatuks ja keelab järgmisel täielikul käivitusel tuvastatud seadistusrakendused. Väljalülitamine ei lähtesta lõpetatud seadistust. Tootjate tugi võib erineda.</string>

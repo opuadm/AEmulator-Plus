@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">Antra netikra SIM kortelė. Veikia tik su programine įranga, palaikančia dvi SIM korteles (daug „Samsung“ ir „MediaTek“). Taikoma kitą kartą paleidus.</string>
     <string name="vs_wifi_signal">Signalo stiprumas</string>
     <string name="vs_wifi_signal_sub">Kiek brūkšnelių rodo „Wi-Fi“ piktograma</string>
-    <string name="vs_wifi_neighbors">Netoliese esantys tinklai</string>
-    <string name="vs_wifi_neighbors_sub">Rodo kelis kitus tinklus „Wi-Fi“ tinklų sąraše. (Jie užrakinti, prisijungti negalima)</string>
     <string name="camera_permission_denied">Kameros leidimas atmestas. ROM bus paleistas be prieigos prie šeimininko kameros; suteikite leidimą „Android“ programų nustatymuose ir visiškai iš naujo paleiskite virtualią mašiną, kad bandytumėte dar kartą.</string>
     <string name="vs_skip_setup">Praleisti sąrankos vedlį</string>
     <string name="vs_skip_setup_sub">Pažymi sąranką kaip baigtą ir kitą kartą visiškai paleidus išjungia atpažintas sąrankos programas. Išjungus baigta sąranka neatkuriama. Gamintojų palaikymas gali skirtis.</string>

@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Un al doilea SIM fals. Îl folosește doar firmware-ul conceput pentru două SIM-uri (multe Samsung și MediaTek). Se aplică la următoarea pornire.</string>
     <string name="vs_wifi_signal">Puterea semnalului</string>
     <string name="vs_wifi_signal_sub">Barele afișate de pictograma Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Rețele din apropiere</string>
-    <string name="vs_wifi_neighbors_sub">Lista Wi-Fi arată și alte câteva rețele (blocate, nu se pot alătura)</string>
     <string name="camera_permission_denied">Permisiunea pentru cameră a fost refuzată. ROM-ul va porni fără acces la camera gazdei; acordă permisiunea în setările aplicației Android și repornește complet VM-ul pentru a reîncerca.</string>
     <string name="vs_skip_setup">Omite asistentul de configurare</string>
     <string name="vs_skip_setup_sub">Marchează configurarea ca finalizată și dezactivează aplicațiile de configurare recunoscute la următoarea pornire completă. Dezactivarea nu anulează configurarea deja terminată. Suportul OEM poate varia.</string>

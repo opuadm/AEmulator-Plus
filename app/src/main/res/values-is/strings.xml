@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">Annað gervi-SIM-kort. Virkar aðeins í fastbúnaði sem styður tvö SIM-kort (mörg Samsung- og MediaTek-tæki). Tekur gildi við næstu ræsingu.</string>
     <string name="vs_wifi_signal">Merkisstyrkur</string>
     <string name="vs_wifi_signal_sub">Fjöldi strika sem Wi-Fi táknið sýnir</string>
-    <string name="vs_wifi_neighbors">Net í nágrenninu</string>
-    <string name="vs_wifi_neighbors_sub">Sýnir nokkur önnur net í lista yfir Wi-Fi net. (læst, ekki hægt að tengjast þeim)</string>
     <string name="camera_permission_denied">Heimild fyrir myndavél hafnað. ROM-ið ræsist án aðgangs að myndavél hýsils; veittu heimild í stillingum Android-forritsins og endurræstu sýndarvélina að fullu til að reyna aftur.</string>
     <string name="vs_skip_setup">Sleppa uppsetningarhjálp</string>
     <string name="vs_skip_setup_sub">Merkja uppsetningu lokið og slökkva á þekktum uppsetningarforritum við næstu fullu ræsingu. Ef slökkt er á þessu er lokin uppsetning ekki afturkölluð. Stuðningur við OEM-framleiðendur getur verið mismunandi.</string>

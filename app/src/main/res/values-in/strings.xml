@@ -358,8 +358,6 @@
     <string name="vs_dual_sim_sub">SIM palsu kedua. Hanya firmware yang dibuat untuk dua SIM yang menggunakannya (banyak Samsung dan MediaTek). Berlaku pada boot berikutnya.</string>
     <string name="vs_wifi_signal">Kekuatan sinyal</string>
     <string name="vs_wifi_signal_sub">Jumlah batang yang ditampilkan ikon Wi-Fi</string>
-    <string name="vs_wifi_neighbors">Jaringan terdekat</string>
-    <string name="vs_wifi_neighbors_sub">Daftar Wi-Fi juga menampilkan beberapa jaringan lain (terkunci, tidak dapat disambungkan)</string>
     <string name="vs_gyro_lock">Kunci orientasi giroskop</string>
     <string name="vs_gyro_lock_sub">0° / 180° mengunci sensor gerak host pada orientasi tetap: gravitasi tetap dan giroskop membaca nol, sehingga tamu tidak pernah berputar otomatis. “Tanpa giroskop” menyembunyikan giroskop dari tamu sepenuhnya (gunakan jika giroskop bermasalah); akselerometer dan magnetometer tetap asli. Berlaku setelah VM dimulai ulang sepenuhnya.</string>
     <string name="vs_gyro_disabled">Nonaktif</string>

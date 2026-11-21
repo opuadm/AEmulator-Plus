@@ -363,8 +363,6 @@
     <string name="vs_dual_sim_sub">شريحة SIM ثانية وهمية. لا يستخدمها إلا البرنامج الثابت المصمَّم لشريحتين (كثير من أجهزة Samsung وMediaTek). يُطبَّق عند الإقلاع التالي.</string>
     <string name="vs_wifi_signal">قوة الإشارة</string>
     <string name="vs_wifi_signal_sub">الأشرطة التي تعرضها أيقونة Wi-Fi</string>
-    <string name="vs_wifi_neighbors">الشبكات القريبة</string>
-    <string name="vs_wifi_neighbors_sub">تعرض قائمة Wi-Fi أيضًا بعض الشبكات الأخرى (مقفلة، ولا يمكن الانضمام إليها)</string>
     <string name="vs_gyro_lock">قفل اتجاه الجيروسكوب</string>
     <string name="vs_gyro_lock_sub">0° / 180° يثبّت مستشعرات حركة المضيف على اتجاه ثابت: تبقى الجاذبية ثابتة ويقرأ الجيروسكوب صفرًا، فلا يدور الضيف تلقائيًا أبدًا. «بلا جيروسكوب» يخفي الجيروسكوب عن الضيف تمامًا (استخدمه إذا كان الجيروسكوب يتصرف بشكل خاطئ)؛ ويبقى مقياس التسارع والمغناطيسية حقيقيين. يسري بعد إعادة تشغيل الجهاز الافتراضي بالكامل.</string>
     <string name="vs_gyro_disabled">معطّل</string>

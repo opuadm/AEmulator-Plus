@@ -358,8 +358,6 @@
     <string name="vs_dual_sim_sub">두 번째 가짜 SIM입니다. SIM 두 개용으로 만든 펌웨어(많은 Samsung 및 MediaTek 펌웨어)에서만 사용합니다. 다음 부팅 시 적용됩니다.</string>
     <string name="vs_wifi_signal">신호 세기</string>
     <string name="vs_wifi_signal_sub">Wi-Fi 아이콘에 표시되는 막대 수</string>
-    <string name="vs_wifi_neighbors">주변 네트워크</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi 목록에 다른 네트워크도 몇 개 표시됩니다(잠겨 있어 연결할 수 없음)</string>
     <string name="vs_gyro_lock">자이로스코프 방향 고정</string>
     <string name="vs_gyro_lock_sub">0° / 180°는 호스트의 모션 센서를 고정된 방향에 고정합니다. 중력은 그대로이고 자이로스코프는 0을 읽으므로 게스트가 자동으로 회전하지 않습니다. “자이로스코프 없음”은 게스트에서 자이로스코프를 완전히 숨깁니다(자이로가 오작동할 때 사용). 가속도계와 자기계는 실제 값이 유지됩니다. VM을 완전히 다시 시작한 후 적용됩니다.</string>
     <string name="vs_gyro_disabled">사용 안 함</string>

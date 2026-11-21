@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">ایک دوسرا جعلی سم۔ اسے صرف دو سم کے لیے بنے فرم ویئر استعمال کرتے ہیں (بہت سے Samsung اور MediaTek)۔ اگلے بوٹ پر لاگو ہوتا ہے۔</string>
     <string name="vs_wifi_signal">سگنل کی طاقت</string>
     <string name="vs_wifi_signal_sub">Wi-Fi آئیکن جتنی بارز دکھاتا ہے</string>
-    <string name="vs_wifi_neighbors">قریبی نیٹ ورکس</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi فہرست میں کچھ دوسرے نیٹ ورکس بھی دکھائے جاتے ہیں (مقفل، ان سے منسلک نہیں ہوا جا سکتا)</string>
     <string name="camera_permission_denied">کیمرہ کی اجازت مسترد کر دی گئی۔ ROM ہوسٹ کیمرہ تک رسائی کے بغیر بوٹ ہوگا؛ Android ایپ کی ترتیبات میں اجازت دیں اور دوبارہ کوشش کے لیے VM کو مکمل طور پر ری اسٹارٹ کریں۔</string>
     <string name="vs_skip_setup">سیٹ اپ وزرڈ چھوڑ دیں</string>
     <string name="vs_skip_setup_sub">اگلے مکمل بوٹ پر سیٹ اپ کو مکمل کے طور پر نشان زد کریں اور پہچانی گئی سیٹ اپ ایپس کو غیر فعال کریں۔ بند کرنے سے مکمل ہو چکا سیٹ اپ ری سیٹ نہیں ہوتا۔ OEM کی معاونت مختلف ہو سکتی ہے۔</string>

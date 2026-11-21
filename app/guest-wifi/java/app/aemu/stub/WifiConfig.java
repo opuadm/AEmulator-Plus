@@ -12,6 +12,13 @@ final class WifiConfig {
 
     final String ssid;
     final boolean secured;
+    /** "none", "wpa2", "wpa" (WPA/WPA2 mixed) or "wpa3". */
+    final String security;
+    /** Connect to [ssid] at start-up; off = the guest starts disconnected and the user joins from Settings. */
+    final boolean autoConnect;
+    /** Speed limit of the first network in kbit/s; 0 = none. */
+    final int speedKbps;
+    final long modified;
     final String psk;
     final String bssid;
     final String mac;
@@ -23,21 +30,44 @@ final class WifiConfig {
     final int rssi;
     final int speed;
     final int frequency;
-    /** Other networks in range: listed by a scan, locked (their passphrase is unknown, so joining fails). */
-    final java.util.List<Neighbor> neighbors = new java.util.ArrayList<Neighbor>();
+    /** Another joinable network of the host's list: its own name, passphrase (empty = open), signal and BSSID. */
+    static final class Extra {
+        final String ssid, psk, bssid, security;
+        final int rssi, speedKbps;
+        Extra(String ssid, String psk, int rssi, String bssid, String security, int speedKbps) {
+            this.ssid = ssid; this.psk = psk; this.rssi = rssi; this.bssid = bssid; this.security = security; this.speedKbps = speedKbps;
+        }
+        boolean secured() { return !"none".equals(security); }
+    }
 
-    static final class Neighbor {
-        final String ssid, bssid, caps;
-        final int rssi, frequency;
-        Neighbor(String ssid, String bssid, String caps, int rssi, int frequency) {
-            this.ssid = ssid; this.bssid = bssid; this.caps = caps; this.rssi = rssi; this.frequency = frequency;
+    /** The capabilities string a scan result carries for a network of this security type. */
+    static String caps(String security) {
+        if ("wpa3".equals(security)) return "[RSN-SAE-CCMP][ESS]";
+        if ("wpa".equals(security)) return "[WPA-PSK-TKIP+CCMP][WPA2-PSK-TKIP+CCMP][ESS]";
+        if ("wpa2".equals(security)) return "[WPA2-PSK-CCMP][ESS]";
+        return "[ESS]";
+    }
+    final java.util.List<Extra> extras = new java.util.ArrayList<Extra>();
+
+    private static String unhex(String h) {
+        try {
+            byte[] b = new byte[h.length() / 2];
+            for (int i = 0; i < b.length; i++) b[i] = (byte) Integer.parseInt(h.substring(2 * i, 2 * i + 2), 16);
+            return new String(b, "UTF-8");
+        } catch (Throwable t) {
+            return "";
         }
     }
 
-    private WifiConfig(Properties p) {
+    private WifiConfig(Properties p, long modified) {
+        this.modified = modified;
+        autoConnect = !"false".equals(p.getProperty("autoconnect"));
+        speedKbps = Math.max(0, num(p.getProperty("speedkbps"), 0));
         ssid = p.getProperty("ssid", "AEmulator-WiFi");
         secured = "true".equals(p.getProperty("secured")) && p.getProperty("psk", "").length() >= 8;
         psk = secured ? p.getProperty("psk", "") : "";
+        String mainSec = p.getProperty("security", secured ? "wpa2" : "none");
+        security = secured ? mainSec : "none";
         bssid = p.getProperty("bssid", "02:00:00:00:00:01");
         mac = p.getProperty("mac", "02:15:5d:ae:00:01");
         ip = p.getProperty("ip", "10.0.2.15");
@@ -49,11 +79,15 @@ final class WifiConfig {
         speed = num(p.getProperty("speed"), 72);
         frequency = num(p.getProperty("frequency"), 2437);
         // "ssid|bssid|caps|rssi|frequency" entries separated by newlines (written by WifiEmu.kt)
-        String list = p.getProperty("neighbors", "");
-        for (String line : list.split("\n")) {
+        for (String line : p.getProperty("extras", "").split("\n")) {
             String[] f = line.split("\\|", -1);
-            if (f.length != 5 || f[0].length() == 0) continue;
-            neighbors.add(new Neighbor(f[0], f[1], f[2], num(f[3], -80), num(f[4], 2412)));
+            if (f.length < 4) continue;
+            String name = unhex(f[0]);
+            if (name.length() == 0) continue;
+            String psk = unhex(f[1]);
+            String sec = f.length > 4 ? f[4] : psk.length() >= 8 ? "wpa2" : "none";
+            if (!"none".equals(sec) && psk.length() < 8) continue;
+            extras.add(new Extra(name, "none".equals(sec) ? "" : psk, num(f[2], -60), f[3], sec, f.length > 5 ? Math.max(0, num(f[5], 0)) : 0));
         }
     }
 
@@ -72,7 +106,7 @@ final class WifiConfig {
             in = new FileInputStream(f);
             Properties p = new Properties();
             p.load(in);
-            return new WifiConfig(p);
+            return new WifiConfig(p, f.lastModified());
         } catch (Throwable t) {
             Refl.log("cannot read " + f + ": " + t);
             return null;

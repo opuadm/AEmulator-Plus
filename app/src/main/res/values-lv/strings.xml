@@ -275,8 +275,6 @@
     <string name="vs_dual_sim_sub">Otra viltota SIM karte. Darbojas tikai ar aparātprogrammatūru, kas atbalsta divas SIM kartes (daudzas Samsung un MediaTek). Tiek lietots nākamajā palaišanā.</string>
     <string name="vs_wifi_signal">Signāla stiprums</string>
     <string name="vs_wifi_signal_sub">Cik joslu rāda Wi-Fi ikona</string>
-    <string name="vs_wifi_neighbors">Tuvumā esošie tīkli</string>
-    <string name="vs_wifi_neighbors_sub">Rāda dažus citus tīklus Wi-Fi tīklu sarakstā. (Tie ir slēgti, tiem pievienoties nevar)</string>
     <string name="camera_permission_denied">Kameras atļauja liegta. ROM tiks palaists bez piekļuves saimnieka kamerai; piešķiriet atļauju Android lietotņu iestatījumos un pilnībā restartējiet virtuālo mašīnu, lai mēģinātu vēlreiz.</string>
     <string name="vs_skip_setup">Izlaist iestatīšanas vedni</string>
     <string name="vs_skip_setup_sub">Atzīmē iestatīšanu kā pabeigtu un nākamajā pilnajā palaišanā atspējo atpazītās iestatīšanas lietotnes. Izslēgšana neatiestata pabeigto iestatīšanu. Dažādu ražotāju atbalsts var atšķirties.</string>

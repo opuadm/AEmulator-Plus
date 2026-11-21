@@ -242,8 +242,6 @@
     <string name="vs_dual_sim_sub">Um segundo chip SIM falso. Só firmwares feitos para dois chips o usam (muitos Samsung e MediaTek). Aplica-se na próxima inicialização.</string>
     <string name="vs_wifi_signal">Intensidade do sinal</string>
     <string name="vs_wifi_signal_sub">Barras que o ícone de Wi-Fi mostra</string>
-    <string name="vs_wifi_neighbors">Redes próximas</string>
-    <string name="vs_wifi_neighbors_sub">A lista de Wi-Fi também mostra algumas outras redes (bloqueadas, não é possível se conectar)</string>
     <string name="camera_permission_denied">Permissão da câmera negada. A ROM vai iniciar sem acesso à câmera do host; conceda a permissão nas configurações do app no Android e reinicie completamente a VM para tentar de novo.</string>
     <string name="vs_skip_setup">Pular o assistente de configuração</string>
     <string name="vs_skip_setup_sub">Marca a configuração como concluída e desativa os apps de configuração reconhecidos na próxima inicialização completa. Desativar não desfaz uma configuração já concluída. O suporte pode variar conforme o fabricante.</string>

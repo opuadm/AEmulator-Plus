@@ -105,7 +105,7 @@ final class LegacyWifi {
         Object lc = Refl.newNoArg("android.net.LinkCapabilities");
         if (lc instanceof Parcelable) ns.putExtra("linkCapabilities", (Parcelable) lc);
         if (connected) {
-            ns.putExtra("bssid", cfg.bssid);
+            ns.putExtra("bssid", svc.bssid());
             Object wi = svc.wifiInfo();
             if (wi instanceof Parcelable) ns.putExtra("wifiInfo", (Parcelable) wi);
         }
@@ -114,7 +114,7 @@ final class LegacyWifi {
         if (Build.VERSION.SDK_INT < 14 && connected) {
             Intent rs = new Intent(RSSI_CHANGED);
             rs.addFlags(FLAG_REGISTERED_ONLY);
-            rs.putExtra("newRssi", cfg.rssi);
+            rs.putExtra("newRssi", svc.rssi());
             send(am, rs, true);
         }
     }
@@ -136,7 +136,7 @@ final class LegacyWifi {
                 Integer.valueOf(1), Integer.valueOf(0), "WIFI", "");
         if (ni == null) return null;
         Object ds = enumConst("android.net.NetworkInfo$DetailedState", connected ? "CONNECTED" : "DISCONNECTED");
-        Refl.call(ni, "setDetailedState", ds, null, connected ? cfg.bssid : null);
+        Refl.call(ni, "setDetailedState", ds, null, connected ? svc.bssid() : null);
         Refl.call(ni, "setIsAvailable", Boolean.valueOf(enabled));
         return ni;
     }

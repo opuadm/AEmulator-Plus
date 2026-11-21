@@ -264,8 +264,6 @@
     <string name="vs_dual_sim_sub">একটি দ্বিতীয় নকল SIM। শুধু দুই SIM-এর জন্য তৈরি ফার্মওয়্যার এটি ব্যবহার করে (অনেক Samsung ও MediaTek)। পরবর্তী বুটে প্রযোজ্য।</string>
     <string name="vs_wifi_signal">সিগন্যালের শক্তি</string>
     <string name="vs_wifi_signal_sub">Wi-Fi আইকন যতগুলো দাগ দেখায়</string>
-    <string name="vs_wifi_neighbors">আশেপাশের নেটওয়ার্ক</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi তালিকায় আরও কয়েকটি নেটওয়ার্কও দেখায় (লক করা, যুক্ত হওয়া যায় না)</string>
     <string name="camera_permission_denied">ক্যামেরার অনুমতি প্রত্যাখ্যাত হয়েছে। রম হোস্ট-ক্যামেরা অ্যাক্সেস ছাড়াই বুট হবে; অ্যান্ড্রয়েডের অ্যাপ সেটিংসে অনুমতি দিন এবং আবার চেষ্টা করতে VM সম্পূর্ণ রিস্টার্ট করুন।</string>
     <string name="vs_skip_setup">সেটআপ উইজার্ড এড়িয়ে যান</string>
     <string name="vs_skip_setup_sub">পরবর্তী সম্পূর্ণ বুটে সেটআপ সম্পন্ন হিসেবে চিহ্নিত করুন এবং শনাক্ত হওয়া সেটআপ অ্যাপ নিষ্ক্রিয় করুন। বন্ধ করলে সম্পন্ন সেটআপ রিসেট হয় না। প্রস্তুতকারকভেদে সমর্থন ভিন্ন হতে পারে।</string>

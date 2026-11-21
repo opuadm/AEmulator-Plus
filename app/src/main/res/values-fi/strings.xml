@@ -265,8 +265,6 @@
     <string name="vs_dual_sim_sub">Toinen väärennetty SIM-kortti. Vain kahdelle SIM-kortille tehdyt laiteohjelmistot käyttävät sitä (monet Samsungin ja MediaTekin). Tulee voimaan seuraavalla käynnistyksellä.</string>
     <string name="vs_wifi_signal">Signaalin voimakkuus</string>
     <string name="vs_wifi_signal_sub">Palkit, jotka Wi-Fi-kuvake näyttää</string>
-    <string name="vs_wifi_neighbors">Lähellä olevat verkot</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi-luettelossa näkyy myös muutama muu verkko (lukittuja, niihin ei voi liittyä)</string>
     <string name="camera_permission_denied">Kameralupa evätty. ROM käynnistyy ilman isännän kameran käyttöä; anna lupa Androidin sovellusasetuksissa ja käynnistä järjestelmä kokonaan uudelleen yrittääksesi uudestaan.</string>
     <string name="vs_skip_setup">Ohita käyttöönottoavustaja</string>
     <string name="vs_skip_setup_sub">Merkitsee käyttöönoton valmiiksi ja poistaa tunnistetut käyttöönottosovellukset käytöstä seuraavalla täydellä käynnistyksellä. Pois kytkeminen ei nollaa valmistunutta käyttöönottoa. Valmistajakohtainen tuki voi vaihdella.</string>

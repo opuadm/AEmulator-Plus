@@ -358,8 +358,6 @@
     <string name="vs_dual_sim_sub">第二张虚拟 SIM 卡。只有为双 SIM 打造的固件才会使用(许多 Samsung 和 MediaTek 固件)。下次启动时生效。</string>
     <string name="vs_wifi_signal">信号强度</string>
     <string name="vs_wifi_signal_sub">Wi-Fi 图标显示的格数</string>
-    <string name="vs_wifi_neighbors">附近的网络</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi 列表中还会显示其他几个网络(已锁定,无法加入)</string>
     <string name="vs_gyro_lock">锁定陀螺仪方向</string>
     <string name="vs_gyro_lock_sub">0° / 180° 将主机的运动传感器固定在一个方向:重力保持不变,陀螺仪读数为零,因此客户机永远不会自动旋转。“无陀螺仪”会将陀螺仪对客户机完全隐藏(陀螺仪异常时使用);加速度计和磁力计仍为真实数据。完全重启虚拟机后生效。</string>
     <string name="vs_gyro_disabled">已停用</string>

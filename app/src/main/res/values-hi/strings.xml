@@ -359,8 +359,6 @@
     <string name="vs_dual_sim_sub">दूसरा नकली SIM। इसे केवल दो SIM के लिए बने फ़र्मवेयर इस्तेमाल करते हैं (कई Samsung और MediaTek वाले)। अगले बूट पर लागू होता है।</string>
     <string name="vs_wifi_signal">सिग्नल की ताकत</string>
     <string name="vs_wifi_signal_sub">Wi-Fi आइकन जितने बार दिखाता है</string>
-    <string name="vs_wifi_neighbors">आस-पास के नेटवर्क</string>
-    <string name="vs_wifi_neighbors_sub">Wi-Fi सूची में कुछ और नेटवर्क भी दिखते हैं (लॉक किए हुए, उनसे जुड़ा नहीं जा सकता)</string>
     <string name="vs_gyro_lock">जायरोस्कोप का ओरिएंटेशन लॉक करें</string>
     <string name="vs_gyro_lock_sub">0° / 180° होस्ट के मोशन सेंसर को एक तय ओरिएंटेशन पर पिन कर देता है: गुरुत्वाकर्षण स्थिर रहता है और जायरोस्कोप शून्य पढ़ता है, इसलिए गेस्ट कभी अपने-आप नहीं घूमता। “कोई जायरोस्कोप नहीं” गेस्ट से जायरोस्कोप को पूरी तरह छिपा देता है (जायरोस्कोप गड़बड़ करे तो इसका इस्तेमाल करें); एक्सेलेरोमीटर और मैग्नेटोमीटर असली रहते हैं। VM के पूरे रीस्टार्ट के बाद प्रभावी होता है।</string>
     <string name="vs_gyro_disabled">बंद</string>
