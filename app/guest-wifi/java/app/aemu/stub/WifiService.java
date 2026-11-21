@@ -559,6 +559,12 @@ final class WifiService extends Binder {
                     if (wi instanceof Parcelable) ns.putExtra("wifiInfo", (Parcelable) wi);
                 }
                 Bcast.send(ns, true);
+                if (con) {
+                    Intent rs = new Intent("android.net.wifi.RSSI_CHANGED");
+                    rs.addFlags(0x10000000);
+                    rs.putExtra("newRssi", rssi());
+                    Bcast.send(rs);
+                }
                 Refl.log("state broadcasts: enabled=" + en + " connected=" + con);
             } catch (Throwable t) {
                 Refl.log("state broadcasts failed: " + t);
