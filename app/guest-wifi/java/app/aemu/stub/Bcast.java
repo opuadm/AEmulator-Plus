@@ -24,9 +24,14 @@ final class Bcast {
      * a screen that opens afterwards gets the last one, so a stale "disabled" left by the framework's own (radio-less) Wi-Fi
      * stack would show the switch off; a sticky one of ours replaces it. Falls back to a plain broadcast when refused.
      */
-    static void send(Intent intent, boolean sticky) {
-        if (sticky && !send0(intent, true)) send0(intent, false);
-        else if (!sticky) send0(intent, false);
+    static boolean send(Intent intent, boolean sticky) {
+        if (sticky) {
+            if (send0(intent, true)) return true;
+            send0(intent, false);
+            return false;
+        }
+        send0(intent, false);
+        return true;
     }
 
     private static boolean send0(Intent intent, boolean sticky) {

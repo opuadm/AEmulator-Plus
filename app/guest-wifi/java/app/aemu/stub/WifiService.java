@@ -63,7 +63,7 @@ final class WifiService extends Binder {
     private volatile int activeStd = 4;
     static final int DEFAULT_KBPS = 100000;
 
-    private boolean enabled = true;
+    private boolean enabled = android.os.Build.VERSION.SDK_INT < 34;
     private boolean saved = true;
     private boolean down;          // disconnect() was called: stays off until reconnect / enableNetwork / connect
     private boolean connected = true;
@@ -74,6 +74,8 @@ final class WifiService extends Binder {
     private final Handler scanHandler;
     private final List<Object> scanCallbacks = new ArrayList<Object>();
     private final List<IBinder> scanCallbackBinders = new ArrayList<IBinder>();
+    private final List<Object> stateListeners = new ArrayList<Object>();
+    private final List<IBinder> stateListenerBinders = new ArrayList<IBinder>();
     private final java.util.Set<String> unhandled = new java.util.HashSet<String>();
 
     WifiService(WifiConfig cfg, Looper looper) throws Exception {
@@ -142,6 +144,12 @@ final class WifiService extends Binder {
         scanHandler.postDelayed(publishTask, 700);
         scanHandler.postDelayed(publishTask, 2000);
         scanHandler.postDelayed(publishTask, 4000);
+    }
+
+    private void notifyState() {
+        List<Object> ls;
+        synchronized (stateListeners) { ls = new ArrayList<Object>(stateListeners); }
+        for (Object l : ls) Refl.call(l, "onWifiStateChanged");
     }
 
     void republish() {
@@ -326,6 +334,18 @@ final class WifiService extends Binder {
         return s;
     }
 
+    private String activeOrCfgSsid() {
+        return activeSsid != null ? activeSsid : cfg.ssid;
+    }
+
+    private static int securityType(String sec) {
+        String u = sec == null ? "" : sec.toUpperCase();
+        if (u.contains("SAE") || u.contains("WPA3")) return 4;
+        if (u.contains("WEP")) return 1;
+        if (u.contains("OPEN") || u.isEmpty() || u.equals("NONE")) return 0;
+        return 2;
+    }
+
     Object wifiInfo() {
         Object wi = Refl.newNoArg("android.net.wifi.WifiInfo");
         if (wi == null || !isConnected()) return wi;
@@ -335,6 +355,9 @@ final class WifiService extends Binder {
         Refl.call(wi, "setBSSID", bssid());
         Refl.call(wi, "setMacAddress", cfg.mac);
         Refl.call(wi, "setNetworkId", Integer.valueOf(NET_ID));
+        Refl.call(wi, "setIsPrimary", Boolean.TRUE);
+        Refl.call(wi, "setNetworkKey", "\"" + activeOrCfgSsid() + "\"-" + security());
+        Refl.call(wi, "setCurrentSecurityType", Integer.valueOf(securityType(security())));
         Refl.call(wi, "setRssi", Integer.valueOf(rssi()));
         int cap = limitKbps();
         Refl.call(wi, "setLinkSpeed", Integer.valueOf(cap > 0 ? Math.max(1, cap / 1000) : cfg.speed));
@@ -630,6 +653,7 @@ final class WifiService extends Binder {
             if (data.dataAvail() > 4) data.readString();
             enabled = data.readInt() != 0;
             update();
+            notifyState();
             reply.writeInt(1);
         } else if (name.equals("getConnectionInfo")) {
             Object wi = wifiInfo();
@@ -708,10 +732,34 @@ final class WifiService extends Binder {
             reply.writeInt(1);
         } else if (name.equals("startSoftAp") || name.equals("setWifiApEnabled")) {
             writeDefaultBool(name, reply); // there is no AP mode
+        } else if (name.equals("getFactoryMacAddresses")) {
+            reply.writeStringArray(new String[] { cfg.mac });
+        } else if (name.equals("calculateSignalLevel")) {
+            int r = data.readInt();
+            reply.writeInt(r <= -100 ? 0 : r >= -55 ? 4 : (int) ((r + 100) * 4f / 45f));
         } else if (name.equals("getVerboseLoggingLevel") || name.equals("getAggressiveHandover")) {
             reply.writeInt(0);
         } else if (name.equals("getCurrentNetwork")) {
             writeParcelable(reply, connected ? currentNetwork : null);
+        } else if (name.equals("addWifiStateChangedListener") || name.equals("removeWifiStateChangedListener")) {
+            IBinder b = data.readStrongBinder();
+            if (b != null) {
+                if (name.startsWith("add")) {
+                    try {
+                        Class<?> cb = Class.forName("android.net.wifi.IWifiStateChangedListener$Stub");
+                        Object o = cb.getMethod("asInterface", IBinder.class).invoke(null, b);
+                        synchronized (stateListeners) { stateListenerBinders.add(b); stateListeners.add(o); }
+                        Refl.log("addWifiStateChangedListener: " + stateListeners.size() + " listener(s)");
+                    } catch (Throwable t) {
+                        Refl.log("addWifiStateChangedListener: " + t);
+                    }
+                } else {
+                    synchronized (stateListeners) {
+                        int i = stateListenerBinders.indexOf(b);
+                        if (i >= 0) { stateListenerBinders.remove(i); stateListeners.remove(i); }
+                    }
+                }
+            }
         } else if (name.equals("registerScanResultsCallback") || name.equals("unregisterScanResultsCallback")) {
             // 11+: the guest's WifiManager waits for onScanResultsAvailable() after startScan()
             IBinder b = data.readStrongBinder();
@@ -722,6 +770,7 @@ final class WifiService extends Binder {
                         Object o = cb.getMethod("asInterface", IBinder.class).invoke(null, b);
                         synchronized (scanCallbacks) { scanCallbackBinders.add(b); scanCallbacks.add(o); }
                         Refl.log("registerScanResultsCallback: " + scanCallbacks.size() + " listener(s)");
+                        if (enabled) scheduleScanDone();
                     } catch (Throwable t) {
                         Refl.log("registerScanResultsCallback: " + t);
                     }
@@ -766,6 +815,7 @@ final class WifiService extends Binder {
         else if (t == String.class) reply.writeString(null);
         else if (t == CharSequence.class) reply.writeInt(0);
         else if (t.isArray()) reply.writeInt(-1);
+        else if (t.getName().endsWith("ParceledListSlice")) writeList(name, new ArrayList<Parcelable>(), reply);
         else if (List.class.isAssignableFrom(t)) reply.writeInt(-1);
         else if (IBinder.class.isAssignableFrom(t) || IInterface.class.isAssignableFrom(t)) reply.writeStrongBinder(null);
         else reply.writeInt(0); // a nullable parcelable (or anything else the old way)

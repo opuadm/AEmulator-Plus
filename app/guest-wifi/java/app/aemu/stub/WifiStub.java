@@ -134,6 +134,9 @@ public final class WifiStub {
         int takeovers = 0;
         int refused = 0;
         long loaded = cfg.modified;
+        final long started = System.currentTimeMillis();
+        int forced = 0;
+        int loops = 0;
         int ticks = 0;
         int sentKbps = svc != null ? svc.bandwidthKbps() : 0;
         // Gingerbread (API 9-10): ConnectivityService creates the framework's WifiService itself and does
@@ -144,11 +147,18 @@ public final class WifiStub {
         final boolean leaveName = Build.VERSION.SDK_INT < 14;
         if (leaveName) Refl.log("Gingerbread: \"wifi\" is left to the framework's own service (its servicemanager refuses a second one)");
         for (;;) {
-            if (svc != null && !leaveName && refused < 5 && !isOurs(checkService("wifi"), svc)) {
+            IBinder seen = svc != null && !leaveName ? checkService("wifi") : null;
+            boolean ours = isOurs(seen, svc);
+            boolean again = ours && forced < 100 && ++loops % 10 == 0 && System.currentTimeMillis() - started < 600000L;
+            if (svc != null && !leaveName && refused < 5 && (!ours || again)) {
                 try {
                     addService("wifi", svc);
-                    if (takeovers++ == 0) Refl.log("service \"wifi\" registered");
-                    else if (takeovers <= 3) Refl.log("service \"wifi\" taken back from the framework's own");
+                    if (!ours) {
+                        if (takeovers++ == 0) Refl.log("service \"wifi\" registered");
+                        else if (takeovers <= 3) Refl.log("service \"wifi\" taken back from the framework's own");
+                    } else if (forced++ < 3) {
+                        Refl.log("service \"wifi\" registered again; the check said it is ours (" + (seen == null ? "null" : seen.getClass().getName()) + ")");
+                    }
                 } catch (Throwable e) {
                     // a refused registration must not end the watcher (it also registers the network and publishes the state)
                     if (++refused <= 5) Refl.log("service \"wifi\" refused: " + e);
