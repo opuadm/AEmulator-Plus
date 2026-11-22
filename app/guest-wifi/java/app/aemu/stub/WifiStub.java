@@ -95,6 +95,11 @@ public final class WifiStub {
                 @Override public void onConnectionChanged(final boolean connected) {
                     main.post(new Runnable() { @Override public void run() { applyConnection(looper, svc, cfg, connected); } });
                 }
+
+                @Override public void onSwitched() {
+                    main.post(new Runnable() { @Override public void run() { applyConnection(looper, svc, cfg, false); } });
+                    main.postDelayed(new Runnable() { @Override public void run() { applyConnection(looper, svc, cfg, true); } }, 400);
+                }
             });
         }
 

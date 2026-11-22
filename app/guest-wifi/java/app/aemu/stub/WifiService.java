@@ -43,6 +43,7 @@ final class WifiService extends Binder {
     /** Told when the connection comes or goes (the network agent that carries it into ConnectivityService). */
     interface Listener {
         void onConnectionChanged(boolean connected);
+        void onSwitched();
     }
 
     private static final int STATE_DISABLED = 1;
@@ -65,8 +66,10 @@ final class WifiService extends Binder {
 
     private boolean enabled = android.os.Build.VERSION.SDK_INT < 34;
     private boolean saved = true;
+    private final java.util.LinkedHashSet<String> known = new java.util.LinkedHashSet<String>();
     private boolean down;          // disconnect() was called: stays off until reconnect / enableNetwork / connect
     private boolean connected = true;
+    private String linkSsid;
     private Listener listener;
     private volatile android.net.Network currentNetwork;
     private volatile LegacyWifi legacy;
@@ -81,7 +84,9 @@ final class WifiService extends Binder {
     WifiService(WifiConfig cfg, Looper looper) throws Exception {
         this.cfg = cfg;
         this.saved = cfg.autoConnect;
-        this.connected = cfg.autoConnect;
+        if (saved) known.add(cfg.ssid);
+        this.connected = cfg.autoConnect && enabled;
+        this.linkSsid = connected ? cfg.ssid : null;
         Class<?> stub = Class.forName(DESCRIPTOR + "$Stub");
         for (Field f : stub.getDeclaredFields()) {
             if (!f.getName().startsWith("TRANSACTION_")) continue;
@@ -176,6 +181,15 @@ final class WifiService extends Binder {
         return connected;
     }
 
+    private final Runnable configsChanged = new Runnable() {
+        @Override public void run() {
+            Intent i = new Intent("android.net.wifi.CONFIGURED_NETWORKS_CHANGED");
+            i.addFlags(0x10000000);
+            i.putExtra("multipleChanges", true);
+            Bcast.send(i);
+        }
+    };
+
     private void update() {
         LegacyWifi lg = legacy;
         if (lg != null) lg.changed();
@@ -185,12 +199,24 @@ final class WifiService extends Binder {
         }
         boolean now = enabled && saved && !down;
         Listener l = null;
+        String cur = ssid();
+        boolean switched = false;
         synchronized (this) {
-            if (now == connected) return;
+            if (now == connected) {
+                if (!now || linkSsid == null || linkSsid.equals(cur)) return;
+                switched = true;
+            }
             connected = now;
+            linkSsid = now ? cur : null;
             l = listener;
         }
-        Refl.log(now ? "connected to " + ssid() : "disconnected");
+        if (android.os.Build.VERSION.SDK_INT >= 21 && scanHandler != null) scanHandler.postDelayed(configsChanged, 300);
+        if (switched) {
+            Refl.log("switched to " + cur);
+            if (l != null) l.onSwitched();
+            return;
+        }
+        Refl.log(now ? "connected to " + cur : "disconnected");
         if (l != null) l.onConnectionChanged(now);
     }
 
@@ -234,6 +260,7 @@ final class WifiService extends Binder {
             return ok;
         }
         // any other name is a network the user typed in: the host's connection is presented under it
+        remember(name);
         activeSsid = name;
         activeSec = psk != null && psk.length() >= 8 ? "wpa2" : "none";
         activeRssi = cfg.rssi;
@@ -244,13 +271,43 @@ final class WifiService extends Binder {
         return true;
     }
 
+    private void remember(String name) {
+        synchronized (known) { known.add(name); }
+    }
+
+    private String ssidForId(int id) {
+        if (id == NET_ID) return cfg.ssid;
+        if (id > NET_ID && id <= cfg.extras.size()) return cfg.extras.get(id - 1).ssid;
+        return null;
+    }
+
+    private boolean knownId(int id) {
+        String n = ssidForId(id);
+        if (n == null) return false;
+        synchronized (known) { return known.contains(n); }
+    }
+
+    private void joinId(int id) {
+        if (id == NET_ID) adoptMain();
+        else if (id > NET_ID && id <= cfg.extras.size()) adoptExtra(cfg.extras.get(id - 1));
+    }
+
+    private void forgetId(int id) {
+        String n = ssidForId(id);
+        if (n == null) return;
+        synchronized (known) { known.remove(n); }
+        if (n.equals(ssid())) { saved = false; update(); }
+    }
+
     private void adoptMain() {
         WifiConfig c = cfg;
+        remember(c.ssid);
         activeSsid = c.ssid; activeSec = c.security; activeRssi = c.rssi; activeBssid = c.bssid; activeKbps = c.speedKbps;
         activeFreq = c.frequency; activeStd = WifiConfig.standardCode(c.standard, c.band);
     }
 
     private void adoptExtra(WifiConfig.Extra x) {
+        remember(x.ssid);
         activeSsid = x.ssid; activeSec = x.security; activeRssi = x.rssi; activeBssid = x.bssid; activeKbps = x.speedKbps;
         activeFreq = WifiConfig.connFreq(x.band); activeStd = WifiConfig.standardCode(x.standard, x.band);
     }
@@ -354,7 +411,7 @@ final class WifiService extends Binder {
         Refl.call(wi, "setSSID", ssid != null ? ssid : ssid());
         Refl.call(wi, "setBSSID", bssid());
         Refl.call(wi, "setMacAddress", cfg.mac);
-        Refl.call(wi, "setNetworkId", Integer.valueOf(NET_ID));
+        Refl.call(wi, "setNetworkId", Integer.valueOf(activeId()));
         Refl.call(wi, "setIsPrimary", Boolean.TRUE);
         Refl.call(wi, "setNetworkKey", "\"" + activeOrCfgSsid() + "\"-" + security());
         Refl.call(wi, "setCurrentSecurityType", Integer.valueOf(securityType(security())));
@@ -446,12 +503,39 @@ final class WifiService extends Binder {
         return r;
     }
 
-    private WifiConfiguration savedConfig() {
+    private int activeId() {
+        String a = activeSsid;
+        if (a == null || a.equals(cfg.ssid)) return NET_ID;
+        int i = 1;
+        for (WifiConfig.Extra x : cfg.extras) {
+            if (x.ssid.equals(a)) return i;
+            i++;
+        }
+        return NET_ID;
+    }
+
+    private int idOf(String name) {
+        if (name.equals(cfg.ssid)) return NET_ID;
+        int i = 1;
+        for (WifiConfig.Extra x : cfg.extras) {
+            if (x.ssid.equals(name)) return i;
+            i++;
+        }
+        return activeId();
+    }
+
+    private String securityOf(String name) {
+        if (name.equals(cfg.ssid)) return cfg.security;
+        for (WifiConfig.Extra x : cfg.extras) if (x.ssid.equals(name)) return x.security;
+        return security();
+    }
+
+    private WifiConfiguration savedConfig(String name) {
         WifiConfiguration c = new WifiConfiguration();
-        c.SSID = "\"" + ssid() + "\"";
-        c.networkId = NET_ID;
-        c.status = isConnected() ? WifiConfiguration.Status.CURRENT : WifiConfiguration.Status.ENABLED;
-        String sec = security();
+        c.SSID = "\"" + name + "\"";
+        c.networkId = idOf(name);
+        c.status = isConnected() && name.equals(ssid()) ? WifiConfiguration.Status.CURRENT : WifiConfiguration.Status.ENABLED;
+        String sec = securityOf(name);
         if ("wpa3".equals(sec)) {
             c.allowedKeyManagement.set(8); // KeyMgmt.SAE, not in the older SDKs
             c.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
@@ -666,7 +750,9 @@ final class WifiService extends Binder {
             writeList("getScanResults", list, reply);
         } else if (name.equals("getConfiguredNetworks") || name.equals("getPrivilegedConfiguredNetworks")) {
             List<Parcelable> list = new ArrayList<Parcelable>();
-            if (saved) list.add(savedConfig());
+            List<String> names;
+            synchronized (known) { names = new ArrayList<String>(known); }
+            for (String n : names) list.add(savedConfig(n));
             writeList(name, list, reply);
         } else if (name.equals("getDhcpInfo")) {
             writeParcelable(reply, dhcpInfo());
@@ -674,22 +760,22 @@ final class WifiService extends Binder {
             WifiConfiguration c = readConfig(data);
             boolean ok = credentialsOk(c);
             Refl.log("addOrUpdateNetwork: ssid=" + (c == null ? "null" : c.SSID) + " psk=" + (c != null && c.preSharedKey != null) + " -> " + (ok ? "accepted" : "rejected (expected " + cfg.ssid + ")"));
-            int id = ok ? NET_ID : nextId++;
+            int id = ok ? activeId() : nextId++;
             addedOk.put(Integer.valueOf(id), Boolean.valueOf(ok));
             reply.writeInt(id);
         } else if (name.equals("enableNetwork")) {
             int id = data.readInt();
-            boolean ok = id == NET_ID && saved || Boolean.TRUE.equals(addedOk.get(Integer.valueOf(id)));
-            if (ok) { saved = true; down = false; update(); }
+            boolean ok = knownId(id) || Boolean.TRUE.equals(addedOk.get(Integer.valueOf(id)));
+            if (ok) { joinId(id); saved = true; down = false; update(); }
             reply.writeInt(1);
         } else if (name.equals("removeNetwork")) {
             int id = data.readInt();
-            if (id == NET_ID) { saved = false; update(); }
+            forgetId(id);
             addedOk.remove(Integer.valueOf(id));
             reply.writeInt(1);
         } else if (name.equals("disableNetwork")) {
             int id = data.readInt();
-            if (id == NET_ID) { down = true; update(); }
+            if (id == activeId()) { down = true; update(); }
             reply.writeInt(1);
         } else if (name.equals("disconnect")) {
             down = true;
@@ -749,6 +835,12 @@ final class WifiService extends Binder {
                         Class<?> cb = Class.forName("android.net.wifi.IWifiStateChangedListener$Stub");
                         Object o = cb.getMethod("asInterface", IBinder.class).invoke(null, b);
                         synchronized (stateListeners) { stateListenerBinders.add(b); stateListeners.add(o); }
+                        final Object fresh = o;
+                        if (scanHandler != null) {
+                            Runnable tell = new Runnable() { @Override public void run() { Refl.call(fresh, "onWifiStateChanged"); } };
+                            scanHandler.postDelayed(tell, 200);
+                            scanHandler.postDelayed(tell, 1500);
+                        }
                         Refl.log("addWifiStateChangedListener: " + stateListeners.size() + " listener(s)");
                     } catch (Throwable t) {
                         Refl.log("addWifiStateChangedListener: " + t);
@@ -858,12 +950,13 @@ final class WifiService extends Binder {
         Refl.log(name + ": config=" + (c == null ? "null" : c.SSID) + " netId=" + netId + " listener=" + (listener != null));
         boolean ok;
         if (name.equals("forget")) {
-            if (netId == NET_ID) { saved = false; update(); }
+            forgetId(netId);
             ok = true;
         } else {
             if (c != null) ok = credentialsOk(c);
-            else ok = netId == NET_ID && saved || Boolean.TRUE.equals(addedOk.get(Integer.valueOf(netId)));
+            else ok = knownId(netId) || Boolean.TRUE.equals(addedOk.get(Integer.valueOf(netId)));
             if (ok) {
+                if (c == null) joinId(netId);
                 saved = true;
                 if (name.equals("connect")) down = false;
                 update();
@@ -948,14 +1041,15 @@ final class WifiService extends Binder {
             failed = konst(failed, tag + "_FAILED");
             succeeded = konst(succeeded, tag + "_SUCCEEDED");
             if (forget) {
-                if (msg.arg1 == NET_ID) { saved = false; update(); }
+                forgetId(msg.arg1);
                 answer(msg, succeeded, 0);
                 return;
             }
             boolean ok;
             if (msg.obj instanceof WifiConfiguration) ok = credentialsOk((WifiConfiguration) msg.obj);
-            else ok = msg.arg1 == NET_ID && saved || Boolean.TRUE.equals(addedOk.get(Integer.valueOf(msg.arg1)));
+            else ok = knownId(msg.arg1) || Boolean.TRUE.equals(addedOk.get(Integer.valueOf(msg.arg1)));
             if (ok) {
+                if (!(msg.obj instanceof WifiConfiguration)) joinId(msg.arg1);
                 saved = true;
                 if (connect) down = false;
                 update();
