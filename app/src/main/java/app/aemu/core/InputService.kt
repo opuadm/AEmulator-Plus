@@ -147,6 +147,22 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     private val padServer = deviceServer("dev/aemu_touchpad", "touchpad", padClients)
     private val keyboardServer = deviceServer("dev/aemu_keyboard", "keyboard", keyboardClients)
 
+    /**
+     * Input method "S-Pen": an extra evdev digitizer named sec_e-pen (emulated in the guest shim / native runner, like the
+     * touchpad) next to the touch screen. [spenEnabled] is the opt-in: the node exists from boot, because the guest only looks
+     * for input devices then. [spenMode] is the navigation-bar toggle: while on, [GuestScreen] hands every touch to [penTouch]
+     * instead of [touch], so the guest sees the pen and the touch screen stays quiet.
+     */
+    @Volatile var spenEnabled = false
+    @Volatile var spenMode = false
+        private set
+    /** True while touches must go to the pen. */
+    val spenRouting: Boolean get() = spenEnabled && spenMode
+    private val penClients = CopyOnWriteArrayList<Client>()
+    val spenConnected: Int get() = penClients.size
+    private val spen = SPenProtocol()
+    private val penServer = deviceServer("dev/aemu_spen", "spen", penClients)
+
     private fun writeIdc(name: String, text: String) = runCatching {
         java.io.File(paths.root, "system/usr/idc/$name.idc").apply {
             parentFile?.mkdirs()
@@ -172,6 +188,135 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
         if (event0.exists() && !event0.delete()) log("input: cannot remove event0, the touch screen stays visible to the guest")
         padServer.start(log); keyboardServer.start(log)
         log("input: mouse and keyboard mode (touchpad + keyboard, no touch screen)")
+    }
+
+    private fun serveSpen() {
+        val node = java.io.File(paths.root, "dev/input/aemu-spen")
+        spenMode = false
+        if (!spenEnabled) { node.delete(); return }   // a node left from an earlier boot would be opened with nobody serving it
+        node.parentFile?.mkdirs(); node.createNewFile()
+        // A built-in direct digitizer, so the guest draws no cursor and rotates it with the screen. Written over a ROM's own
+        // sec_e-pen.idc on purpose: its calibration is for a real digitizer's axis ranges, not ours.
+        writeIdc(SPenProtocol.NODE_NAME, "device.internal = 1\ntouch.deviceType = touchScreen\ntouch.orientationAware = 1\n")
+        penServer.start(log)
+        log("input: S-Pen digitizer (${SPenProtocol.NODE_NAME}) registered")
+    }
+
+    /** Switch S-Pen mode. What the device being left had pressed is let go, so nothing stays held in the guest. */
+    @Synchronized
+    fun setSpenMode(on: Boolean) {
+        val target = on && spenEnabled
+        if (target == spenMode) return
+        if (target) touch(emptyList(), true) else penTouch(emptyList())
+        spenMode = target
+    }
+
+    /** One frame of host contacts as the pen (see [SPenProtocol]). [button] is the stylus side button of a real host stylus. */
+    @Synchronized
+    fun penTouch(now: List<SPenProtocol.Contact>, button: Boolean = false) {
+        if (!spenEnabled) return
+        cancelPenLeave()
+        now.firstOrNull()?.let { penX = it.x; penY = it.y }
+        val bytes = spen.frame(now, button, System.nanoTime())
+        if (bytes.isNotEmpty()) postTo(penClients, bytes)
+    }
+
+    // ---- S-Pen hover and the pen's side button ("action button") -------------------------------------------------------
+
+    /** Where the pen last was, on the digitizer's axes: a button click hovers there, so Air Command opens at the pen. */
+    @Volatile private var penX = SPenProtocol.XY_MAX / 2
+    @Volatile private var penY = SPenProtocol.XY_MAX / 2
+    @Volatile private var penClicking = false
+    private var penLeave: java.util.concurrent.ScheduledFuture<*>? = null
+    private val penWorker by lazy {
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "spen-worker").apply { isDaemon = true } }
+    }
+
+    private fun cancelPenLeave() { penLeave?.cancel(false); penLeave = null }
+
+    private fun postPen(bytes: ByteArray) { if (bytes.isNotEmpty()) postTo(penClients, bytes) }
+
+    /**
+     * A real host stylus hovering over the screen in S-Pen mode: the pen in range at ([x], [y]) (digitizer axes, see
+     * [SPenProtocol.axis]) with its side [button]. A guest that sees the button go down and up again while the pen hovers
+     * opens Air Command, exactly as on a Note.
+     */
+    @Synchronized
+    fun penHover(x: Int, y: Int, button: Boolean = false) {
+        if (!spenEnabled || penClicking) return
+        cancelPenLeave()
+        penX = x; penY = y
+        postPen(spen.hover(x, y, button, System.nanoTime()))
+    }
+
+    /**
+     * The host stylus left the screen. A touch usually follows within a few milliseconds (the host ends the hover where the
+     * contact begins), so the pen only leaves the guest's range after a short grace: the guest never sees it go and come back.
+     */
+    @Synchronized
+    fun penHoverEnd() {
+        if (!spenEnabled || penClicking) return
+        cancelPenLeave()
+        penLeave = penWorker.schedule({ penLeaveNow() }, PEN_LEAVE_GRACE_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    @Synchronized
+    private fun penLeaveNow() {
+        penLeave = null
+        if (spen.isTouching || penClicking) return
+        postPen(spen.frame(emptyList(), false, System.nanoTime()))
+    }
+
+    /**
+     * One press and release of the pen's side button while the pen hovers: the "action button" of a real S-Pen. On a Samsung
+     * firmware (Galaxy Note) that opens Air Command, whose SpenGestureManagerService starts it when a stylus hover's button
+     * goes down and up again within 800 ms with no touch in between. It happens in the background: the pen comes into range at
+     * its last position, holds the button for [SPenProtocol.CLICK_STEPS] steps, lets go, and leaves range again (a pen left in
+     * range would make the guest ignore the touch screen as a palm). Returns false when there is nothing to press it on: S-Pen
+     * not registered or not connected yet, the pen is touching the screen, or a click is already running.
+     */
+    fun penButtonClick(): Boolean {
+        synchronized(this) {
+            if (!spenEnabled || penClients.isEmpty() || penClicking || spen.isTouching) return false
+            cancelPenLeave()
+            penClicking = true
+        }
+        penWorker.execute {
+            var aborted = false
+            try {
+                val x = penX; val y = penY
+                // every frame moves the pen by one unit (a twentieth of a pixel): the guest sends a hover move with each, so one that
+                // carries the button state is certain to reach the system service
+                val nudge = if (x < SPenProtocol.XY_MAX) 1 else -1
+                fun send(step: Int, button: Boolean): Boolean = synchronized(this) {
+                    if (spen.isTouching) { aborted = true; return@synchronized false }   // the pen was put down: no click
+                    postPen(spen.hover(x + (step and 1) * nudge, y, button, System.nanoTime()))
+                    true
+                }
+                if (!send(0, false)) return@execute
+                Thread.sleep(SPenProtocol.CLICK_STEP_MS * 2)             // in range first, like a pen coming close
+                if (!send(0, true)) return@execute                        // button down
+                for (i in 1..SPenProtocol.CLICK_STEPS) {
+                    Thread.sleep(SPenProtocol.CLICK_STEP_MS)
+                    if (!send(i, true)) return@execute
+                }
+                if (!send(SPenProtocol.CLICK_STEPS + 1, false)) return@execute   // button up: the click
+                for (i in 1..2) {
+                    Thread.sleep(SPenProtocol.CLICK_STEP_MS)
+                    if (!send(SPenProtocol.CLICK_STEPS + 1 + i, false)) return@execute
+                }
+                Thread.sleep(SPenProtocol.CLICK_STEP_MS * 2)
+            } catch (_: InterruptedException) {
+            } catch (e: Exception) {
+                log("input: S-Pen button click failed: ${e.message}")
+            } finally {
+                synchronized(this) {
+                    penClicking = false
+                    if (!aborted && !spen.isTouching) postPen(spen.frame(emptyList(), false, System.nanoTime()))
+                }
+            }
+        }
+        return true
     }
 
     @Synchronized
@@ -211,6 +356,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     fun serve(): Boolean {
         writeTouchIdc()
         serveMouseKeyboard()
+        serveSpen()
         val ok = server.start(log)
         if (trackballEnabled) {
             // An emulator-owned node: no vendor library or original image is patched.
@@ -252,9 +398,9 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     fun stop() {
         server.stop()
         trackballServer.stop()
-        padServer.stop(); keyboardServer.stop()
-        (padClients + keyboardClients).forEach { it.close() }
-        padClients.clear(); keyboardClients.clear()
+        padServer.stop(); keyboardServer.stop(); penServer.stop()
+        (padClients + keyboardClients + penClients).forEach { it.close() }
+        padClients.clear(); keyboardClients.clear(); penClients.clear()
         trackballClients.forEach { runCatching { it.out.close() } }
         trackballClients.clear()
         clients.forEach { it.close() }
@@ -618,11 +764,14 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     }
     @Synchronized fun recentEvents(): List<String> = recent.toList()
 
-    fun inputModeInfo(): String = "mouseKeyboard=$mouseKeyboardEnabled touchpad=${padClients.size} keyboard=${keyboardClients.size}"
+    fun inputModeInfo(): String = "mouseKeyboard=$mouseKeyboardEnabled touchpad=${padClients.size} keyboard=${keyboardClients.size} spen=$spenEnabled mode=$spenMode clients=${penClients.size}"
 
     fun clientInfo(): String = clients.joinToString { "pid ${it.pid}${if (it.dropped > 0) " (dropped ${it.dropped} frames: guest does not read this descriptor)" else ""}" }
 
     companion object {
+        /** How long a host stylus that left the screen may stay in the guest's range, so that a touch right after hands over smoothly. */
+        const val PEN_LEAVE_GRACE_MS = 80L
+
         /**
          * What the guest's InputReader must be told the emulated pad is. From Android 4.2 (API 17) "touchPad" means a raw
          * touchpad whose contacts go to apps unscaled and draws NO cursor (the guest log shows sources=0x00100008 and

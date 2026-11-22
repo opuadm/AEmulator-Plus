@@ -43,6 +43,12 @@ data class VmSettings(
     val mouseKeyboard: Boolean = false,
     /** Input method "keypad": a feature-phone key window; independent of touch and of [mouseKeyboard]. */
     val keypad: Boolean = false,
+    /**
+     * Input method "S-Pen" (opt-in): the guest gets an extra digitizer named sec_e-pen, and a navigation-bar button switches
+     * "S-Pen mode" on and off; while it is on every touch on the guest screen is reported as coming from the pen. Independent
+     * of [mouseKeyboard] and [keypad]; applies at the next full VM boot (the guest only looks for input devices at boot).
+     */
+    val spen: Boolean = false,
     val keepScreenOn: Boolean = true,
     /** the guest phone's notification LED drawn above its screen (0.0.0.3) */
     val showLed: Boolean = true,
@@ -56,6 +62,8 @@ data class VmSettings(
     val bluetooth: Boolean = false,
     /** Debug: let SurfaceFlinger's fatal signals reach the firmware's own crash handler (tombstone in logcat) instead of the runner's short report. */
     val sfTombstone: Boolean = false,
+    /** Magisk root (arm64 guests on the native engine): the host starts the daemon at boot, see [MagiskCore]; applies at the next full VM boot. */
+    val magisk: Boolean = false,
     val motionSensors: Boolean = false,
     /** Run the guest without any sensors; null = automatic (on for Nougat+ Wear SDK builds, see [SensorHalApi.crashesWithHostSensors]). */
     val disableSensors: Boolean? = null,
@@ -71,6 +79,12 @@ data class VmSettings(
     val legacyEngine: Boolean = false,
     /** guest RAM budget in MB, 0 = automatic */
     val ramMb: Int = 0,
+    /** Added for AEmulator Plus (2026-11-19): size of the disk the guest reports, in GB (one of [StorageSpoof.PRESETS_GB]); 0 = the phone's own disk. */
+    val storageGb: Int = 0,
+    /** Flash type the guest reports ([StorageType.id]); blank = the guest's default. */
+    val storageType: String = "",
+    /** Added for AEmulator Plus (2026-11-21): memory type the guest reports ([RamType.id]); blank = nothing reported. */
+    val ramType: String = "",
     /** emulate the radio (RIL); off = tablet-like firmware without telephony */
     val radio: Boolean = true,
     /** hardware 32-bit (AArch32 EL0) bypass without translator on supported CPUs */
@@ -118,6 +132,15 @@ data class VmSettings(
     val straceServices: String = "",
     /** ro.hardware given to the guest at launch; blank = whatever the firmware defines */
     val hardware: String = "",
+    /**
+     * Added for AEmulator Plus (2026-11-19). The chip the guest reports (see [SocProfiles]): in /proc/cpuinfo, in
+     * /sys/devices/soc0, ro.board.platform and (Android 12+) ro.soc.model / ro.soc.manufacturer. Blank = the image's default
+     * (Yellowstone on a Project Tango image, the phone's own chip on any other), a preset id, "host" or "custom".
+     * Applies at the next full VM boot.
+     */
+    val soc: String = "",
+    /** The chip described by the user, used when [soc] is "custom". */
+    val socCustom: SocSpec? = null,
     /** Emulated Wi-Fi: the guest sees a connected Wi-Fi network [wifiSsid] that carries the host's internet; applies at the next full VM boot. */
     val wifi: Boolean = false,
     /** Name of the emulated Wi-Fi network. */
@@ -152,6 +175,8 @@ data class VmSettings(
      * otherwise killed over and over. A real deadlock is no longer recovered by a restart. Applies at the next full VM boot.
      */
     val disableWatchdog: Boolean = false,
+    /** Off by default. On: the GPU bridge keeps its last 16k GL calls (with the GL error and state of every draw) in memory; the log export writes them as gl-trace.txt. Takes effect at the next start. */
+    val glTrace: Boolean = false,
     /**
      * Android 10-13 only, off by default. system_server waits up to 60 s for the permission controller app to grant the
      * default runtime permissions; translated x86 code on an ARM phone cannot answer in time and system_server dies
@@ -181,7 +206,7 @@ data class VmSettings(
         .put("navButtons", NavControls.encode(NavControls.parse(navButtons)))
         .put("trackball", trackball).put("trackballDpad", trackballDpad)
         .put("trackballStepDp", trackballStepDp.coerceIn(4, 48))
-        .put("mouseKeyboard", mouseKeyboard).put("keypad", keypad)
+        .put("mouseKeyboard", mouseKeyboard).put("keypad", keypad).put("spen", spen)
         .put("keepScreenOn", keepScreenOn).put("showLed", showLed).put("native32", native32).put("translate32", translate32).put("mtMode", mtMode).put("legacyEngine", legacyEngine)
         .put("vibration", vibration)
         .put("hostBattery", hostBattery)
@@ -189,17 +214,20 @@ data class VmSettings(
         .put("microphone", microphone)
         .put("bluetooth", bluetooth)
         .put("sfTombstone", sfTombstone)
+        .put("magisk", magisk)
         .put("motionSensors", motionSensors).put("disableSensors", disableSensors).put("guestNavBar", guestNavBar).put("gyroLock", gyroLock).put("hostResolution", hostResolution)
         .put("skipSetupWizard", skipSetupWizard)
         .put("disableGoogleApps", disableGoogleApps)
-        .put("ramMb", ramMb).put("radio", radio).put("imei", imei).put("serial", serial).put("kernel", kernel).put("kernelBranch", kernelBranch).put("kernelCommit", kernelCommit).put("kernelUser", kernelUser).put("kernelHost", kernelHost).put("kernelCompiler", kernelCompiler).put("kernelBuild", kernelBuild).put("kernelFlags", kernelFlags).put("kernelDate", kernelDate).put("baseband", baseband).put("networkType", networkType).apply { if (cdma != null) put("cdma", cdma) }.put("qemuArgs", qemuArgs).put("straceServices", straceServices)
+        .put("ramMb", ramMb).put("storageGb", storageGb).put("storageType", storageType).put("ramType", ramType).put("radio", radio).put("imei", imei).put("serial", serial).put("kernel", kernel).put("kernelBranch", kernelBranch).put("kernelCommit", kernelCommit).put("kernelUser", kernelUser).put("kernelHost", kernelHost).put("kernelCompiler", kernelCompiler).put("kernelBuild", kernelBuild).put("kernelFlags", kernelFlags).put("kernelDate", kernelDate).put("baseband", baseband).put("networkType", networkType).apply { if (cdma != null) put("cdma", cdma) }.put("qemuArgs", qemuArgs).put("straceServices", straceServices)
         .put("hardware", hardware)
+        .put("soc", soc).apply { if (socCustom != null) put("socCustom", socCustom.toJson()) }
         .put("wifi", wifi).put("wifiSsid", wifiSsid).put("wifiPassword", wifiPassword).put("wifiSecurity", wifiSecurity.id).put("wifiAutoConnect", wifiAutoConnect).put("wifiSpeed", wifiSpeed).put("wifiBand", wifiBand.id).put("wifiStandard", wifiStandard.id)
         .put("sim", sim.toJson()).put("sim2", sim2.toJson()).put("dualSim", dualSim)
         .put("wifiSignal", wifiSignal)
         .put("wifiExtra", JSONArray(wifiExtra.map { it.toJson() }))
         .put("thermalPassthrough", thermalPassthrough).put("thermalTemp", thermalTemp ?: JSONObject.NULL)
         .put("disableWatchdog", disableWatchdog)
+        .put("glTrace", glTrace)
         .put("skipPermissionWait", skipPermissionWait)
         .put("useArtBootImage", useArtBootImage)
         .put("disableDex2oat", disableDex2oat)
@@ -327,6 +355,7 @@ data class VmSettings(
                 trackballStepDp = o.optInt("trackballStepDp", 18).coerceIn(4, 48),
                 mouseKeyboard = o.optBoolean("mouseKeyboard", false),
                 keypad = o.optBoolean("keypad", false),
+                spen = o.optBoolean("spen", false),
                 keepScreenOn = o.optBoolean("keepScreenOn", d.keepScreenOn),
                 showLed = o.optBoolean("showLed", d.showLed),
                 vibration = o.optBoolean("vibration", d.vibration),
@@ -335,6 +364,7 @@ data class VmSettings(
                 microphone = o.optBoolean("microphone", d.microphone),
                 bluetooth = o.optBoolean("bluetooth", d.bluetooth),
                 sfTombstone = o.optBoolean("sfTombstone", d.sfTombstone),
+                magisk = o.optBoolean("magisk", d.magisk),
                 motionSensors = o.optBoolean("motionSensors", false),
                 disableSensors = if (o.has("disableSensors")) o.optBoolean("disableSensors") else null,
                 guestNavBar = o.optBoolean("guestNavBar", d.guestNavBar),
@@ -345,6 +375,9 @@ data class VmSettings(
                 mtMode = o.optInt("mtMode", d.mtMode),
                 legacyEngine = o.optBoolean("legacyEngine", false),
                 ramMb = o.optInt("ramMb", 0),
+                storageGb = StorageSpoof.sanitizeGb(o.optInt("storageGb", 0)),
+                storageType = StorageType.parse(o.optString("storageType", ""))?.id ?: "",
+                ramType = RamType.parse(o.optString("ramType", ""))?.id ?: "",
                 radio = o.optBoolean("radio", true),
                 native32 = o.optBoolean("native32", false),
                 translate32 = o.optBoolean("translate32", true),
@@ -365,6 +398,8 @@ data class VmSettings(
                 qemuArgs = o.optString("qemuArgs", ""),
                 straceServices = o.optString("straceServices", ""),
                 hardware = cleanHardware(o.optString("hardware", "")),
+                soc = SocProfiles.clean(o.optString("soc", "")),
+                socCustom = SocSpec.fromJson(o.optJSONObject("socCustom")),
                 wifi = o.optBoolean("wifi", d.wifi),
                 wifiSsid = WifiEmu.cleanSsid(o.optString("wifiSsid", d.wifiSsid)).ifEmpty { WifiEmu.DEFAULT_SSID },
                 wifiPassword = WifiEmu.cleanPassword(o.optString("wifiPassword", "")),
@@ -381,6 +416,7 @@ data class VmSettings(
                 thermalPassthrough = o.optBoolean("thermalPassthrough", d.thermalPassthrough),
                 thermalTemp = if (o.has("thermalTemp") && !o.isNull("thermalTemp")) o.optInt("thermalTemp").coerceIn(ThermalSysfs.MIN_MILLI_C, ThermalSysfs.MAX_MILLI_C) else null,
                 disableWatchdog = o.optBoolean("disableWatchdog", d.disableWatchdog),
+                glTrace = o.optBoolean("glTrace", d.glTrace),
                 skipPermissionWait = o.optBoolean("skipPermissionWait", d.skipPermissionWait),
                 useArtBootImage = o.optBoolean("useArtBootImage", d.useArtBootImage),
                 disableDex2oat = o.optBoolean("disableDex2oat", d.disableDex2oat),

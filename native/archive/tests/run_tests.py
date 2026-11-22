@@ -5,7 +5,7 @@ import bz2, gzip, hashlib, lzma, os, random, shutil, struct, subprocess, sys, te
 BIN = os.path.join(sys.argv[1], "test_arc")
 Z7 = sys.argv[2] if len(sys.argv) > 2 else shutil.which("7zz") or shutil.which("7z")
 ENV = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:abort_on_error=0", LSAN_OPTIONS="exitcode=23")
-COD = dict(copy=0, gzip=1, zlib=2, deflate=3, xz=4, lzma=5, bzip2=6, lz4=7, zstd=8, brotli=9)
+COD = dict(copy=0, gzip=1, zlib=2, deflate=3, xz=4, lzma=5, bzip2=6, lz4=7, zstd=8, brotli=9, lz4l=10)
 fails = []
 tmp = tempfile.mkdtemp(prefix="arctest")
 rnd = random.Random(1234)
@@ -54,6 +54,15 @@ def no_crash(name, codec, comp):
     p = run(["dec", COD[codec], ip, op, 65536, 65536], timeout=60)
     check(name, p.returncode in (0, 1), f"rc={p.returncode} {p.stderr[-500:]}")
 
+LEG_MAGIC = 0x184C2102
+def lz4_legacy(data, block=8 << 20, level=9):
+    """LZ4 legacy stream: magic, then (LE32 size + independent LZ4 block) per 8 MiB of input, like `lz4 -l`."""
+    out = struct.pack("<I", LEG_MAGIC)
+    for i in range(0, len(data), block):
+        c = lz4.block.compress(data[i:i + block], mode="high_compression", compression=level, store_size=False)
+        out += struct.pack("<I", len(c)) + c
+    return out
+
 def xz_cli(data, *opts):
     return subprocess.run(["xz", "-c", "-T1"] + list(opts), input=data, capture_output=True, check=True).stdout
 
@@ -78,6 +87,7 @@ for label, d in (("big", big), ("small", small), ("tiny", tiny), ("empty", empty
         (f"bzip2 {label}", "bzip2", bz2.compress(d, 9), d),
         (f"lz4 {label}", "lz4", lz4.frame.compress(d, content_checksum=True, block_checksum=True), d),
         (f"lz4 linked {label}", "lz4", lz4.frame.compress(d, block_linked=True, compression_level=9), d),
+        (f"lz4 legacy {label}", "lz4l", lz4_legacy(d), d),
         (f"zstd {label}", "zstd", zstandard.ZstdCompressor(level=9, write_checksum=True).compress(d), d),
         (f"brotli {label}", "brotli", brotli.compress(d, quality=5), d),
         (f"copy {label}", "copy", d, d),
@@ -101,6 +111,46 @@ dec("lz4 concatenated", "lz4", lz4.frame.compress(d1) + lz4.frame.compress(d2), 
 skippable = struct.pack("<II", 0x184D2A50, 5) + b"12345"
 dec("lz4 skippable frame", "lz4", skippable + lz4.frame.compress(d1), d1, chunks=((1, 64), (65536, 65536)))
 dec("zstd concatenated", "zstd", zstandard.ZstdCompressor().compress(d1) + zstandard.ZstdCompressor().compress(d2), d1 + d2, chunks=((1, 64), (65536, 65536)))
+# ---- LZ4 legacy (`lz4 -l`) ----
+dec("lz4l concatenated", "lz4l", lz4_legacy(d1) + lz4_legacy(d2), d1 + d2, chunks=((1, 64), (65536, 65536)))
+dec("lz4l multi-block (4 KiB blocks)", "lz4l", lz4_legacy(d1, block=4096), d1, chunks=((1, 64), (3, 5), (65536, 65536)))
+dec("lz4l 3 blocks over 8 MiB", "lz4l", lz4_legacy((big + small + big + big)[:(20 << 20)]), (big + small + big + big)[:(20 << 20)],
+    chunks=((65536, 65536), (1 << 20, 3000)))
+dec("lz4l skippable frame in front", "lz4l", skippable + lz4_legacy(d1), d1, chunks=((1, 64), (65536, 65536)))
+dec("lz4l skippable frame between streams", "lz4l", lz4_legacy(d1) + skippable + lz4_legacy(d2), d1 + d2, chunks=((1, 64), (65536, 65536)))
+for pad in (1, 2, 3, 4, 5, 2047, 4093):    # page-aligned ramdisks: the stream is followed by zero padding of any length
+    dec(f"lz4l zero padding {pad}", "lz4l", lz4_legacy(d1) + bytes(pad), d1, chunks=((1, 64), (65536, 65536)))
+rnd_blk = os.urandom(300000)
+dec("lz4l incompressible", "lz4l", lz4_legacy(rnd_blk), rnd_blk, chunks=((1 << 16, 1 << 16), (7, 4093)))
+# the reference tool: `lz4 -l` (legacy format, 8 MiB blocks) at several levels
+LZ4 = shutil.which("lz4")
+if LZ4:
+    for label, d in (("big", big), ("small", small), ("tiny", tiny), ("empty", empty)):
+        for lvl in ("-1", "-9"):
+            ref = subprocess.run([LZ4, "-l", lvl, "-c", "-q"], input=d, capture_output=True, check=True).stdout
+            check(f"lz4 -l writes the legacy magic ({label} {lvl})", ref[:4] == struct.pack("<I", LEG_MAGIC))
+            dec(f"lz4 -l {lvl} {label}", "lz4l", ref, d, chunks=((65536, 65536), (4093, 777)) if label != "big" else ((65536, 65536),))
+    ref = subprocess.run([LZ4, "-l", "-c", "-q"], input=d1, capture_output=True, check=True).stdout
+    ref2 = subprocess.run([LZ4, "-l", "-c", "-q"], input=d2, capture_output=True, check=True).stdout
+    dec("lz4 -l concatenated", "lz4l", ref + ref2, d1 + d2)
+    # and what we write is read by the tool
+    mine = os.path.join(tmp, "mine.lz4"); open(mine, "wb").write(lz4_legacy(big))
+    r = subprocess.run([LZ4, "-d", "-c", "-q", mine], capture_output=True)
+    check("lz4 reads our test encoder (encoder self-check)", r.returncode == 0 and r.stdout == big, f"rc={r.returncode}")
+else:
+    print("no lz4 tool found: lz4 -l reference tests skipped")
+# format errors
+expect_error("lz4l empty input", "lz4l", b"")
+expect_error("lz4l no magic", "lz4l", b"\x01\x02\x03\x04" + lz4_legacy(small)[4:])
+expect_error("lz4l frame magic is not legacy", "lz4l", lz4.frame.compress(small))
+expect_error("lz4l legacy followed by a frame", "lz4l", lz4_legacy(small) + lz4.frame.compress(small))
+expect_error("lz4l block size beyond the bound", "lz4l", struct.pack("<II", LEG_MAGIC, 0x7fffffff) + b"x" * 64)
+expect_error("lz4l size field cut", "lz4l", lz4_legacy(small) + b"\x05\x00")
+expect_error("lz4l block cut", "lz4l", lz4_legacy(small)[:-1])
+expect_error("lz4l block over 8 MiB decoded", "lz4l",
+             struct.pack("<I", LEG_MAGIC) + (lambda c: struct.pack("<I", len(c)) + c)(lz4.block.compress(bytes(9 << 20), store_size=False)))
+for i in range(30):    # random block sizes / bytes behind a good header never crash
+    no_crash(f"lz4l garbage {i}", "lz4l", struct.pack("<I", LEG_MAGIC) + os.urandom(rnd.randint(1, 3000)))
 zskip = struct.pack("<II", 0x184D2A50, 3) + b"abc"
 dec("zstd skippable frame", "zstd", zskip + zstandard.ZstdCompressor().compress(d1), d1, chunks=((1, 64), (65536, 65536)))
 dec("zstd streaming frames", "zstd", zstandard.ZstdCompressor(level=3).compressobj().compress(d1) + zstandard.ZstdCompressor(level=3).compressobj().flush(), b"") if False else None

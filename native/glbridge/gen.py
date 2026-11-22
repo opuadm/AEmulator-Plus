@@ -278,4 +278,5 @@ for a, b in ALIAS.items():
 g += ['', 'static void *const kEnc[N_FUNCS] = {'] + ['    [IDX_%s] = (void *)%s,' % (n, e) for n, e in enc.items()] + ['};']
 open('g_api.h', 'w', newline='\n').write('\n'.join(g) + '\n')
 open('h_api.h', 'w', newline='\n').write('\n'.join(h) + '\n')
+open('h_names.h', 'w', newline='\n').write('\n'.join(['/* written by gen.py */', '#define N_HNAMES %d' % len(funcs), 'static const char *const hNames[N_HNAMES] = {'] + ['    "%s",' % f[0] for f in funcs] + ['};']) + '\n')
 print('%d entries, %d of the %d core ones encoded; not carried: %s' % (len(funcs), len([n for n in enc if index[n] < len(core)]), len(core), ' '.join(unsupported)))

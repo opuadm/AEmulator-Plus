@@ -8,6 +8,7 @@ import app.aemu.core.ImportWarnings
 import android.content.Context
 import app.aemu.core.Engine
 import app.aemu.core.GuestArch
+import app.aemu.core.LibcPropLayout
 import app.aemu.core.GuestImage
 import app.aemu.core.InitPlan
 import app.aemu.core.PropArea
@@ -120,15 +121,15 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
             legacy -> VmSettings(width = 320, height = 480, density = 160, fbHz = 60, touchHz = 60)
             engine == Engine.GB || api < 14 -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60)
             // 540×960 — лучший баланс скорости и чёткости под эмуляцией; поменять можно в настройках
-            density <= 160 -> VmSettings(width = 480, height = 800, density = 240)
+            density <= 160 -> VmSettings(width = 480, height = 800, density = 240, hostResolution = true)
             // a firmware made for a QHD panel (560 dpi and up) may have no layout that fits an hdpi screen: the Galaxy
             // S6 launcher on 5.x gets a zero-wide item at 540×960/240 and dies in a loop; 720×1280/320 is the smallest
             // screen it was checked on
-            density >= 560 -> VmSettings(width = 720, height = 1280, density = 320)
+            density >= 560 -> VmSettings(width = 720, height = 1280, density = 320, hostResolution = true)
             // MIUI's live icons (Calendar, Weather: fancy_icons in the icon theme) have pictures for 440/480 only and
             // draw nothing at 240; its phones are xxhdpi, so it gets the phone's own screen
-            skin.startsWith("MIUI") && api >= 21 -> VmSettings(width = 1080, height = 1920, density = 480)
-            else -> VmSettings(width = 540, height = 960, density = 240)
+            skin.startsWith("MIUI") && api >= 21 -> VmSettings(width = 1080, height = 1920, density = 480, hostResolution = true)
+            else -> VmSettings(width = 540, height = 960, density = 240, hostResolution = true)
         }
 
         // kernel version of the firmware: read from the boot.img the importer stored (kernel banner -> /proc/version, uname -r)
@@ -137,7 +138,7 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
         // guest taskbar/navigation bar: yes after import for Android desktop builds, no for everything else (the person can change it)
         val settings = bannerSettings.copy(guestNavBar = skin == "Desktop")
 
-        writePropsTemplate(deflt, build, api, engine, rc.setprops)
+        writePropsTemplate(deflt, build, api, engine, rc.setprops, arch)
 
         return GuestImage(
             id = id,
@@ -171,7 +172,7 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
     }
 
     companion object {
-        const val VERSION = 20   // 20: an x86-64 firmware is recognised (GuestArch.X86_64, translated on the native engine), images imported earlier as "ARM" are re-analysed once; 19: "Desktop" tag from ro.product.system.device=desktop; 18: ICS developer builds (sdk 13, codename IceCreamSandwich) are API 14; 17: guest architecture (GuestArch) detected from the ELF files
+        const val VERSION = 22   // 22: the property area follows the x86 guest libc's legacy record layout (LibcPropLayout), images imported earlier are re-analysed once; 21: a firmware of release 12+ whose sdk is one level behind (ColorOS 11.3 / Android 12 with sdk 30) is re-analysed as the release says; 20: an x86-64 firmware is recognised (GuestArch.X86_64, translated on the native engine), images imported earlier as "ARM" are re-analysed once; 19: "Desktop" tag from ro.product.system.device=desktop; 18: ICS developer builds (sdk 13, codename IceCreamSandwich) are API 14; 17: guest architecture (GuestArch) detected from the ELF files
 
         /**
          * Form-factor tag from ro.build.characteristics: if the line contains "tv" it is Google TV below API 18 and
@@ -246,7 +247,17 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
                 else -> null
             }
             if (sdk == null) return preview ?: guessApi(release)
-            return if (preview != null && sdk < preview) preview else sdk
+            if (preview != null && sdk < preview) return preview
+            // Added for AEmulator Plus (2026-11-19): ColorOS 11.3 for the Reno7 (CPH2381, qti holi) ships an Android 12 system
+            // (release "12", libaudiohal asking for audio 7.0, framework-connectivity / -appsearch / -scheduling modules,
+            // android.hardware.audio 7.0) whose ro.build.version.sdk still says 30. Run as API 30 it got the Android 11 engine:
+            // derive_classpath refused to run ("must only be run on Android 12 or above"), the zygote's class path was the one of
+            // 11, and the audio HAL of 11 (2.0) was no use to AudioFlinger. A plain numeric release that is exactly one level
+            // above the sdk (from 12 on) is trusted over the sdk.
+            val plain = release?.trim()?.matches(Regex("\\d+(\\.\\d+)*")) == true
+            if (plain && codename.isNullOrBlank().not() && code != "REL" && code != "") return sdk
+            val byRelease = guessApi(release)
+            return if (plain && byRelease >= 31 && byRelease == sdk + 1) byRelease else sdk
         }
 
         fun guessApi(rel: String?): Int = when {
@@ -402,7 +413,7 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
     }
 
     /** Шаблон области свойств: default.prop → build.prop → наши умолчания (ro.* — «первый побеждает»). */
-    private fun writePropsTemplate(deflt: Map<String, String>, build: Map<String, String>, api: Int, engine: Engine, rcProps: Map<String, String>) {
+    private fun writePropsTemplate(deflt: Map<String, String>, build: Map<String, String>, api: Int, engine: Engine, rcProps: Map<String, String>, arch: GuestArch = GuestArch.ARM) {
         val base = LinkedHashMap<String, String>()
         fun add(k: String, v: String) { if (!(k.startsWith("ro.") && base.containsKey(k))) base[k] = v }
         // то, что обычно выставляет init из командной строки ядра
@@ -431,13 +442,22 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
         val sysDefault = File(root, "system/default.prop")
         if (sysDefault.isFile) PropArea.parseProps(sysDefault.readText()).forEach { (k, v) -> add(k, v) }
         // ro.sf.lcd_density и ro.kernel.qemu выставляются при каждом запуске из настроек образа
+        // (the guest's framework reads its SDK_INT, and the modules and derive_classpath their level, from these: a tree that is
+        // recognised as a newer API than its build.prop says must say the same)
+        if (api >= 31) for (k in listOf("ro.build.version.sdk", "ro.system.build.version.sdk"))
+            base[k]?.toIntOrNull()?.takeIf { it < api }?.let { base[k] = api.toString() }
         base.remove("ro.sf.lcd_density")
         base.remove("ro.kernel.qemu")
         base.remove("ro.kernel.qemu.gles")
         base["persist.sys.usb.config"] = "none"
         base["DEVICE_PROVISIONED"] = "1"
         if (!base.containsKey("dalvik.vm.heapsize")) base["dalvik.vm.heapsize"] = if (api >= 14) "256m" else "64m"
-        PropArea.create(paths.propsTemplate, api).use { a ->
+        // Added for AEmulator Plus (2026-11-20), x86 only: the guest libc's legacy property reader decides the record layout. The Android-x86
+        // 5.1 libc reads the serial at 0x80 instead of 32; an area in the classic layout made zygote's property_get("ro.kernel.qemu")
+        // read a 107-byte "length" into its 92-byte buffer and the stack protector aborted it. The layout is read from the libc's code.
+        val nameMax = if (arch == GuestArch.X86 && api < 26) LibcPropLayout.nameMaxFor(root) else LibcPropLayout.CLASSIC_NAME_MAX
+        if (nameMax != LibcPropLayout.CLASSIC_NAME_MAX) android.util.Log.i("aemu", "props: guest libc reads legacy records with serial at 0x${nameMax.toString(16)}")
+        PropArea.create(paths.propsTemplate, api, nameMax).use { a ->
             var dropped = 0
             for ((k, v) in base) if (!a.put(k, v)) dropped++
             if (dropped > 0) android.util.Log.w("aemu", "props dropped: $dropped")

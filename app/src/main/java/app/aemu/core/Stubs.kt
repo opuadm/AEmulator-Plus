@@ -68,6 +68,30 @@ class RilStub(
         return true
     }
 
+    fun halConfig(secbridge: Boolean): String {
+        fun hex(b: ByteArray?) = b?.joinToString("") { "%02x".format(it) }.orEmpty()
+        val numeric = card.mcc + card.mnc
+        return buildString {
+            append("sim=").append(if (sim.present) 1 else 0).append('\n')
+            append("up=").append(if (registered) 1 else 0).append('\n')
+            append("rat=").append(voiceTech).append('\n')
+            append("imsi=").append(card.imsi).append('\n')
+            append("mcc=").append(card.mcc).append('\n')
+            append("mnc=").append(card.mnc).append('\n')
+            append("numeric=").append(numeric).append('\n')
+            append("operator=").append(card.operator).append('\n')
+            append("short=").append(card.operator.take(8)).append('\n')
+            append("imei=").append(imei).append('\n')
+            append("imeisv=").append(IMEISV).append('\n')
+            append("baseband=").append(baseband).append('\n')
+            append("ef_iccid=").append(hex(simFiles.iccid)).append('\n')
+            append("ef_spn=").append(hex(simFiles.spn)).append('\n')
+            append("ef_msisdn=").append(hex(simFiles.msisdn)).append('\n')
+            append("ef_ad=").append(hex(simFiles.ad)).append('\n')
+            append("secbridge=").append(if (secbridge) 1 else 0).append('\n')
+        }
+    }
+
     /** technology of the voice registration: with LTE on CDMA voice is always 1x, data follows [networkType]; a plain CDMA or GSM modem has one */
     private val voiceTech: Int get() = if (cdma && lteOnCdma) NetworkType.ONE_X_RTT else networkType
 
@@ -87,8 +111,35 @@ class RilStub(
     /** serial number of the next alert: every alert needs a new one or the guest drops it as a repeat */
     private val alertIds = java.util.concurrent.atomic.AtomicInteger((System.nanoTime() and 0x3ff).toInt())
 
-    fun serve() = server.start(log)
-    fun stop() = server.stop()
+    private val halServer = UnixServer(paths.socket("aemu-radio"), "aemu-radio") { c -> serveHal(c) }
+    @Volatile private var halOut: OutputStream? = null
+
+    private fun serveHal(c: LocalSocket) {
+        val o = c.outputStream
+        halOut = o
+        log("radio: HAL service connected")
+        try {
+            val buf = ByteArray(256)
+            val ins = c.inputStream
+            while (true) {
+                val n = try { ins.read(buf) } catch (e: Exception) { -1 }
+                if (n < 0) break
+            }
+        } finally {
+            if (halOut === o) halOut = null
+        }
+    }
+
+    private fun halSend(line: String): Boolean {
+        val o = halOut ?: return false
+        return runCatching { synchronized(o) { o.write((line + "\n").toByteArray()); o.flush() } }.isSuccess
+    }
+
+    fun serve(): Boolean {
+        if (api >= 26) halServer.start(log)
+        return server.start(log)
+    }
+    fun stop() { halServer.stop(); server.stop() }
 
     /**
      * RIL_RadioState for "radio on". AOSP 4.0+ has ON = 10, but Samsung's 4.0.x RIL.java stops at the 2.3 list and throws
@@ -134,7 +185,7 @@ class RilStub(
 
     /** Incoming call from [number], like "gsm call" in the SDK emulator console. False when telephony is not up. */
     fun ring(number: String): Boolean {
-        val o = out ?: return false
+        val o = out ?: return halSend("ring " + number.filter { it.isDigit() || it == '+' }.ifEmpty { "0" })
         call = number to CALL_INCOMING
         unsol(o, UNSOL_RESPONSE_CALL_STATE_CHANGED, ByteArray(0))
         unsol(o, UNSOL_CALL_RING, ByteArray(0))
@@ -147,7 +198,7 @@ class RilStub(
      * with no shell and no `content` tool. A CDMA modem delivers it as a CDMA message (see [CdmaSms]). False when telephony is not up.
      */
     fun deliverSms(from: String, body: String): Boolean {
-        val o = out ?: return false
+        val o = out ?: return !cdma && halSend("sms " + smsDeliverPdu(from, body))
         if (cdma) unsol(o, UNSOL_RESPONSE_CDMA_NEW_SMS, CdmaSms.deliverParcel(from, body, smsIds.incrementAndGet()))
         else unsol(o, UNSOL_RESPONSE_NEW_SMS, str(smsDeliverPdu(from, body)))
         return true
@@ -160,8 +211,8 @@ class RilStub(
      * (see [CdmaSms.cmasParcel]). False when telephony is not up. Needs Android 4.2 (API 17) or newer.
      */
     fun deliverAlert(type: AlertType, text: String): Boolean {
-        val o = out ?: return false
         val id = alertIds.incrementAndGet()
+        val o = out ?: return !cdma && WirelessAlert.gsmPages(type, text, id).map { halSend("cb " + hex(it)) }.all { it }
         if (cdma) unsol(o, UNSOL_RESPONSE_CDMA_NEW_SMS, CdmaSms.cmasParcel(type, text, id))
         else for (page in WirelessAlert.gsmPages(type, text, id)) unsol(o, UNSOL_RESPONSE_NEW_BROADCAST_SMS, raw(page))
         log("radio: wireless alert ${type.name.lowercase()} (${text.length} chars)")

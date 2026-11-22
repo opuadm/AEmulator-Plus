@@ -36,6 +36,8 @@ object DiagExport {
                 entry(zip, "guest-data-perms.txt") { it.write(runCatching { dataPerms(vm.paths.root, vm.paths.owners) }.getOrElse { "[failed: $it]" }.toByteArray()) }
                 // Added for AEmulator Plus (2026-11-11): the whole guest tree as a recursive file list (no contents)
                 entry(zip, "guest-file-list.txt") { o -> guestFileList(vm.paths.root, o) }
+                // VM settings > Record GL calls: what the GPU bridge was asked to draw last (see GlHost.trace)
+                GlHost.traceDump()?.takeIf { it.lines().size > 3 }?.let { t -> entry(zip, "gl-trace.txt") { o -> o.write(t.toByteArray()) } }
                 entry(zip, "ui-log.txt") { o -> vm.lines().forEach { o.write((it + "\n").toByteArray()) } }
                 entry(zip, "input-events.txt") { o ->
                     o.write("last events sent to the guest (uptime ms, type: 0=SYN 1=KEY 3=ABS, code, value)\n".toByteArray())
@@ -372,7 +374,7 @@ object DiagExport {
         appendLine("image: ${vm.img.name} (id ${vm.img.id}), api ${vm.img.api}")
         appendLine("state: ${vm.state}, nativeBoot=${vm.nativeBoot}, nativeUi=${vm.nativeUi}, recovery=${vm.recoveryMode}")
         val s = vm.settings
-        appendLine("settings: mtMode=${s.mtMode}, touchHz=${s.touchHz}, navButtons=${s.navButtons}")
+        appendLine("settings: mtMode=${s.mtMode}, touchHz=${s.touchHz}, refreshHz=${s.fbHz}, navButtons=${s.navButtons}")
         appendLine("radio: enabled=${s.radio}, cdma=${s.cdma ?: "auto"}, networkType=${NetworkType.label(s.networkType)}")
         appendLine("display: ${s.width}x${s.height}")
         appendLine("input: guest clients connected=${vm.input.connected} [${vm.input.clientInfo()}], trackball=${vm.input.trackballConnected}, ${vm.input.inputModeInfo()}, events sent=${vm.input.sent}, effective mtMode=${vm.input.mtMode}")

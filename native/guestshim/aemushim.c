@@ -246,9 +246,31 @@ EXPORT int unlinkat(int fd, const char *p, int fl) {
  * «Использование данных»). /proc qemu не подменяет — подменяем здесь: ctrl → /dev/null (метки сокетов
  * пишутся туда), таблицы статистики → пустые таблицы с заголовками в /data/.aemu_qtaguid (их кладёт движок).
  */
+/*
+ * Added for AEmulator Plus, 2026-11-19: device specification (CPU) spoofing on the qemu engines. qemu-user hands a guest's
+ * open("/proc/cpuinfo") to the phone's own file (its -L prefix never redirects /proc), so the chip the VM is set to report
+ * never reached a program. The host puts the cpuinfo of that chip in the tree (/data/.cpuinf) and names it in AEMU_CPUINFO;
+ * every open of /proc/cpuinfo is answered from that file. Unset (the host's own chip, or no file made): the real path.
+ */
+static const char *cpuinfo_alias(const char *path) {
+    static const char C[] = "/proc/cpuinfo";
+    int i = 0;
+    if (!path) return path;
+    while (C[i] && path[i] == C[i]) i++;
+    if (C[i] || path[i]) return path;
+    for (char **e = environ; e && *e; e++) {
+        const char *v = *e, *k = "AEMU_CPUINFO=";
+        int j = 0;
+        while (k[j] && v[j] == k[j]) j++;
+        if (k[j]) continue;
+        return v[j] == '/' ? v + j : path;
+    }
+    return path;
+}
 static const char QT[] = "/proc/net/xt_qtaguid/";
 static const char *qt_redirect(const char *path, char *buf, int n) {
     if (!path) return path;
+    { const char *c = cpuinfo_alias(path); if (c != path) return c; }
     /* MTK: ActivityManager пишет отметки загрузки в /proc/bootprof на каждый запуск процесса;
        хост не пускает, и каждый раз в журнал летит исключение со стеком */
     static const char BP[] = "/proc/bootprof";
@@ -604,6 +626,99 @@ static int meminfo_open(const char *path) {
     return (int)m;
 }
 
+/*
+ * Added for AEmulator Plus (2026-11-19): the disk size the guest is told it has (AEMU_STORAGE_BYTES from the host).
+ * statfs / statvfs of the guest's data disk and sdcard run the real libc function and then rewrite its answer: the size is
+ * the chosen one, the free space is what the phone still has free (never more than the size), so used = size - free and
+ * the guest cannot be told it may store more than the phone holds. The libc struct layouts differ between bionic releases
+ * (32-bit or 64-bit block counts), so the layout is recognised from the values; an answer that fits neither is left alone.
+ * statfs and statvfs keep the block size / fragment size in word 1 and the counts from word 2 on, in both layouts.
+ */
+extern void *dlopen(const char *, int);
+extern void *dlsym(void *, const char *);
+
+static unsigned long long env_u64(const char *key) {
+    for (char **e = environ; e && *e; e++) {
+        const char *v = *e;
+        int i = 0;
+        while (key[i] && v[i] == key[i]) i++;
+        if (key[i] || v[i] != '=') continue;
+        unsigned long long x = 0;
+        for (v += i + 1; *v >= '0' && *v <= '9'; v++) x = x * 10 + (unsigned long long)(*v - '0');
+        return x;
+    }
+    return 0;
+}
+static int storage_starts(const char *s, const char *p) { while (*p) if (*s++ != *p++) return 0; return 1; }
+static int storage_path_ok(const char *s) {
+    return s && (storage_starts(s, "/data") || storage_starts(s, "/storage") || storage_starts(s, "/sdcard") || storage_starts(s, "/mnt/"));
+}
+static unsigned long long g_storage_bytes;
+static int g_storage_init;
+static void *storage_real(const char *name) {
+    static void *libc;
+    if (!libc) libc = dlopen("libc.so", 2 /* RTLD_NOW */);
+    return libc ? dlsym(libc, name) : 0;
+}
+static void storage_patch(unsigned *w) {
+    unsigned long long want = g_storage_bytes;
+    unsigned unit = w[1];
+    if (!want || !unit || !w[2]) return;
+    int wide = w[3] == 0 && w[5] == 0 && w[7] == 0 && w[6] <= w[4] && w[4] <= w[2];
+    int narrow = !wide && w[4] <= w[3] && w[3] <= w[2];
+    if (!wide && !narrow) return;
+    unsigned long long avail = (unsigned long long)(wide ? w[6] : w[4]) * unit;
+    if (avail > want) avail = want;
+    unsigned long long blocks = udiv64(want, unit), fb = udiv64(avail, unit);
+    if (narrow) {
+        if (blocks > 0xffffffffULL) blocks = 0xffffffffULL;
+        w[2] = (unsigned)blocks; w[3] = (unsigned)fb; w[4] = (unsigned)fb;
+    } else {
+        w[2] = (unsigned)blocks; w[3] = (unsigned)(blocks >> 32);
+        w[4] = (unsigned)fb;     w[5] = (unsigned)(fb >> 32);
+        w[6] = (unsigned)fb;     w[7] = (unsigned)(fb >> 32);
+    }
+}
+static int storage_hook(const char *name, const char *path, void *buf) {
+    int (*real)(const char *, void *) = (int (*)(const char *, void *))storage_real(name);
+    if (!real) return fail(-38 /* ENOSYS */);
+    int r = real(path, buf);
+    if (r == 0 && buf) {
+        if (!g_storage_init) { g_storage_bytes = env_u64("AEMU_STORAGE_BYTES"); g_storage_init = 1; }
+        if (g_storage_bytes && storage_path_ok(path)) storage_patch((unsigned *)buf);
+    }
+    return r;
+}
+EXPORT int statfs(const char *path, void *buf) { return storage_hook("statfs", path, buf); }
+EXPORT int statfs64(const char *path, void *buf) { return storage_hook("statfs64", path, buf); }
+EXPORT int statvfs(const char *path, void *buf) { return storage_hook("statvfs", path, buf); }
+EXPORT int statvfs64(const char *path, void *buf) { return storage_hook("statvfs64", path, buf); }
+
+/*
+ * Added for AEmulator Plus (2026-11-21): sysinfo() scaled to the guest's RAM budget (AEMU_RAM_KB), like /proc/meminfo above.
+ * Android's Process.getTotalMemory() (Settings, ActivityManager.MemoryInfo.totalMem) and sysconf(_SC_PHYS_PAGES) read sysinfo(),
+ * not the file, so a guest given 2 GB still reported all of the phone's memory. The real call runs first; its memory fields
+ * (totalram, freeram, sharedram, bufferram, totalswap, freeswap: words 4..9, mem_unit: word 13 of the 32-bit struct) are then
+ * rewritten in kB with mem_unit = 1024 so that sizes above 4 GB still fit.
+ */
+EXPORT int sysinfo(void *si) {
+    int (*real)(void *) = (int (*)(void *))storage_real("sysinfo");
+    if (!real) return fail(-38 /* ENOSYS */);
+    int r = real(si);
+    if (r != 0 || !si) return r;
+    unsigned long guest = env_ulong("AEMU_RAM_KB");
+    unsigned *w = (unsigned *)si;
+    unsigned unit = w[13] ? w[13] : 1;
+    unsigned long long total = udiv64((unsigned long long)w[4] * unit, 1024);
+    if (!guest || !total || total <= guest) return r;
+    for (int i = 4; i <= 9; i++) {
+        unsigned long long kb = udiv64((unsigned long long)w[i] * unit, 1024);
+        w[i] = (unsigned)udiv64(kb * guest, (unsigned long)total);
+    }
+    w[13] = 1024;
+    return r;
+}
+
 EXPORT int open(const char *path, int flags, ...) {
     char b[128];
     int mode = 0;
@@ -676,6 +791,7 @@ EXPORT int openat(int dirfd, const char *path, int flags, ...) {
     if (flags & 0100) {
         __builtin_va_list ap; __builtin_va_start(ap, flags); mode = __builtin_va_arg(ap, int); __builtin_va_end(ap);
     }
+    if (!(flags & 3)) path = cpuinfo_alias(path);   /* (absolute path: dirfd does not matter) */
     long r = trackball_open(path, flags);
     if (r == -4096) r = vinput_open(path, flags);
     if (r == -4096) r = bcmgpu_open(path, flags);

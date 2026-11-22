@@ -55,6 +55,35 @@ Build these for x86 (Android NDK, `x86`/i686) and drop them in the `-x86` direct
   `TreeFixer.glibcGralloc` installs both (aegr.so in `/lib`; the gralloc over every `gralloc.*.so` of the firmware's `system/lib/hw` and
   `vendor/lib/hw`, the originals kept as `system/.aemu-parked/system#lib#hw#gralloc.<name>.so.glibc`).
 
+**GPU bridge (2026-11-20).** The KK engine's guest-side `libGLES.so` is an ARM-only prebuilt without source, so `kk-x86/libGLES.so` will not
+exist. An x86-32 firmware on the KK engine instead gets the open i386 bridge (`native/glbridge/build32-x86.sh`, "solo" mode, shipped as
+`engines/common-x86_64/system#lib#egl#libGLES_aemu.so`, `EngineAssets.X86_I386_GPU_BRIDGE`): `TreeFixer.eglConfig` installs it under every
+name libEGL looks for (not over `libGLES_android.so`), `GuestVm` starts `GlHost` (socket `/dev/socket/aemu_gl`) and hands it the screen
+surface, and no `glserverd` runs. A window buffer with `GRALLOC_USAGE_HW_FB` (SurfaceFlinger on the fbdev gralloc of an x86 firmware) lives in fb0's memory and has fb0's pixel layout
+whatever format it reports, so `bridge_swap` in `guest.c` reads fb0's `bits_per_pixel` and channel offsets once (`FBIOGET_VSCREENINFO`, `fb_layout`)
+and packs the frame accordingly (16 / 24 / 32 bit, any channel order, `fb_row`); other buffers use the layout of their HAL format (RGBA, RGBX, BGRA,
+RGB_888, RGB_565). An RGBA write into an RGB_565 fb0 ran off the end of the mapping (SIGSEGV in SurfaceFlinger). A frame that cannot be written
+(unknown format, lock refused) is logged (`aemu-gl: a frame is dropped: ...`). Both x86 assets were rebuilt from this source on 2026-11-21 (see below).
+To go back to software rendering, revert this change (`EngineAssets.kkX86OpenBridge` and its callers).
+
+**GPU bridge: GLES 1 and the frame cost (2026-11-21).** Log of a KitKat x86 firmware: the boot animation ran, the screen stayed black, and
+`aemu-gl` said `a GLES 1 context on the phone's GPU`, then `a GL call the bridge does not carry yet`; the UI lagged.
+* GLES 1 (`native/glbridge/gles1.h`, included by `guest.c`): the host has GLES 3 contexts only, so a GLES 1 context (BootAnimation, old games,
+  wallpapers) gets the fixed-function pipeline written in GLSL over the same encoders: matrices, lighting, fog, texture environments,
+  alpha test, point sprites, client arrays, `glDrawTex*` with its crop rectangle. It has its own entry-point table (`SS.enc1`) and state
+  (`struct ectx.g1`). SwiftShader builds are unchanged: there a GLES 1 context still goes to SwiftShader.
+* The frame: the x86 gralloc has no buffer notes, so every window buffer is read back, and the guest (a translator) converted the frame pixel
+  by pixel: ~8 ms of guest CPU for 540x960, per app window and again for SurfaceFlinger's frame into fb0. `OP_SWAP_FMT` makes the host
+  convert and flip into the buffer's layout (native code) and the guest `read()`s it straight into the buffer (~0.3 ms); `OP_IMAGE_TEX2`
+  uploads a window buffer as a texture with its own pitch / RGB_565 / RGB_888, nothing repacked. The guest asks once after `OP_HELLO`
+  (`OP_PING` with `AEMU_CAPS_PROBE`, `common.h`); a host without them (the old `libaemugl.so`) answers 1 and the guest keeps the old paths.
+  **`libaemugl.so` has to be rebuilt (`native/glbridge/build.sh`) for this part**; the guest drivers alone fix the boot animation.
+* Also: no hashing of client arrays on x86 (`ARRAY_DEDUP`: costs more than sending, under translation), the largest index of an indexed draw
+  is remembered per buffer, GL_EXT_debug_marker / QCOM tiling calls are accepted and dropped, and `native/glbridge/emutls.c` (used by
+  `build-x86-zig.sh`) looks thread-locals up without a mutex (0.34 -> 0.11 us a call under qemu).
+* Desktop tests (`native/glbridge/tests/desktop`): `run-desktop.sh` runs the real `host.c` on Mesa llvmpipe against the real `guest.c`
+  (`M32=1`: the guest as an i386 program under qemu-user); `run-bench.sh` measures the guest-side cost. Not run on a phone yet.
+
 Until then an x86 firmware runs without the other shims: no ashmem/rlimit/xattr preload, no host camera and sensors, no GPU bridge.
 
 ## QEMU side (`qemu-senses/qemu`)

@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -65,6 +67,13 @@ import app.aemu.core.GyroLock
 import app.aemu.core.MemoryMode
 import app.aemu.core.NetworkType
 import app.aemu.core.RamChoice
+import app.aemu.core.RamType
+import app.aemu.core.StorageSpoof
+import app.aemu.core.StorageType
+import app.aemu.core.SocProfiles
+import app.aemu.core.SocSpec
+import app.aemu.core.SocIsa
+import app.aemu.core.X86Cpu
 import kotlin.math.roundToInt
 import app.aemu.core.VmSettings
 import app.aemu.core.WifiNetworkDef
@@ -75,6 +84,7 @@ import app.aemu.core.WifiEmu
 import app.aemu.core.VmStorageLease
 import app.aemu.core.VmDataReset
 import app.aemu.core.ImageStore
+import app.aemu.core.RefreshRate
 import app.aemu.core.ResolutionPreset
 import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.rememberCoroutineScope
@@ -89,6 +99,10 @@ private val RESOLUTIONS = ResolutionPreset.entries
 // RAM_CUSTOM only marks the last slider position; it is never stored.
 private const val RAM_CUSTOM = -2
 private val RAM_STEPS = listOf(RamChoice.AUTO) + RamChoice.PRESETS_MB + RamChoice.HOST + RAM_CUSTOM
+
+// Added for AEmulator Plus (2026-11-20): the refresh rate slider is the same shape: the presets, host, then "custom" (a box for a Hz amount).
+private const val HZ_CUSTOM = -2
+private val HZ_STEPS = RefreshRate.PRESETS_HZ + RefreshRate.HOST + HZ_CUSTOM
 
 private fun ramText(mb: Int): String =
     if (mb < 1024) "$mb MB"
@@ -170,11 +184,13 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                 if (s.hostResolution) Text(stringResource(R.string.vs_host_resolution_sub),
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp))
+                RefreshRatePicker(s) { s = it }
             }
             Spacer(Modifier.height(16.dp))
 
             Text(stringResource(R.string.vs_perf), style = MaterialTheme.typography.titleMedium)
             Toggle(stringResource(R.string.vs_gpu), stringResource(R.string.vs_gpu_sub), s.gpu) { s = s.copy(gpu = it) }
+            if (s.gpu) Toggle(stringResource(R.string.vs_gl_trace), stringResource(R.string.vs_gl_trace_sub), s.glTrace) { s = s.copy(glTrace = it) }
             if (img.api >= 14) Toggle(stringResource(R.string.vs_hwui), stringResource(R.string.vs_hwui_sub), s.hwui) { s = s.copy(hwui = it) }
             Toggle(stringResource(R.string.vs_jit), stringResource(R.string.vs_jit_sub), s.jit) { s = s.copy(jit = it) }
             if (img.api >= 21) Toggle(stringResource(R.string.vs_fulldex), stringResource(R.string.vs_fulldex_sub), s.fullDexopt) { s = s.copy(fullDexopt = it) }
@@ -236,6 +252,7 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             )
+            StoragePicker(s) { s = it }
             Toggle(stringResource(R.string.vs_lowram), stringResource(R.string.vs_lowram_sub), s.lowRam) { s = s.copy(lowRam = it) }
             MemoryModePicker(MemoryMode.parse(s.memoryMode)) { s = s.copy(memoryMode = it.id) }
             Toggle(stringResource(R.string.vs_proxy), stringResource(R.string.vs_proxy_sub), s.netProxy) { s = s.copy(netProxy = it) }
@@ -330,6 +347,9 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                 label = { Text(stringResource(R.string.vs_baseband)) }, placeholder = { Text(VmSettings.DEFAULT_BASEBAND) },
                 supportingText = { Text(stringResource(R.string.vs_baseband_sub)) }, singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+            // SoC and GPU the VM reports live with the rest of the device identity
+            SocPicker(img, s) { s = it }
+            RamTypePicker(s) { s = it }
 
             Spacer(Modifier.height(8.dp))
             Text(stringResource(R.string.vs_advanced), style = MaterialTheme.typography.titleMedium)
@@ -344,6 +364,8 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
 
             Spacer(Modifier.height(8.dp))
             CscImportSection(img, resetting) { resetting = it }
+
+            MagiskSection(img, s.magisk, resetting, { resetting = it }) { s = s.copy(magisk = it) }
 
             Spacer(Modifier.height(8.dp))
             OtaSection(img, resetting) { resetting = it }
@@ -598,7 +620,137 @@ private fun WifiFields(s: VmSettings, api: Int, set: (VmSettings) -> Unit) {
     Toggle(stringResource(R.string.vs_wifi_auto), stringResource(R.string.vs_wifi_auto_sub), s.wifiAutoConnect) { set(s.copy(wifiAutoConnect = it)) }
 }
 
+/**
+ * Added for AEmulator Plus (2026-11-20). The refresh rate the guest's screen reports and draws at: a slider over the presets, the
+ * phone's own maximum and a custom amount. Above what the phone's display can show the guest still reports the chosen rate and
+ * renders at the phone's maximum (see [RefreshRate]); a short warning says so. Without the GPU bridge (SwiftShader) it is fixed at 60.
+ */
+@Composable
+private fun RefreshRatePicker(s: VmSettings, set: (VmSettings) -> Unit) {
+    val appCtx = androidx.compose.ui.platform.LocalContext.current
+    val hostHz = remember { RefreshRate.hostHz(appCtx) }
+    val stored = if (s.fbHz == RefreshRate.HOST || s.fbHz in RefreshRate.CUSTOM_MIN_HZ..RefreshRate.CUSTOM_MAX_HZ) s.fbHz else RefreshRate.DEFAULT_HZ
+    // the custom box stays open while it is edited, even when the typed amount equals one of the presets
+    var custom by remember { mutableStateOf(stored != RefreshRate.HOST && stored !in RefreshRate.PRESETS_HZ) }
+    var box by remember { mutableStateOf(if (custom) stored.toString() else "") }
+    val idx = if (custom) HZ_STEPS.lastIndex else HZ_STEPS.indexOf(stored).coerceAtLeast(0)
+    val usable = s.gpu
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_refresh)) },
+        supportingContent = {
+            Column {
+                Text(when {
+                    !usable -> "60 Hz"
+                    custom -> stringResource(R.string.vs_refresh_custom)
+                    stored == RefreshRate.HOST -> stringResource(R.string.vs_refresh_host) + " (" + hostHz + " Hz)"
+                    else -> "$stored Hz"
+                })
+                Slider(
+                    value = if (usable) idx.toFloat() else HZ_STEPS.indexOf(RefreshRate.DEFAULT_HZ).toFloat(),
+                    onValueChange = {
+                        val step = HZ_STEPS[it.roundToInt().coerceIn(0, HZ_STEPS.lastIndex)]
+                        if (step == HZ_CUSTOM) {
+                            if (!custom) {
+                                // start from what is selected now
+                                val seed = if (stored == RefreshRate.HOST) hostHz else stored
+                                custom = true; box = seed.toString(); set(s.copy(fbHz = seed))
+                            }
+                        } else { custom = false; set(s.copy(fbHz = step)) }
+                    },
+                    enabled = usable,
+                    valueRange = 0f..HZ_STEPS.lastIndex.toFloat(), steps = HZ_STEPS.size - 2)
+                if (usable && custom) OutlinedTextField(
+                    value = box,
+                    onValueChange = { v ->
+                        val digits = v.filter { c -> c.isDigit() }.take(4)
+                        box = digits
+                        // an amount outside the range is shown as an error and the last valid one is kept
+                        digits.toIntOrNull()?.takeIf { n -> n in RefreshRate.CUSTOM_MIN_HZ..RefreshRate.CUSTOM_MAX_HZ }?.let { n -> set(s.copy(fbHz = n)) }
+                    },
+                    label = { Text(stringResource(R.string.vs_refresh_custom_hint)) },
+                    suffix = { Text("Hz") },
+                    singleLine = true,
+                    isError = (box.toIntOrNull() ?: 0) !in RefreshRate.CUSTOM_MIN_HZ..RefreshRate.CUSTOM_MAX_HZ,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                val warn = when {
+                    !usable -> stringResource(R.string.vs_refresh_needs_gpu)
+                    RefreshRate.resolve(s.fbHz, hostHz, true).capped -> stringResource(R.string.vs_refresh_cap, hostHz, s.fbHz)
+                    else -> null
+                }
+                Text(warn ?: stringResource(R.string.vs_refresh_sub), style = MaterialTheme.typography.bodySmall,
+                    color = if (warn != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+    )
+}
+
 /** Light / medium / aggressive list for how eagerly the host stops cached guest processes. */
+/**
+ * Added for AEmulator Plus (2026-11-19). Storage the guest reports: a size slider (off = the phone's own disk, then the presets)
+ * and the flash type. Free space is always the phone's real free space, see [StorageSpoof].
+ */
+@Composable
+private fun StoragePicker(s: VmSettings, set: (VmSettings) -> Unit) {
+    val steps = listOf(0) + StorageSpoof.PRESETS_GB
+    val idx = steps.indexOf(s.storageGb).coerceAtLeast(0)
+    var typeMenu by remember { mutableStateOf(false) }
+    val type = StorageType.parse(s.storageType)
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_storage)) },
+        supportingContent = {
+            Column {
+                Text(if (s.storageGb == 0) stringResource(R.string.vs_storage_auto) else StorageSpoof.text(s.storageGb))
+                Slider(value = idx.toFloat(), onValueChange = { set(s.copy(storageGb = steps[it.roundToInt().coerceIn(0, steps.lastIndex)])) },
+                    valueRange = 0f..steps.lastIndex.toFloat(), steps = steps.size - 2)
+                Text(stringResource(R.string.vs_storage_sub), style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+    )
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_storage_type)) },
+        supportingContent = { Text(stringResource(R.string.vs_storage_type_sub)) },
+        trailingContent = {
+            Box {
+                TextButton(onClick = { typeMenu = true }) { Text(type?.label ?: stringResource(R.string.vs_storage_type_auto)) }
+                DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.vs_storage_type_auto)) }, onClick = { typeMenu = false; set(s.copy(storageType = "")) })
+                    StorageType.entries.forEach { e ->
+                        DropdownMenuItem(text = { Text(e.label) }, onClick = { typeMenu = false; set(s.copy(storageType = e.id)) })
+                    }
+                }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+    )
+}
+
+/** Added for AEmulator Plus (2026-11-21). The memory type the guest reports (LPDDR2 ... LPDDR5X); the amount stays in "Guest RAM". */
+@Composable
+private fun RamTypePicker(s: VmSettings, set: (VmSettings) -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    val type = RamType.parse(s.ramType)
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_ram_type)) },
+        supportingContent = { Text(stringResource(R.string.vs_ram_type_sub)) },
+        trailingContent = {
+            Box {
+                TextButton(onClick = { menu = true }) { Text(type?.label ?: stringResource(R.string.vs_ram_type_auto)) }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.vs_ram_type_auto)) }, onClick = { menu = false; set(s.copy(ramType = "")) })
+                    RamType.entries.forEach { e ->
+                        DropdownMenuItem(text = { Text(e.label) }, onClick = { menu = false; set(s.copy(ramType = e.id)) })
+                    }
+                }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+    )
+}
+
 @Composable
 private fun MemoryModePicker(mode: MemoryMode, set: (MemoryMode) -> Unit) {
     var open by remember { mutableStateOf(false) }
@@ -674,6 +826,222 @@ private fun NetworkTypePicker(tech: Int, api: Int, cdma: Boolean, lteOnCdma: Boo
             }
         },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+/**
+ * Added for AEmulator Plus (2026-11-19). The chip the guest reports. A three-item menu: Preset (opens a window with every chip
+ * of the image's instruction set, see [SocPresetTable]), Custom (every value editable) and Host (the phone's own chip). Blank
+ * (the stored default) is Yellowstone on a Project Tango image and the host's chip on any other. See [SocProfiles].
+ */
+@Composable
+private fun SocPicker(img: GuestImage, s: VmSettings, set: (VmSettings) -> Unit) {
+    val ctx = LocalContext.current
+    val tango = remember(img.id) { SocProfiles.isTangoTree(app.aemu.core.VmPaths(ctx, img.id).root, img.model, img.name) }
+    val isa = remember(img.arch) { SocProfiles.isaOf(img.arch) }
+    var open by remember { mutableStateOf(false) }
+    var window by remember { mutableStateOf(false) }
+    val id = SocProfiles.effectiveId(s.soc, tango, isa)
+    val isHost = id == SocProfiles.HOST
+    val isCustom = id == SocProfiles.CUSTOM
+    val tangoDefault = stringResource(R.string.vs_soc_default, SocProfiles.YELLOWSTONE_SPEC.label)
+    val modeLabel = stringResource(when { isHost -> R.string.vs_soc_host; isCustom -> R.string.vs_soc_custom; else -> R.string.vs_soc_preset })
+    val chosen: SocSpec? = if (id == SocProfiles.YELLOWSTONE) SocProfiles.YELLOWSTONE_SPEC else SocProfiles.preset(id)
+    // what "custom" starts from: the chip that is reported now, else the first chip of this instruction set
+    fun seed(): SocSpec = (s.socCustom?.takeIf { it.isa == isa } ?: chosen?.takeIf { it.isa == isa } ?: SocProfiles.presetsFor(isa).let { l -> l.firstOrNull { it.id == "sm8150" } ?: l.first() })
+        .copy(id = SocProfiles.CUSTOM, label = "Custom")
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_soc)) },
+        supportingContent = { Text(stringResource(R.string.vs_soc_sub)) },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Box(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(modeLabel, modifier = Modifier.weight(1f), maxLines = 1)
+            Text("▾")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.vs_soc_preset), fontWeight = if (!isHost && !isCustom) FontWeight.Bold else null) },
+                onClick = { open = false; window = true })
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.vs_soc_custom), fontWeight = if (isCustom) FontWeight.Bold else null) },
+                onClick = { open = false; set(s.copy(soc = SocProfiles.CUSTOM, socCustom = seed())) })
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.vs_soc_host), fontWeight = if (isHost) FontWeight.Bold else null) },
+                onClick = { open = false; set(s.copy(soc = SocProfiles.HOST)) })
+        }
+    }
+    if (!isHost && !isCustom) {
+        // the chip now in force, in one line, and the way to the window again
+        val shown = when {
+            s.soc.isEmpty() && tango -> tangoDefault
+            else -> SocProfiles.label(id, s.socCustom)
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+            Text(shown, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+            chosen?.let { Text(socSummary(it), style = MaterialTheme.typography.bodySmall) }
+            TextButton(onClick = { window = true }) { Text(stringResource(R.string.vs_soc_change)) }
+        }
+    }
+    if (!s.gpu && (isCustom || (!isHost && chosen?.gpuRenderer?.isNotBlank() == true)))
+        Text(stringResource(R.string.vs_soc_gpu_off), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+    if (window) SocPresetWindow(
+        presets = SocProfiles.presetsFor(isa),
+        selected = if (!isHost && !isCustom && s.soc.isNotEmpty()) id else null,
+        tangoDefault = if (tango) tangoDefault else null,
+        tangoDefaultOn = tango && s.soc.isEmpty(),
+        onPick = { p -> window = false; set(s.copy(soc = p.id)) },
+        onDefault = { window = false; set(s.copy(soc = SocProfiles.DEFAULT)) },
+        onDismiss = { window = false },
+    )
+    if (isCustom) {
+        val spec = s.socCustom?.takeIf { it.isa == isa } ?: seed()
+        fun put(v: SocSpec) = set(s.copy(soc = SocProfiles.CUSTOM, socCustom = v))
+        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            SocField("Name", spec.label, 48) { put(spec.copy(label = it)) }
+            SocField("ro.soc.manufacturer", spec.manufacturer, 32) { put(spec.copy(manufacturer = it)) }
+            SocField("ro.soc.model", spec.model, 32) { put(spec.copy(model = it)) }
+            if (isa == SocIsa.X86) {
+                val x = spec.x86 ?: X86Cpu(model = 0, modelName = "Intel(R) Atom(TM) CPU")
+                fun putX(v: X86Cpu) = put(spec.copy(x86 = v))
+                SocField("/proc/cpuinfo model name", x.modelName, 80) { putX(x.copy(modelName = it)) }
+                SocField("vendor_id", x.vendorId, 16) { putX(x.copy(vendorId = it)) }
+                SocNumber("cpu family", x.family) { putX(x.copy(family = it)) }
+                SocNumber("model", x.model) { putX(x.copy(model = it)) }
+                SocNumber("stepping", x.stepping) { putX(x.copy(stepping = it)) }
+                SocNumber("cache size (KB)", x.cacheKb) { putX(x.copy(cacheKb = it)) }
+                SocNumber("cores", x.physicalCores) { c ->
+                    val per = (spec.cores / x.physicalCores.coerceAtLeast(1)).coerceAtLeast(1)
+                    put(spec.copy(x86 = x.copy(physicalCores = c), clusters = listOf(spec.clusters.first().copy(count = (c * per).coerceIn(1, SocProfiles.MAX_CORES)))))
+                }
+                SocNumber("threads per core", (spec.cores / x.physicalCores.coerceAtLeast(1)).coerceAtLeast(1)) { t ->
+                    put(spec.copy(clusters = listOf(spec.clusters.first().copy(count = (x.physicalCores * t.coerceIn(1, 2)).coerceIn(1, SocProfiles.MAX_CORES)))))
+                }
+                SocNumber("max MHz", spec.clusters.first().maxMhz) { m -> put(spec.copy(clusters = listOf(spec.clusters.first().copy(maxMhz = m.coerceIn(100, 6000))))) }
+                SocField("flags", x.flags, 800) { putX(x.copy(flags = it)) }
+            } else {
+                SocField("ro.board.platform", spec.platform, 32, token = true) { put(spec.copy(platform = it)) }
+                SocField("/proc/cpuinfo Hardware", spec.hardware, 64) { put(spec.copy(hardware = it)) }
+                SocField("soc0 family", spec.family, 32) { put(spec.copy(family = it)) }
+                SocField("soc0 machine", spec.machine, 32) { put(spec.copy(machine = it)) }
+                SocField("soc0 soc_id", spec.socId, 16) { put(spec.copy(socId = it)) }
+                SocField("soc0 revision", spec.revision, 16) { put(spec.copy(revision = it)) }
+                SocField("soc0 serial_number", spec.serialNumber, 24) { put(spec.copy(serialNumber = it)) }
+                Toggle(stringResource(R.string.vs_soc_armv8), stringResource(R.string.vs_soc_armv8_sub), spec.arch >= 8) { put(spec.copy(arch = if (it) 8 else 7)) }
+                // the layout is typed as text: it is only stored when every line parses
+                var layout by remember { mutableStateOf(SocProfiles.encodeClusters(spec.clusters)) }
+                val parsed = SocProfiles.parseClusters(layout)
+                OutlinedTextField(
+                    value = layout,
+                    onValueChange = { v -> layout = v; SocProfiles.parseClusters(v)?.let { c -> put(spec.copy(clusters = c)) } },
+                    label = { Text(stringResource(R.string.vs_soc_cores)) },
+                    supportingText = { Text(stringResource(if (parsed == null) R.string.vs_soc_cores_bad else R.string.vs_soc_cores_sub)) },
+                    isError = parsed == null, minLines = 2, maxLines = 5, modifier = Modifier.fillMaxWidth(),
+                )
+                SocField("Features", spec.features, 400, hint = stringResource(R.string.vs_soc_features_hint)) { put(spec.copy(features = it)) }
+                SocField("BogoMIPS", spec.bogoMips, 12) { put(spec.copy(bogoMips = it)) }
+            }
+            SocField("GPU vendor (GL_VENDOR)", spec.gpuVendor, 64, hint = stringResource(R.string.vs_soc_gpu_hint)) { put(spec.copy(gpuVendor = it)) }
+            SocField("GPU renderer (GL_RENDERER)", spec.gpuRenderer, 96, hint = stringResource(R.string.vs_soc_gpu_hint)) { put(spec.copy(gpuRenderer = it)) }
+        }
+    }
+}
+
+/** One line of what a preset reports: cores and top clock, GPU, process node. */
+private fun socSummary(p: SocSpec): String {
+    val cpu = if (p.isa == SocIsa.X86 && p.x86 != null) {
+        val threads = p.cores
+        (if (threads > p.x86.physicalCores) "${p.x86.physicalCores} cores / $threads threads" else "${p.cores} cores") + " · ${p.clusters.maxOf { it.maxMhz }} MHz"
+    } else "${p.cores} cores · ${p.clusters.maxOf { it.maxMhz }} MHz"
+    return listOf(cpu, p.gpuRenderer.removePrefix("Mesa DRI ").removeSuffix("/PCIe/SSE2"), p.note).filter { it.isNotBlank() }.joinToString(" · ")
+}
+
+/**
+ * The preset window: a large dialog with a search box over the list of chips (name, cores, clock, GPU, process node).
+ * Tapping a chip chooses it and closes the window.
+ */
+@Composable
+private fun SocPresetWindow(
+    presets: List<SocSpec>, selected: String?, tangoDefault: String?, tangoDefaultOn: Boolean,
+    onPick: (SocSpec) -> Unit, onDefault: () -> Unit, onDismiss: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val shown = remember(query, presets) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) presets else presets.filter { p -> q.split(' ').all { w -> (p.label + " " + p.model + " " + p.gpuRenderer + " " + p.platform).lowercase().contains(w) } }
+    }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        androidx.compose.material3.Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            tonalElevation = 6.dp,
+            modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.88f),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.vs_soc_preset_title), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onDismiss) { Text(stringResource(R.string.vs_soc_close)) }
+                }
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it.take(40) }, singleLine = true,
+                    label = { Text(stringResource(R.string.vs_soc_search)) },
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                )
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.weight(1f)) {
+                    if (tangoDefault != null && query.isBlank()) item(key = "tango-default") {
+                        SocPresetRow(tangoDefault, stringResource(R.string.vs_soc_default_sub), tangoDefaultOn, onDefault)
+                    }
+                    items(shown.size, key = { shown[it].id }) { i ->
+                        val p = shown[i]
+                        SocPresetRow(p.label, socSummary(p), p.id == selected) { onPick(p) }
+                    }
+                    if (shown.isEmpty()) item(key = "none") {
+                        Text(stringResource(R.string.vs_soc_none), modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SocPresetRow(title: String, sub: String, on: Boolean, click: () -> Unit) {
+    ListItem(
+        headlineContent = { Text(title, fontWeight = if (on) FontWeight.Bold else null) },
+        supportingContent = { Text(sub) },
+        trailingContent = if (on) ({ Text("✓") }) else null,
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = click),
+    )
+}
+
+/** A whole number of the custom x86 chip; letters are ignored. */
+@Composable
+private fun SocNumber(label: String, value: Int, set: (Int) -> Unit) {
+    OutlinedTextField(
+        value = value.toString(),
+        onValueChange = { v -> v.filter { it.isDigit() }.take(7).toIntOrNull()?.let(set) },
+        label = { Text(label, maxLines = 1) }, singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+/** One text of the custom chip: printable ASCII, or (a property name) letters, digits and _ - . only. */
+@Composable
+private fun SocField(label: String, value: String, max: Int, token: Boolean = false, hint: String? = null, set: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = { v -> set(if (token) SocSpec.token(v, max) else v.filter { it in ' '..'~' }.take(max)) },
+        label = { Text(label, maxLines = 1) },
+        supportingText = if (hint != null) ({ Text(hint) }) else null,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
         modifier = Modifier.fillMaxWidth(),
     )
 }

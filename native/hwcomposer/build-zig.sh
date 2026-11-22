@@ -25,7 +25,7 @@ $ZIG cc $T -ffreestanding -Os -Wl,--version-script,"$STUB/libc.map" -Wl,-soname,
 # (compiled with zig's musl headers, linked without musl: -nostdlib hides the headers, so two steps)
 $ZIG cc --target=thumb-linux-musleabi -mcpu=cortex_a8 -mfloat-abi=softfp -mfpu=neon -fPIC -O2 -fvisibility=hidden -fno-stack-protector \
   -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -I"$HERE/../x86_64/inc" -c "$HERE/hwcomposer.c" -o "$STUB/hwc.o"
-$ZIG cc $T -Wl,-z,norelro -Wl,--build-id=none -Wl,--hash-style=both -Wl,--no-undefined -Wl,-s \
-  -Wl,-soname,hwcomposer.default.so -L"$STUB" -o "$OUT" "$STUB/hwc.o" -llog -lc_stub
+$ZIG cc $T -rtlib=none -Wl,-z,norelro -Wl,--build-id=none -Wl,--hash-style=both -Wl,--no-undefined -Wl,-s \
+  -Wl,-soname,hwcomposer.default.so -L"$STUB" -o "$OUT" "$STUB/hwc.o" -Wl,--no-as-needed -llog -lc_stub
 if readelf -d "$OUT" | grep -q 'libc_stub'; then echo "error: NEEDED libc_stub" >&2; exit 1; fi
 ls -l "$OUT"

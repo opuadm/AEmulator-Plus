@@ -38,7 +38,7 @@
 struct surf { uint32_t key; int w, h, samples; GLuint fbo, col, rbo, msfbo, mscol, msds; };
 struct hctx {
     uint32_t id;
-    int pid, version, busy, doomed, fresh;
+    int pid, version, busy, doomed, fresh, robust;
     EGLContext egl;
     EGLSurface pb;
     struct surf surfs[8];
@@ -73,6 +73,7 @@ struct conn {
     uint8_t *rep; size_t rep_n, rep_cap;
     void *scr[16]; int nscr;
     uint8_t *px; size_t px_cap;
+    uint8_t *out; size_t out_cap;       /* a frame converted to the guest buffer's layout (swap_fmt) */
     unsigned long frames, unknown;
     /* the connection of the guest's composer: the context that puts finished frames on the phone's screen */
     EGLContext pctx;
@@ -323,6 +324,41 @@ static void h_glDeleteTextures(GLsizei n, const GLuint *ids) {
     }
 }
 static int trace_on;        /* files/gltrace present: every call is logged (debugging) */
+#include "h_names.h"
+/* The call ring (VM settings > "Record GL calls"): off unless the app turns it on. While on, the last TRING_N calls are kept
+ * in memory (op, length, first words), and for a draw the GL error and the state it drew with. The export writes it out
+ * (nativeTraceDump) so a rendering bug can be replayed without a rooted phone. Nothing is logged and nothing changes in what
+ * the calls do. */
+#define TRING_N 16384
+struct tent { uint32_t seq; int32_t pid; uint32_t op, len, w[6], nz, err, draw; uint32_t st[16]; };
+static struct tent g_tring[TRING_N];
+static volatile unsigned g_tring_n;
+static volatile int g_tring_on;
+static int is_draw_op(unsigned op) {
+    if (op == OP_DRAW_CLIENT) return 1;
+    return op < N_HNAMES && strncmp(hNames[op], "glDraw", 6) == 0;
+}
+static void tring_state(struct tent *e) {
+    GLint v[4]; GLint i;
+    e->err = glGetError();
+    glGetIntegerv(GL_CURRENT_PROGRAM, &i); e->st[0] = (uint32_t)i;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &i); e->st[1] = (uint32_t)i;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &i); e->st[2] = (uint32_t)i;
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &i); e->st[3] = (uint32_t)i;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &i); e->st[4] = (uint32_t)i;
+    GLboolean cm[4]; glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    e->st[5] = (uint32_t)(glIsEnabled(GL_BLEND) | glIsEnabled(GL_SCISSOR_TEST) << 1 | glIsEnabled(GL_STENCIL_TEST) << 2 | glIsEnabled(GL_DEPTH_TEST) << 3 |
+                          glIsEnabled(GL_CULL_FACE) << 4 | cm[0] << 5 | cm[1] << 6 | cm[2] << 7 | cm[3] << 8);
+    glGetIntegerv(GL_SCISSOR_BOX, v); for (int k = 0; k < 4; k++) e->st[6 + k] = (uint32_t)v[k];
+    glGetIntegerv(GL_VIEWPORT, v); for (int k = 0; k < 4; k++) e->st[10 + k] = (uint32_t)v[k];
+    glGetIntegerv(GL_BLEND_SRC_RGB, &i); e->st[14] = (uint32_t)i;
+    glGetIntegerv(GL_BLEND_DST_RGB, &i); e->st[15] = (uint32_t)i;
+}
+static const char *tring_name(unsigned op, char *buf, size_t n) {
+    if (op < N_HNAMES) return hNames[op];
+    snprintf(buf, n, "OP_%u", op - 0x4000);
+    return buf;
+}
 /* a shader that samples an external texture samples a 2D one */
 static void no_external(char *s) {
     for (char *p = s; (p = strstr(p, "samplerExternalOES")); ) memcpy(p, "sampler2D         ", 18);
@@ -625,6 +661,10 @@ static void ms_drop(struct surf *s) {
     if (s->msfbo) { glDeleteFramebuffers(1, &s->msfbo); glDeleteRenderbuffers(1, &s->mscol); glDeleteRenderbuffers(1, &s->msds); }
     s->msfbo = s->mscol = s->msds = 0;
 }
+/* When the renderer was last started (monotonic ms), and how long after that new windows are cleared to black. */
+static long long g_start_ms;
+#define CLEAR_NEW_SURFACES_MS 10000
+static long long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 static void surf_alloc(struct surf *s, int w, int h) {
     GLint rbo = 0;
     if (w < 1) w = 1;
@@ -662,6 +702,23 @@ static void surf_alloc(struct surf *s, int w, int h) {
         }
     }
     s->w = w; s->h = h;
+    /* For the first CLEAR_NEW_SURFACES_MS after the renderer starts, a new window starts black (transparent for a window with alpha): a renderbuffer's first contents are undefined, on some GPUs white,
+     * and a compositor with no layers yet (SurfaceFlinger's first frames, before the boot animation draws) swaps it out untouched. */
+    if (now_ms() - g_start_ms < CLEAR_NEW_SURFACES_MS) {
+        GLfloat cc[4]; GLfloat cd = 1; GLint cs = 0, sc = 0; GLboolean cm[4], dm = 1; GLint sm = 0xff;
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, cc); glGetFloatv(GL_DEPTH_CLEAR_VALUE, &cd);
+        glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &cs); glGetIntegerv(GL_STENCIL_WRITEMASK, &sm);
+        glGetBooleanv(GL_COLOR_WRITEMASK, cm); glGetBooleanv(GL_DEPTH_WRITEMASK, &dm);
+        sc = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST); glColorMask(1, 1, 1, 1); glDepthMask(1); glStencilMask(0xff);
+        glClearColor(0, 0, 0, 0); glClearDepthf(1); glClearStencil(0);
+        glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        if (s->msfbo) { glBindFramebuffer(GL_FRAMEBUFFER, s->msfbo); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT); }
+        glClearColor(cc[0], cc[1], cc[2], cc[3]); glClearDepthf(cd); glClearStencil(cs);
+        glColorMask(cm[0], cm[1], cm[2], cm[3]); glDepthMask(dm); glStencilMask((GLuint)sm);
+        if (sc) glEnable(GL_SCISSOR_TEST);
+    }
     glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)rbo);
     struct hctx *x = C->ctx;
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, x->draw_fb ? x->draw_fb : surf_fb(C->surf ? C->surf : s));
@@ -718,9 +775,20 @@ static uint32_t ctx_create(uint32_t share, int version) {
     struct hctx *sh = share ? ctx_find(share) : 0, *x = calloc(1, sizeof(*x));
     if (!x || (share && !sh)) { free(x); return 0; }
     if (g_robust < 0) { const char *e = eglQueryString(g_dpy, EGL_EXTENSIONS); g_robust = e && strstr(e, "EGL_EXT_create_context_robustness") ? 1 : 0; }
-    x->egl = g_robust ? eglCreateContext(g_dpy, g_cfg, sh ? sh->egl : EGL_NO_CONTEXT, cr) : EGL_NO_CONTEXT;
-    if (x->egl == EGL_NO_CONTEXT && g_robust && !sh) { g_robust = 0; LOG("no context with a reset notification: 0x%x", eglGetError()); }
-    if (x->egl == EGL_NO_CONTEXT) x->egl = eglCreateContext(g_dpy, g_cfg, sh ? sh->egl : EGL_NO_CONTEXT, ca);
+    /* A share group is all alike: a context that shares takes the kind (with or without a reset notification) of the one it shares
+     * with, not what the next new group would get (g_robust turns itself off when one group cannot be made). The other kind is
+     * the last try: some drivers allow it. */
+    int first = sh ? sh->robust : g_robust;
+    x->egl = first ? eglCreateContext(g_dpy, g_cfg, sh ? sh->egl : EGL_NO_CONTEXT, cr) : EGL_NO_CONTEXT;
+    if (x->egl != EGL_NO_CONTEXT) x->robust = 1;
+    else if (first && !sh) { g_robust = 0; LOG("no context with a reset notification: 0x%x", eglGetError()); }
+    if (x->egl == EGL_NO_CONTEXT) {
+        x->egl = eglCreateContext(g_dpy, g_cfg, sh ? sh->egl : EGL_NO_CONTEXT, ca);
+        if (x->egl == EGL_NO_CONTEXT && sh) {
+            LOG("a context sharing with %u (%s) refused: 0x%x", share, sh->robust ? "robust" : "plain", eglGetError());
+            if (!sh->robust && g_robust > 0) { x->egl = eglCreateContext(g_dpy, g_cfg, sh->egl, cr); if (x->egl != EGL_NO_CONTEXT) x->robust = 1; }
+        }
+    }
     x->pb = x->egl != EGL_NO_CONTEXT ? eglCreatePbufferSurface(g_dpy, g_cfg, pa) : EGL_NO_SURFACE;
     if (x->egl == EGL_NO_CONTEXT || x->pb == EGL_NO_SURFACE) {
         LOG("no context from the phone's driver: 0x%x", eglGetError());
@@ -772,12 +840,27 @@ static void ext_build(struct hctx *x) {
      * extra name is that very one, for a libEGL that passes the call through. */
     x->extv[x->extn++] = "GL_EXT_debug_marker";
 }
+/* GL_VENDOR / GL_RENDERER the guest is told (set by GlHost.identity before the first guest connects); empty = the phone's own */
+static char g_id_vendor[96], g_id_renderer[96];
+/* The phone's own strings as a real context gave them (the probe of GlHost.nativeStart, then every real answer): what a guest that asks with
+ * no context current gets when the VM names no GPU of its own. The spoofer's strings above win over these, as they do with a context. */
+static char g_real_vendor[160], g_real_renderer[160], g_real_version[200], *g_real_ext;
+static void real_keep(char *dst, size_t cap, const char *s) { if (s && !dst[0]) snprintf(dst, cap, "%s", s); }
 static void get_string(GLenum name, uint32_t index) {
     struct hctx *x = C->ctx;
     char buf[256];
     const char *s = 0;
     if (x && !x->ext) ext_build(x);
-    if (!x) s = 0;
+    if (!x) {
+        /* no context current (the guest's own create failed or has not been made yet): the same strings, from the identity and the cache;
+         * the extension list is the last one a context built (none yet: empty) */
+        if (index != NIL) s = 0;
+        else if (name == GL_VENDOR) s = g_id_vendor[0] ? g_id_vendor : g_real_vendor[0] ? g_real_vendor : 0;
+        else if (name == GL_RENDERER) s = g_id_renderer[0] ? g_id_renderer : g_real_renderer[0] ? g_real_renderer : 0;
+        else if (name == GL_VERSION && g_real_version[0]) { snprintf(buf, sizeof(buf), "OpenGL ES 3.%d (%.200s)", g_minor, g_real_version); s = buf; }
+        else if (name == GL_SHADING_LANGUAGE_VERSION) s = g_minor ? "OpenGL ES GLSL ES 3.10" : "OpenGL ES GLSL ES 3.00";
+        else if (name == GL_EXTENSIONS) s = g_real_ext ? g_real_ext : "";
+    }
     else if (index != NIL) s = name == GL_EXTENSIONS && (int)index < x->extn ? x->extv[index] : 0;
     else if (name == GL_EXTENSIONS) s = x->ext;
     else if (name == GL_VERSION) {
@@ -787,7 +870,15 @@ static void get_string(GLenum name, uint32_t index) {
         snprintf(buf, sizeof(buf), "OpenGL ES 3.%d (%.200s)", g_minor, h ? h : "");
         s = buf;
     } else if (name == GL_SHADING_LANGUAGE_VERSION) s = g_minor ? "OpenGL ES GLSL ES 3.10" : "OpenGL ES GLSL ES 3.00";
+    else if (name == GL_VENDOR && g_id_vendor[0]) s = g_id_vendor;
+    else if (name == GL_RENDERER && g_id_renderer[0]) s = g_id_renderer;
     else s = (const char *)glGetString(name);
+    if (x && index == NIL) {
+        if (name == GL_VENDOR) real_keep(g_real_vendor, sizeof g_real_vendor, (const char *)glGetString(GL_VENDOR));
+        else if (name == GL_RENDERER) real_keep(g_real_renderer, sizeof g_real_renderer, (const char *)glGetString(GL_RENDERER));
+        else if (name == GL_VERSION) real_keep(g_real_version, sizeof g_real_version, (const char *)glGetString(GL_VERSION));
+        else if (name == GL_EXTENSIONS && x->ext && !g_real_ext) g_real_ext = strdup(x->ext);
+    }
     if (!s) { reply32(NIL); return; }
     uint32_t n = (uint32_t)strlen(s), pad = (4 - (n & 3)) & 3;
     reply32(n); reply(s, n); reply("\0\0\0", pad);
@@ -822,6 +913,80 @@ static void swap(int w, int h) {
     }
     reply_flush();
     wr_all(C->px, need);
+    C->frames++;
+}
+
+/* ---- a frame in the layout of the guest's window buffer ----
+ * The pixels are read back as RGBA, bottom row first; each row goes out top row first as the buffer wants it. */
+struct lay { int bpp, ro, rl, go, gl, bo, bl, ao, al; };
+static inline uint32_t pack_px(const struct lay *l, uint32_t p) {
+    uint32_t r = p & 255, g = p >> 8 & 255, b = p >> 16 & 255, a = p >> 24;
+    uint32_t v = (r >> (8 - l->rl)) << l->ro | (g >> (8 - l->gl)) << l->go | (b >> (8 - l->bl)) << l->bo;
+    if (l->al) v |= (a >> (8 - l->al)) << l->ao;
+    return v;
+}
+static void lay_row(uint8_t *d, const uint8_t *src, int w, const struct lay *l) {
+    const uint32_t *s = (const uint32_t *)(const void *)src;      /* (a row of the readback buffer: 4-byte aligned) */
+    if (l->bpp == 32) {
+        uint32_t *o = (uint32_t *)(void *)d;                      /* (the guest's rows are 4-byte aligned at 32 bits) */
+        if (l->ro == 0 && l->go == 8 && l->bo == 16 && l->rl == 8 && l->gl == 8 && l->bl == 8) {
+            if (l->al == 8 && l->ao == 24) memcpy(d, src, (size_t)w * 4);                         /* RGBA_8888 */
+            else if (!l->al) for (int x = 0; x < w; x++) o[x] = s[x] & 0x00ffffffu;                 /* RGBX_8888 */
+            else for (int x = 0; x < w; x++) o[x] = pack_px(l, s[x]);
+        } else if (l->ro == 16 && l->go == 8 && l->bo == 0 && l->rl == 8 && l->gl == 8 && l->bl == 8 && l->al == 8 && l->ao == 24) {
+            for (int x = 0; x < w; x++) { uint32_t p = s[x]; o[x] = (p & 0xff00ff00u) | (p << 16 & 0x00ff0000u) | (p >> 16 & 0xffu); }   /* BGRA_8888 */
+        } else for (int x = 0; x < w; x++) o[x] = pack_px(l, s[x]);
+    } else if (l->bpp == 16) {
+        uint16_t *o = (uint16_t *)(void *)d;
+        if (l->ro == 11 && l->rl == 5 && l->go == 5 && l->gl == 6 && l->bo == 0 && l->bl == 5 && !l->al)
+            for (int x = 0; x < w; x++) { uint32_t p = s[x]; o[x] = (uint16_t)((p >> 3 & 0x1f) << 11 | (p >> 10 & 0x3f) << 5 | (p >> 19 & 0x1f)); }   /* RGB_565 */
+        else for (int x = 0; x < w; x++) o[x] = (uint16_t)pack_px(l, s[x]);
+    } else if (l->bpp == 24) {
+        for (int x = 0; x < w; x++) { uint32_t v = pack_px(l, s[x]); d[x * 3] = (uint8_t)v; d[x * 3 + 1] = (uint8_t)(v >> 8); d[x * 3 + 2] = (uint8_t)(v >> 16); }
+    }
+}
+static void swap_fmt(const uint8_t *p) {
+    struct hctx *x = C->ctx;
+    struct surf *s = C->surf;
+    int w = (int)rd32(&p), h = (int)rd32(&p);
+    struct lay l;
+    l.bpp = (int)rd32(&p);
+    uint32_t pitch = rd32(&p);
+    l.ro = (int)rd32(&p); l.rl = (int)rd32(&p); l.go = (int)rd32(&p); l.gl = (int)rd32(&p);
+    l.bo = (int)rd32(&p); l.bl = (int)rd32(&p); l.ao = (int)rd32(&p); l.al = (int)rd32(&p);
+    int ok = w > 0 && h > 0 && (l.bpp == 16 || l.bpp == 24 || l.bpp == 32) && pitch >= (uint32_t)w * (uint32_t)(l.bpp / 8) &&
+             l.rl >= 1 && l.rl <= 8 && l.gl >= 1 && l.gl <= 8 && l.bl >= 1 && l.bl <= 8 && l.al >= 0 && l.al <= 8 &&
+             l.ro >= 0 && l.go >= 0 && l.bo >= 0 && l.ao >= 0 && l.ro + l.rl <= l.bpp && l.go + l.gl <= l.bpp && l.bo + l.bl <= l.bpp &&
+             (!l.al || l.ao + l.al <= l.bpp) && (uint64_t)pitch * (uint32_t)h < (256u << 20);
+    if (!ok) { LOG("a frame layout the host cannot make (%dx%d, %d bits, pitch %u)", w, h, l.bpp, pitch); C->dead = 1; return; }
+    size_t need = (size_t)w * (size_t)h * 4, total = (size_t)pitch * (size_t)(h - 1) + (size_t)w * (size_t)(l.bpp / 8);
+    if (C->px_cap < need) { free(C->px); C->px = malloc(need); C->px_cap = C->px ? need : 0; }
+    if (C->out_cap < total) { free(C->out); C->out = calloc(1, total); C->out_cap = C->out ? total : 0; }   /* (zero: the padding of a row stays zero) */
+    if (!C->px || !C->out) { C->dead = 1; return; }
+    if (!x || !s || s->w != w || s->h != h) memset(C->px, 0, need);
+    else {
+        GLint align = 4, row = 0, rows = 0, pix = 0, pbo = 0;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &align); glGetIntegerv(GL_PACK_ROW_LENGTH, &row);
+        glGetIntegerv(GL_PACK_SKIP_ROWS, &rows); glGetIntegerv(GL_PACK_SKIP_PIXELS, &pix);
+        glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pbo);
+        if (pbo) glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        if (row) glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        if (rows) glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        if (pix) glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        if (align != 4) glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        resolve(s);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, C->px);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, real_fb(x->read_fb));
+        if (align != 4) glPixelStorei(GL_PACK_ALIGNMENT, align);
+        if (pix) glPixelStorei(GL_PACK_SKIP_PIXELS, pix);
+        if (rows) glPixelStorei(GL_PACK_SKIP_ROWS, rows);
+        if (row) glPixelStorei(GL_PACK_ROW_LENGTH, row);
+        if (pbo) glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pbo);
+    }
+    for (int y = 0; y < h; y++) lay_row(C->out + (size_t)y * pitch, C->px + (size_t)(h - 1 - y) * (size_t)w * 4, w, &l);
+    reply_flush();
+    wr_all(C->out, total);
     C->frames++;
 }
 
@@ -1186,7 +1351,34 @@ static void hd_other(unsigned op, const uint8_t *p, uint32_t len) {
         if (pbo) glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)pbo);
         break;
     }
-    case OP_PING: glFinish(); reply32(1); break;
+    case OP_PING:
+        if (len >= 4 && rd32(&p) == AEMU_CAPS_PROBE) { reply32(1u | (AEMU_CAP_SWAP_FMT | AEMU_CAP_IMAGE_TEX2) << 1); break; }   /* (no GL here: the guest has no context yet) */
+        glFinish(); reply32(1); break;
+    case OP_SWAP_FMT: swap_fmt(p); break;
+    case OP_IMAGE_TEX2: {
+        GLenum target = rd32(&p); GLsizei w = (GLsizei)rd32(&p), h = (GLsizei)rd32(&p); uint32_t pitch = rd32(&p), format = rd32(&p), n;
+        const void *d = rdblob(&p, &n);
+        uint32_t bpp = format == 1 || format == 2 ? 4 : format == 3 ? 3 : format == 4 ? 2 : 0;
+        GLint row = 0, align = 4, sp = 0, sr = 0, pbo = 0;
+        if (!C->ctx || (target != GL_TEXTURE_2D && target != TEX_EXT) || !d || !bpp || w <= 0 || h <= 0 || pitch < (uint32_t)w ||
+            (uint64_t)n < ((uint64_t)(h - 1) * pitch + (uint32_t)w) * bpp) break;
+        xt(target);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row); glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &sp); glGetIntegerv(GL_UNPACK_SKIP_ROWS, &sr);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pbo);
+        if (pbo) glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)pitch); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (sp) glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        if (sr) glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        if (bpp == 4) glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, d);
+        else if (bpp == 3) glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, d);
+        else glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, d);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, row); glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+        if (sp) glPixelStorei(GL_UNPACK_SKIP_PIXELS, sp);
+        if (sr) glPixelStorei(GL_UNPACK_SKIP_ROWS, sr);
+        if (pbo) glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)pbo);
+        break;
+    }
     case OP_PRESENT: { uint64_t id = rd64(&p); int w = (int)rd32(&p), h = (int)rd32(&p); reply32(present(id, w, h)); break; }
     case OP_SWAP_BUF: {
         int w = (int)rd32(&p), h = (int)rd32(&p); uint64_t id = rd64(&p), gen = rd64(&p), frame = rd64(&p);
@@ -1319,7 +1511,17 @@ static void *serve(void *arg) {
                 for (uint32_t k = 0; k < len; k++) nz += q[k] != 0;
                 __android_log_print(ANDROID_LOG_DEBUG, "aemu-gltrace", "%d %u %u %x %x %x %x %x %x nz=%u", c.pid, op, len, w[0], w[1], w[2], w[3], w[4], w[5], nz);
             }
+            struct tent *te = 0;
+            if (g_tring_on) {
+                unsigned n = __atomic_fetch_add(&g_tring_n, 1, __ATOMIC_RELAXED);
+                te = &g_tring[n % TRING_N];
+                memset(te, 0, sizeof *te);
+                te->seq = n + 1; te->pid = c.pid; te->op = op; te->len = len;
+                memcpy(te->w, c.in + c.in_a + 8, len < sizeof(te->w) ? len : sizeof(te->w));
+                for (uint32_t k = 0; k < len && k < 4096; k++) te->nz += c.in[c.in_a + 8 + k] != 0;
+            }
             dispatch(op, c.in + c.in_a + 8, len);
+            if (te && c.ctx && is_draw_op(op)) { te->draw = 1; tring_state(te); }
             if (trace_on && c.ctx) {
                 GLenum e = glGetError();
                 if (e) __android_log_print(ANDROID_LOG_DEBUG, "aemu-gltrace", "  error 0x%x after op %u", e, op);
@@ -1335,7 +1537,7 @@ static void *serve(void *arg) {
     eglReleaseThread();
     pid_count(c.pid, -1);
     close(c.fd);
-    free(c.in); free(c.rep); free(c.px);
+    free(c.in); free(c.rep); free(c.px); free(c.out);
     return 0;
 }
 static void *acceptor(void *arg) {
@@ -1357,6 +1559,7 @@ JNIEXPORT jstring JNICALL Java_app_aemu_core_GlHost_nativeStart(JNIEnv *env, jcl
     static const EGLint want[] = { EGL_RENDERABLE_TYPE, 0x40 /* EGL_OPENGL_ES3_BIT */, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT | EGL_WINDOW_BIT,
                                    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE };
     (void)cls;
+    g_start_ms = now_ms();
     if (!g_dpy) {
         EGLint n = 0;
         EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -1393,6 +1596,9 @@ JNIEXPORT jstring JNICALL Java_app_aemu_core_GlHost_nativeStart(JNIEnv *env, jcl
             glGetIntegerv(GL_MAJOR_VERSION, &major); glGetIntegerv(GL_MINOR_VERSION, &minor);
             g_minor = major > 3 || (major == 3 && minor >= 1) ? 1 : 0;
             /* (GuestVm reads "ES 3.<n> to the guest") */
+            real_keep(g_real_vendor, sizeof g_real_vendor, (const char *)glGetString(GL_VENDOR));
+            real_keep(g_real_renderer, sizeof g_real_renderer, (const char *)glGetString(GL_RENDERER));
+            real_keep(g_real_version, sizeof g_real_version, (const char *)glGetString(GL_VERSION));
             snprintf(info, sizeof(info), "ok %s, %s; ES 3.%d to the guest", (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION), g_minor);
             eglMakeCurrent(g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         } else snprintf(info, sizeof(info), "no GLES 3 context: 0x%x", eglGetError());
@@ -1401,6 +1607,15 @@ JNIEXPORT jstring JNICALL Java_app_aemu_core_GlHost_nativeStart(JNIEnv *env, jcl
         eglReleaseThread();
     }
     return (*env)->NewStringUTF(env, info);
+}
+JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeIdentity(JNIEnv *env, jclass cls, jstring jv, jstring jr) {
+    (void)cls;
+    const char *v = jv ? (*env)->GetStringUTFChars(env, jv, 0) : 0;
+    const char *r = jr ? (*env)->GetStringUTFChars(env, jr, 0) : 0;
+    snprintf(g_id_vendor, sizeof(g_id_vendor), "%s", v ? v : "");
+    snprintf(g_id_renderer, sizeof(g_id_renderer), "%s", r ? r : "");
+    if (v) (*env)->ReleaseStringUTFChars(env, jv, v);
+    if (r) (*env)->ReleaseStringUTFChars(env, jr, r);
 }
 JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeSurface(JNIEnv *env, jclass cls, jobject surface) {
     (void)cls;
@@ -1413,6 +1628,38 @@ JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeSurface(JNIEnv *env, jcla
 JNIEXPORT jlong JNICALL Java_app_aemu_core_GlHost_nativePresented(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;
     return (jlong)g_presented;
+}
+JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeTrace(JNIEnv *env, jclass cls, jboolean on) {
+    (void)env; (void)cls;
+    if (on && !g_tring_on) g_tring_n = 0;
+    g_tring_on = on ? 1 : 0;
+}
+/* the ring as text, oldest call first; a draw line carries the GL error and the state it drew with */
+JNIEXPORT jstring JNICALL Java_app_aemu_core_GlHost_nativeTraceDump(JNIEnv *env, jclass cls) {
+    (void)cls;
+    unsigned total = g_tring_n, n = total < TRING_N ? total : TRING_N, first = total - n;
+    size_t cap = (size_t)n * 260 + 512, len = 0;
+    char *out = malloc(cap);
+    if (!out) return (*env)->NewStringUTF(env, "out of memory");
+    len += (size_t)snprintf(out + len, cap - len, "# %s; %u calls recorded, the last %u follow. Columns: seq pid name len first-words nonzero-bytes\n"
+                            "# draws add: err program active-texture tex2D arraybuf drawfb flags(1 blend 2 scissor 4 stencil 8 depth 16 cull 32-256 colormask rgba) scissor viewport blendsrc/dst\n",
+                            g_tring_on ? "recording" : "stopped", total, n);
+    for (unsigned i = 0; i < n; i++) {
+        struct tent e = g_tring[(first + i) % TRING_N];
+        if (e.seq != first + i + 1) continue;            /* (overwritten while reading) */
+        char nb[24];
+        len += (size_t)snprintf(out + len, cap - len, "%u %d %s %u %x %x %x %x %x %x nz=%u", e.seq, e.pid, tring_name(e.op, nb, sizeof nb), e.len,
+                                e.w[0], e.w[1], e.w[2], e.w[3], e.w[4], e.w[5], e.nz);
+        if (e.draw) len += (size_t)snprintf(out + len, cap - len, " | err=%x prog=%u act=%x tex=%u vbo=%u fb=%u fl=%x sc=%d,%d,%d,%d vp=%d,%d,%d,%d bl=%x/%x",
+                                e.err, e.st[0], e.st[1], e.st[2], e.st[3], e.st[4], e.st[5], (int)e.st[6], (int)e.st[7], (int)e.st[8], (int)e.st[9],
+                                (int)e.st[10], (int)e.st[11], (int)e.st[12], (int)e.st[13], e.st[14], e.st[15]);
+        out[len++] = '\n';
+        if (cap - len < 300) break;
+    }
+    out[len] = 0;
+    jstring r = (*env)->NewStringUTF(env, out);
+    free(out);
+    return r;
 }
 JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeStop(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;

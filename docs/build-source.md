@@ -70,7 +70,7 @@ sh native/setupctl/build.sh
 - `sensorhal`: `sensors.aemu_host.so`, the experimental legacy motion-sensor
   bridge. Its host transport/lifecycle smoke test is `sh native/sensorhal/tests/run.sh`
   and requires a C compiler with ASan/UBSan (no guest firmware needed).
-- `archive`: `libaemuarc.so`, the native decompression/7z library (zlib, bzip2, lz4, zstd, brotli, xz/LZMA, 7z). `sh native/archive/build.sh android`
+- `archive`: `libaemuarc.so`, the native decompression/7z/RAR library (zlib, bzip2, lz4, zstd, brotli, xz/LZMA, 7z, RAR 3/4/5). `sh native/archive/build.sh android`
   needs only `python3 -m pip install ziglang`; `sh native/archive/tests/run.sh` builds it for the host and runs its tests. See `native/archive/README.md`.
 - `setupctl`: `aemu-setup.jar`, setup and guest rotation helpers;
   requires SDK 36/d8 and JDK 17+.

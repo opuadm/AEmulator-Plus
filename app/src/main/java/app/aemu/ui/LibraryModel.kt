@@ -82,7 +82,7 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
                 val img = if (names.any { it.endsWith(".aessvm", true) }) raw else raw.copy(settings = raw.settings.copy(gpu = d.gpu, jit = d.jit && !(raw.arch.foreign.let { it && raw.arch != app.aemu.core.GuestArch.ARM }), netProxy = d.netProxy,
                     showNavBar = d.showNavBar, navButtons = d.navButtons, trackball = d.trackball,
                     trackballDpad = d.trackballDpad, trackballStepDp = d.trackballStepDp,
-                    mouseKeyboard = d.mouseKeyboard, keypad = d.keypad,
+                    mouseKeyboard = d.mouseKeyboard, keypad = d.keypad, spen = d.spen,
                     keepScreenOn = d.keepScreenOn, showLed = d.showLed))
                 if (img != raw) ImageStore.save(ctx, img)
                 _import.value = _import.value.copy(active = false, done = img, step = lctx.getString(R.string.import_ready), progress = 1f)

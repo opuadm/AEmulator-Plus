@@ -24,4 +24,12 @@ class EffectiveApiTest {
         assertEquals(24, Analyzer.effectiveApi(null, null, "N"))
         assertEquals(10, Analyzer.effectiveApi(null, null, "2.3.4"))
     }
+
+    @Test fun android12WithSdk30IsApi31() {
+        // ColorOS 11.3 on the Reno7 (CPH2381): release 12, sdk 30
+        assertEquals(31, Analyzer.effectiveApi(30, "REL", "12"))
+        assertEquals(30, Analyzer.effectiveApi(30, "REL", "11"))
+        assertEquals(32, Analyzer.effectiveApi(32, "REL", "12"))
+        assertEquals(33, Analyzer.effectiveApi(33, "REL", "13"))
+    }
 }

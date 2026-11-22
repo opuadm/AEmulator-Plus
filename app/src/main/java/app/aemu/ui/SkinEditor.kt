@@ -93,6 +93,7 @@ import app.aemu.core.DeviceSkin
 import app.aemu.core.GlyphSet
 import app.aemu.core.NavButton
 import app.aemu.core.SkinKey
+import app.aemu.core.SkinPoint
 import app.aemu.core.SkinRect
 import app.aemu.core.VmTheme
 import app.aemu.core.localizedError
@@ -133,7 +134,7 @@ private fun detectScreen(bitmap: Bitmap): SkinRect? {
 internal fun ThemeEditor(initial: VmTheme, onCancel: () -> Unit, onSave: (VmTheme) -> Unit) {
     val ctx = LocalContext.current
     var t by remember { mutableStateOf(initial) }
-    var selected by remember { mutableIntStateOf(-1) }     // -1 = the screen, else index in skinKeys
+    var selected by remember { mutableIntStateOf(-1) }     // -1 = the screen, -2 = the LED, else index in skinKeys
     var menu by remember { mutableStateOf(false) }
     var style by remember { mutableStateOf(false) }
     var resolution by remember { mutableStateOf(false) }
@@ -161,7 +162,7 @@ internal fun ThemeEditor(initial: VmTheme, onCancel: () -> Unit, onSave: (VmThem
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             require(bounds.outWidth > 0 && bounds.outHeight > 0) { "not a picture" }
             // a new phone: its screen and keys are somewhere else
-            t = t.copy(frameImage = VmThemes.importImage(ctx, bytes), skinScreen = null, skinKeys = emptyList())
+            t = t.copy(frameImage = VmThemes.importImage(ctx, bytes), skinScreen = null, skinKeys = emptyList(), skinLed = null)
             selected = -1
             pendingDetect = true
         }.onFailure { toast(ctx, ctx.getString(R.string.th_failed, it.userMessage(ctx))) }
@@ -176,7 +177,7 @@ internal fun ThemeEditor(initial: VmTheme, onCancel: () -> Unit, onSave: (VmThem
                     IconButton(onClick = onCancel) { Icon(Icons.Rounded.Close, stringResource(R.string.cancel), tint = Color.White) }
                     Text(stringResource(R.string.th_editor), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f),
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                    TextButton(onClick = { onSave(t.copy(name = VmTheme.cleanName(t.name).ifBlank { ctx.getString(R.string.th_new_name) })) }) {
+                    TextButton(onClick = { onSave(t.copy(name = VmTheme.cleanName(t.name).ifBlank { ctx.getString(R.string.th_new_name) }).withLed()) }) {
                         Text(stringResource(R.string.save), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
                     }
                 }
@@ -216,9 +217,11 @@ internal fun ThemeEditor(initial: VmTheme, onCancel: () -> Unit, onSave: (VmThem
                                         })
                                         DropdownMenuItem(text = { Text(stringResource(R.string.sk_reset_screen)) },
                                             onClick = { menu = false; t = t.copy(skinScreen = SkinRect.DEFAULT_SCREEN); selected = -1 })
+                                        DropdownMenuItem(text = { Text(stringResource(R.string.sk_reset_led)) },
+                                            onClick = { menu = false; t = t.copy(skinLed = t.skinScreen?.let(SkinPoint::aboveScreen)); selected = -2 })
                                     }
                                     if (t.frameImage != null) DropdownMenuItem(text = { Text(stringResource(R.string.sk_remove_png)) }, onClick = {
-                                        menu = false; t = t.copy(frameImage = null, skinScreen = null, skinKeys = emptyList()); selected = -1
+                                        menu = false; t = t.copy(frameImage = null, skinScreen = null, skinKeys = emptyList(), skinLed = null); selected = -1
                                     })
                                     HorizontalDivider()
                                     DropdownMenuItem(text = { Text(stringResource(R.string.sk_style)) }, onClick = { menu = false; style = true })
@@ -261,6 +264,7 @@ private fun SkinCanvas(image: ImageBitmap, t: VmTheme, selected: Int, onSelect: 
     val keyColor = Color(0xFFFFC107)
     val handle = with(LocalDensity.current) { 28.dp.toPx() }
     val keyNames = SKIN_KEYS.associateWith { stringResource(it.labelRes()) }
+    val ledName = stringResource(R.string.sk_led)
     BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val ratio = image.width.toFloat() / image.height
         Box(Modifier.aspectRatio(ratio, matchHeightConstraintsFirst = maxWidth / maxHeight > ratio)) {
@@ -269,8 +273,13 @@ private fun SkinCanvas(image: ImageBitmap, t: VmTheme, selected: Int, onSelect: 
                 .pointerInput(Unit) {
                     detectTapGestures { p ->
                         val x = p.x / size.width; val y = p.y / size.height
+                        val led = theme.skinLed ?: theme.skinScreen?.let(SkinPoint::aboveScreen)
                         val key = theme.skinKeys.indexOfLast { it.area.contains(x, y) }
-                        onSelect(if (key >= 0) key else -1)
+                        onSelect(when {
+                            led != null && (Offset(led.x * size.width, led.y * size.height) - p).getDistance() < handle -> -2
+                            key >= 0 -> key
+                            else -> -1
+                        })
                     }
                 }
                 .pointerInput(Unit) {
@@ -287,10 +296,13 @@ private fun SkinCanvas(image: ImageBitmap, t: VmTheme, selected: Int, onSelect: 
                             val keys = theme.skinKeys
                             val screen = theme.skinScreen ?: return@detectDragGestures
                             val x = p.x / w; val y = p.y / h
-                            // the selected item's corners first, then any key, then the screen
-                            val selArea = if (sel >= 0) keys.getOrNull(sel)?.area else screen
+                            val led = theme.skinLed ?: SkinPoint.aboveScreen(screen)
+                            val onLed = (Offset(led.x * w, led.y * h) - p).getDistance() < handle
+                            // the selected item's corners first, then the LED, then any key, then the screen
+                            val selArea = when { sel >= 0 -> keys.getOrNull(sel)?.area; sel == -1 -> screen; else -> null }
                             val selCorner = selArea?.let(::corner)
                             when {
+                                onLed && selCorner == null -> { target = -2; grab = Grab.MOVE }
                                 selCorner != null -> { target = sel; grab = selCorner }
                                 keys.indexOfLast { it.area.contains(x, y) } >= 0 -> { target = keys.indexOfLast { it.area.contains(x, y) }; grab = Grab.MOVE }
                                 corner(screen) != null -> { target = -1; grab = corner(screen)!! }
@@ -302,6 +314,11 @@ private fun SkinCanvas(image: ImageBitmap, t: VmTheme, selected: Int, onSelect: 
                             change.consume()
                             val dx = d.x / size.width; val dy = d.y / size.height
                             val cur = theme
+                            if (target == -2) {
+                                val from = cur.skinLed ?: cur.skinScreen?.let(SkinPoint::aboveScreen) ?: return@detectDragGestures
+                                onChange(cur.copy(skinLed = from.moved(dx, dy)))
+                                return@detectDragGestures
+                            }
                             val area = (if (target >= 0) cur.skinKeys.getOrNull(target)?.area else cur.skinScreen) ?: return@detectDragGestures
                             var next = when (grab) {
                                 Grab.MOVE -> area.moved(dx, dy)
@@ -330,7 +347,7 @@ private fun SkinCanvas(image: ImageBitmap, t: VmTheme, selected: Int, onSelect: 
                 val label = if (theme.skinWidth > 0) "${theme.skinWidth}x${theme.skinHeight}" else "${(screen.width * image.width).toInt()}x${(screen.height * image.height).toInt()} px"
                 val text = measurer.measure(label, TextStyle(color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold))
                 drawText(text, topLeft = Offset(so.x + (ss.width - text.size.width) / 2, so.y + (ss.height - text.size.height) / 2))
-                drawRoundRect(if (sel < 0) primary else Color.White.copy(alpha = 0.7f), so, ss, corner, style = Stroke(if (sel < 0) 3.dp.toPx() else 1.5f.dp.toPx()))
+                drawRoundRect(if (sel == -1) primary else Color.White.copy(alpha = 0.7f), so, ss, corner, style = Stroke(if (sel == -1) 3.dp.toPx() else 1.5f.dp.toPx()))
                 theme.skinKeys.forEachIndexed { i, k ->
                     val (ko, ks) = rect(k.area)
                     drawRect(keyColor.copy(alpha = if (i == sel) 0.35f else 0.18f), ko, ks)
@@ -339,7 +356,14 @@ private fun SkinCanvas(image: ImageBitmap, t: VmTheme, selected: Int, onSelect: 
                     drawText(kt, topLeft = Offset(ko.x + (ks.width - kt.size.width) / 2, ko.y + (ks.height - kt.size.height) / 2))
                 }
                 // corner dots of the selected area
-                val active = if (sel >= 0) theme.skinKeys.getOrNull(sel)?.area else screen
+                val active = when { sel >= 0 -> theme.skinKeys.getOrNull(sel)?.area; sel == -1 -> screen; else -> null }
+                // the emulated LED: a dot you drag, drawn over everything else
+                val ledAt = theme.skinLed ?: SkinPoint.aboveScreen(screen)
+                val lc = Offset(ledAt.x * w, ledAt.y * h)
+                drawCircle(Color(0xFFFF3D3D).copy(alpha = 0.55f), 11.dp.toPx(), lc)
+                drawCircle(if (sel == -2) primary else Color.White, 11.dp.toPx(), lc, style = Stroke(if (sel == -2) 3.dp.toPx() else 1.5f.dp.toPx()))
+                val lt = measurer.measure(ledName, TextStyle(color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold))
+                drawText(lt, topLeft = Offset(lc.x - lt.size.width / 2f, lc.y + 13.dp.toPx()))
                 active?.let { a ->
                     for (pt in listOf(Offset(a.l * w, a.t * h), Offset(a.r * w, a.t * h), Offset(a.l * w, a.b * h), Offset(a.r * w, a.b * h))) {
                         drawCircle(Color.White, 9.dp.toPx(), pt)
@@ -380,7 +404,7 @@ private fun StyleSheet(t: VmTheme, initial: VmTheme, onChange: (VmTheme) -> Unit
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             require(bounds.outWidth > 0 && bounds.outHeight > 0) { "not a picture" }
             // a background fills the screen behind the guest: not a phone skin
-            onChange(t.copy(frameImage = VmThemes.importImage(ctx, bytes), skinScreen = null, skinKeys = emptyList()))
+            onChange(t.copy(frameImage = VmThemes.importImage(ctx, bytes), skinScreen = null, skinKeys = emptyList(), skinLed = null))
         }.onFailure { toast(ctx, ctx.getString(R.string.th_failed, it.userMessage(ctx))) }
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {

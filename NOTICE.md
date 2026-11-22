@@ -153,3 +153,24 @@ runner (`native/guest64/*/run64.c`).
 `libaemuarc.so` vendors unmodified decoder sources: zlib 1.3.1 (zlib license), bzip2 1.0.8 (bzip2 license), LZ4 1.10.0 library (BSD-2-Clause),
 Zstandard 1.5.7 (BSD-3-Clause, chosen from BSD/GPLv2), Brotli 1.1.0 (MIT), and the 7-Zip 25.01 LZMA SDK `C/` directory (public domain, Igor Pavlov).
 `native/archive/jni/jni.h` and `jni_md.h` are from OpenJDK (GPLv2 with Classpath Exception). The licenses are kept in `native/archive/third_party/*/`.
+
+## 2026-11-19: board AIDL declarations on ColorOS 16.0.0 (API 37)
+
+`core/TreeFixer.kt` (`restoreFirmwareAidlDeclarations`): the hwservicemanager gate is kept; ColorOS 16.0.0 on API 37 passes it
+(`isColorOs16OnApi37`) but only the performance HAL declarations are restored (`COLOROS16_AIDL_ALLOWED`) (not compiled, not
+tested). Restoring every board declaration there made system_server wait on services nothing serves until the watchdog
+killed it.
+- **2026-11-19**: CPU and GPU spoofing on the qemu engines. New `native/glid/`
+  (`libaemuglid.so`, built with `native/glid/build-zig.sh`, no NDK): preloaded into the
+  engine's GL servers, it answers GL_VENDOR / GL_RENDERER from the chip the VM reports
+  (`app/src/main/java/app/aemu/core/GlIdentity.kt`, `GuestVm.kt`). `native/guestshim/aemushim.c`
+  serves `/proc/cpuinfo` from the reported chip's file (`TreeFixer.kt`, `GuestRunner.kt`);
+  `app/src/main/assets/engines/common/libaemushim.so` was rebuilt from it with
+  `native/guestshim/build-zig.sh`.
+
+## 2026-11-22: S-Pen input method
+
+Emulated `sec_e-pen` digitizer (VM settings, opt-in) and a navigation-bar toggle that routes touches to it. Host side:
+`core/VirtualInput.kt` (`SPenProtocol`), `core/InputService.kt`, `core/GuestVm.kt`, `core/GuestRunner.kt`, `ui/GuestScreen.kt`,
+`ui/VmActivity.kt`, `ui/NavigationSettings.kt`. Guest side: `native/guestshim/vinput.h` (ARM and x86-32 shims) and every
+`native/guest64/*/run64.c`.

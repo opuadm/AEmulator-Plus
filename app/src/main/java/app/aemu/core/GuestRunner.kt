@@ -98,7 +98,7 @@ class GuestRunner(
         e["ANDROID_DATA"] = img.exports["ANDROID_DATA"] ?: "/data"
         e["ANDROID_ASSETS"] = img.exports["ANDROID_ASSETS"] ?: "/system/app"
         e["EXTERNAL_STORAGE"] = img.exports["EXTERNAL_STORAGE"] ?: img.sdcardPath
-        e["BOOTCLASSPATH"] = img.bootclasspath
+        e["BOOTCLASSPATH"] = BootClasspathRepair.relocate(paths.root, img.bootclasspath)
         e.putIfAbsent("EMULATED_STORAGE_SOURCE", "/mnt/shell/emulated")
         e.putIfAbsent("EMULATED_STORAGE_TARGET", "/storage/emulated")
         // Modified for AEmulator Plus (2026-10-30): the APEX roots come from init.environ.rc of the boot ramdisk, which an
@@ -132,6 +132,8 @@ class GuestRunner(
         // only opens them when the guest opens the nodes aemu-touchpad / aemu-keyboard, which exist in that mode alone
         e["AEMU64_PAD"] = File(paths.root, "dev/aemu_touchpad").absolutePath
         e["AEMU64_KBD"] = File(paths.root, "dev/aemu_keyboard").absolutePath
+        // input method "S-Pen": the socket of the emulated sec_e-pen digitizer; opened only when the guest opens the node aemu-spen
+        e["AEMU64_SPEN"] = File(paths.root, "dev/aemu_spen").absolutePath
         // 32-bit firmware whose libbinder insists on protocol 7: the guest runner (libaemu64_26/27) answers BINDER_VERSION
         // with it and translates the 32-bit binder structures for those programs (see BinderProtocol)
         BinderProtocol.saved(paths.bin)?.let { e[BinderProtocol.GUEST_ENV] = it.toString() }
@@ -163,7 +165,12 @@ class GuestRunner(
         // Without it a guest crash gives the normal "F DEBUG" tombstone in logcat (and the runner still reports if the
         // guest has no handler left).
         val sfTombstone = program == "/system/bin/surfaceflinger" && img.settings.sfTombstone
-        if (File(paths.bin, "crash.report").exists() || (program == "/system/bin/surfaceflinger" && !sfTombstone)) e["AEMU64_CRASH"] = "1"
+        // Added for AEmulator Plus (2026-11-21): the audio HAL service and audioserver are C++ only too. A guest crash there left
+        // only "exited, code 139" (the guest's own handler wants tombstoned, which is not running: "failed to connect to
+        // tombstoned"), so the cause of an audio HAL death could not be read from the log export. Reported the same way now.
+        val audioNative = program != null && (program.startsWith("/vendor/bin/hw/android.hardware.audio") ||
+            program.startsWith("/system/vendor/bin/hw/android.hardware.audio") || program == "/system/bin/audioserver")
+        if (File(paths.bin, "crash.report").exists() || (program == "/system/bin/surfaceflinger" && !sfTombstone) || audioNative) e["AEMU64_CRASH"] = "1"
         for (t in userTokens.filter(::isEnvToken)) e[t.substringBefore('=')] = t.substringAfter('=')
         for ((k, v) in extra) when {
             k.startsWith("DHD_SOCK_") -> e["AEMU64_SOCK_" + k.removePrefix("DHD_SOCK_")] = v
@@ -205,6 +212,9 @@ class GuestRunner(
             e["QEMU_SET_ENV"] = (set + ("LD_PRELOAD=" + e.getValue(key))).joinToString(",")
         }
         e.putAll(derivedExports)
+        // (a firmware whose class paths come from its own init.environ.rc rather than derive_classpath: jars that moved between modules)
+        if (derivedExports.isEmpty()) for (k in listOf("DEX2OATBOOTCLASSPATH", "SYSTEMSERVERCLASSPATH", "STANDALONE_SYSTEMSERVER_JARS"))
+            e[k]?.let { e[k] = BootClasspathRepair.relocate(paths.root, it) }
         return e
     }
 
@@ -257,6 +267,11 @@ class GuestRunner(
         e["AEMU_RO_SYSTEM"] = "1"
         // libaemushim serves /proc/meminfo scaled to this budget instead of the phone's own memory
         e["AEMU_RAM_KB"] = (guestRamMb(img.api, s.ramMb) * 1024L).toString()
+        // Added for AEmulator Plus (2026-11-19): size of the disk the guest reports; libaemushim takes the free space from the phone
+        if (s.storageGb > 0) e["AEMU_STORAGE_BYTES"] = StorageSpoof.bytes(s.storageGb).toString()
+        // Added for AEmulator Plus (2026-11-19): libaemushim answers /proc/cpuinfo from the cpuinfo of the chip the VM reports,
+        // which TreeFixer.cpuinfoAlias put in the tree (only for a chosen chip: the host's own keeps the real file)
+        if (File(paths.root, "data/.cpuinf").isFile) e["AEMU_CPUINFO"] = "/data/.cpuinf"
         e["HOME"] = "/data"
         e["TMPDIR"] = "/data/local/tmp"
         e["ASHMEM_SHIM_DIR"] = "/data/local/tmp"
@@ -267,7 +282,7 @@ class GuestRunner(
         e["DHD_FB_H"] = s.height.toString()
         e["DHD_IN_W"] = s.width.toString()
         e["DHD_IN_H"] = s.height.toString()
-        e["DHD_FB_HZ"] = s.fbHz.toString()
+        e["DHD_FB_HZ"] = RefreshRate.legacyHz(s.fbHz).toString()   // (-1 = host has no meaning for the old fixed-rate engines)
         e["DHD_OWNERS"] = paths.owners.absolutePath
         e["DHD_NET_LOG"] = File(paths.bin, "net.log").absolutePath
         e["DHD_ASHMEM_LOG"] = File(paths.bin, "ashmem.log").absolutePath

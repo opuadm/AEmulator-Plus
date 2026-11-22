@@ -1,0 +1,4 @@
+service vendor.soundtrigger3-stub /vendor/bin/hw/android.hardware.soundtrigger3-service.stub
+    class hal
+    user audioserver
+    group audio

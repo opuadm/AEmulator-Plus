@@ -195,7 +195,7 @@ object InitPlan {
             val bin = sv.argv.first()
             val base = bin.substringAfterLast('/')
             // (a HAL marked oneshot is one its client restarts: the audio service)
-            (!sv.disabled || isStartedDisabledHal(sv)) && (!sv.oneshot || bin.substringBeforeLast('/').endsWith("/bin/hw")) && sv.cls != "charger" && !isLpm(sv.name, base, sv.cls) &&
+            (!sv.disabled || isStartedDisabledHal(sv)) && (!sv.oneshot || bin.substringBeforeLast('/').endsWith("/bin/hw") || isOplusMmList(bin)) && sv.cls != "charger" && !isLpm(sv.name, base, sv.cls) &&
                 sv.name !in known && sv.name !in SKIP && base !in SKIP_BIN &&
                 // префиксом совпадают только явные «xxx_» и длинные имена: иначе «sh» отсекал бы shelld (MIUI) и т.п.
                 // Samsung's sensorhubservice is a binder service system_server waits for without a timeout (S4/S5 TouchWiz), not a sensor daemon
@@ -206,7 +206,7 @@ object InitPlan {
                 // second" lines), audioserver never answered, system_server's main thread hung in AudioSystem.setMasterBalance and
                 // the watchdog killed it after 65 s; zygote leaves with its system_server (exit 137).
                 (bin.startsWith("/system/bin/") || bin.startsWith("/system/xbin/") || bin.startsWith("/vendor/bin/") || bin.startsWith("/apex/") ||
-                    isHidlAllocator(bin)) &&
+                    isHidlAllocator(bin) || isOplusMmList(bin)) &&
                 File(root, bin.removePrefix("/")).isFile
         }.map { sv -> GuestService(sv.name, sv.argv, sv.sockets.toMap(), delayMs = 200, optional = true,
             // the camera service connects to itself (the API 1 parameters of each camera) and trusts that call only
@@ -218,9 +218,12 @@ object InitPlan {
             onDemand = api >= 26 && sv.cls == "default") }
         // Treble (8.0+): the HALs are programs of their own (/vendor/bin/hw), and surfaceflinger, keystore and
         // system_server wait for the ones the vendor manifest lists: they go up right after the service managers
-        val (hals, rest) = extras.partition { it.argv.first().substringBeforeLast('/').endsWith("/bin/hw") }
+        // (Added 2026-11-18: Oplus's MMListService goes up with the HALs: audioserver asks for it for every playback thread)
+        val (mmList, extras2) = extras.partition { isOplusMmList(it.argv.first()) }
+        val (hals, rest) = extras2.partition { it.argv.first().substringBeforeLast('/').endsWith("/bin/hw") }
         val sf = out.indexOfFirst { it.name == "surfaceflinger" }.let { if (it < 0) out.size else it }
         out.addAll(sf, hals.map { it.copy(delayMs = 100, optional = false) })
+        out.addAll(sf + hals.size, mmList.map { it.copy(delayMs = 100) })
         val z = out.indexOfFirst { it.name == "zygote" }.let { if (it < 0) out.size else it }
         out.addAll(z, rest)
         // Added for AEmulator Plus (2026-11-10): HyperOS 3 "Rust runtime". The launcher (com.miui.home) is started through
@@ -303,6 +306,17 @@ object InitPlan {
     /** The HIDL allocator service of 12+ (system_ext/bin/hw/android.hidl.allocator@1.0-service): the only system_ext program the plan starts. */
     fun isHidlAllocator(bin: String): Boolean =
         bin.startsWith("/system_ext/bin/hw/android.hidl.allocator@") || bin.startsWith("/system/system_ext/bin/hw/android.hidl.allocator@")
+
+    /**
+     * Added 2026-11-18. ColorOS / OxygenOS 15+ keep Oplus's MMListService (/system_ext/bin/mmlistservice, class core, binder
+     * service "MMListService") in system_ext, a place the plan did not start programs from. Its client is audioserver
+     * (OplusMMListWrapper, ListServiceUtils::init, run for every playback thread AudioFlinger opens): with no service it logged
+     * "Waiting for service 'MMListService'" and gave up only after several seconds, once per output, so AudioPolicyService
+     * registered minutes late and system_server's main thread stayed in AudioService.<init> (AudioSystem.isCallScreeningModeSupported,
+     * getService<IAudioPolicyService>) while the boot animation looped.
+     */
+    fun isOplusMmList(bin: String): Boolean =
+        bin == "/system_ext/bin/mmlistservice" || bin == "/system/system_ext/bin/mmlistservice"
 
     private val SKIP = setOf(
         // lpm: Samsung's charging screen of a phone that is off; started like a service it powers the guest off
@@ -404,24 +418,39 @@ object InitPlan {
      * its .rc entry): artd of 14+, which system_server waits for at the first boot, or a skin's own daemon.
      */
     fun lazyAidl(iface: String, root: File): GuestService? {
+        // Modified for AEmulator Plus (2026-11-19): the index of every "interface aidl" entry is built once per boot and kept
+        // (misses included). servicemanager asks once a second for each lazy name a client waits on, and this used to read all
+        // ~400 .rc files line by line on every question, inside the property service lock: system_server's setprop calls
+        // starved, the watchdog killed it and SystemUI went with it.
+        val key = root.absolutePath
+        val idx = lazyAidlIndex.get(key) ?: buildLazyAidlIndex(root).also { lazyAidlIndex[key] = it }
+        return idx[iface]
+    }
+
+    private val lazyAidlIndex = java.util.concurrent.ConcurrentHashMap<String, Map<String, GuestService>>()
+
+    /** Forgets the index: called at the start of every boot, the tree may have changed since. */
+    fun forgetLazyAidl() = lazyAidlIndex.clear()
+
+    private fun buildLazyAidlIndex(root: File): Map<String, GuestService> {
         val dirs = listOf("system/etc/init", "system_ext/etc/init", "system/system_ext/etc/init", "product/etc/init", "system/product/etc/init",
-            // Modified for AEmulator Plus (2026-10-31): the board's lazy AIDL services live in the vendor partition (Android 17
-            // desktop: vendor.google.desktop.vpd_executor, futility, i2c, camera-tool executors: "disabled oneshot", started only
-            // by "interface aidl"). Without these directories the request was dropped silently and DesktopRepairModeService
-            // waited for IVpdExecutor in system_server's main thread until the watchdog killed it.
+            // the board's lazy AIDL services live in the vendor partition (Android 17 desktop: vpd_executor, futility, i2c...)
             "vendor/etc/init", "system/vendor/etc/init", "odm/etc/init", "system/odm/etc/init").map { File(root, it) } +
             File(root, "apex").listFiles().orEmpty().map { File(it, "etc") }
+        val ws = Regex("\\s+")
+        val out = HashMap<String, GuestService>()
         for (f in dirs.flatMap { d -> d.listFiles().orEmpty().filter { it.isFile && it.name.endsWith(".rc") }.sortedBy { it.name } }) {
             var name = ""; var argv = emptyList<String>()
             for (raw in runCatching { f.readLines() }.getOrDefault(emptyList())) {
-                val t = raw.trim().split(Regex("\\s+"))
+                if (!raw.contains("service") && !raw.contains("interface") && !raw.trimStart().startsWith("on")) continue
+                val t = raw.trim().split(ws)
                 if (t[0] == "service" && t.size >= 3) { name = t[1]; argv = t.drop(2) }
                 else if (t[0] == "on") name = ""
-                else if (t[0] == "interface" && t.size >= 3 && t[1] == "aidl" && t[2] == iface && name.isNotEmpty() &&
-                    File(root, argv.first().removePrefix("/")).isFile) return GuestService(name, argv, uid = 0, gid = 0)
+                else if (t[0] == "interface" && t.size >= 3 && t[1] == "aidl" && name.isNotEmpty() &&
+                    File(root, argv.first().removePrefix("/")).isFile) out.putIfAbsent(t[2], GuestService(name, argv, uid = 0, gid = 0))
             }
         }
-        return null
+        return out
     }
 
     fun fallback(img: GuestImage, root: File): List<GuestService> =

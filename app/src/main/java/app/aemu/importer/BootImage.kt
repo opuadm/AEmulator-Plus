@@ -445,44 +445,29 @@ object BootImage {
     }
 }
 
-/** Минимальный распаковщик LZ4 legacy (рамдиски некоторых ядер 4.x). */
+/**
+ * LZ4 legacy (`lz4 -l`, magic 02 21 4C 18): ramdisks / initramfs of some 4.x kernels, and `*.lz4` files written with `-l`.
+ * Decoded by libaemuarc (native/archive/src/c_lz4l.c; a Java fallback runs on a plain JVM). Like [BootImage.gunzipLenient], a stream
+ * that goes bad after some blocks (trailing data behind it, a cut last block) gives what was decoded; one that yields nothing throws.
+ */
 object Lz4Legacy {
+    private const val MAX_DECODED = 128 * 1024 * 1024
+
     fun decode(d: ByteArray): ByteArray {
         val out = ByteArrayOutputStream()
-        var p = 4
-        val bb = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN)
-        while (p + 4 <= d.size) {
-            val clen = bb.getInt(p); p += 4
-            if (clen == 0x184C2102 || clen <= 0 || p + clen > d.size) break
-            val decoded = block(d, p, clen)
-            require(out.size().toLong() + decoded.size <= 128 * 1024 * 1024)
-            out.write(decoded)
-            p += clen
+        try {
+            ArcStreams.lz4Legacy(ByteArrayInputStream(d)).use { s ->
+                val buf = ByteArray(1 shl 16)
+                while (true) {
+                    val n = s.read(buf)
+                    if (n < 0) break
+                    require(out.size().toLong() + n <= MAX_DECODED) { "Boot ramdisk is too large" }
+                    out.write(buf, 0, n)
+                }
+            }
+        } catch (e: java.io.IOException) {
+            if (out.size() == 0) throw e
         }
-        return out.toByteArray()
-    }
-
-    private fun block(src: ByteArray, start: Int, len: Int): ByteArray {
-        val out = ByteArrayOutputStream(len * 3)
-        var buf = ByteArray(minOf(len.toLong() * 4, 1024 * 1024L).toInt())
-        var o = 0
-        var i = start
-        val end = start + len
-        fun ensure(n: Int) { require(n >= 0 && o.toLong() + n <= 128 * 1024 * 1024); if (o + n > buf.size) buf = buf.copyOf(maxOf(buf.size * 2, o + n).coerceAtMost(128 * 1024 * 1024)) }
-        while (i < end) {
-            val token = src[i++].toInt() and 0xff
-            var lit = token ushr 4
-            if (lit == 15) { while (true) { val b = src[i++].toInt() and 0xff; lit += b; if (b != 255) break } }
-            ensure(lit); System.arraycopy(src, i, buf, o, lit); i += lit; o += lit
-            if (i >= end) break
-            val offset = (src[i].toInt() and 0xff) or ((src[i + 1].toInt() and 0xff) shl 8); i += 2
-            var ml = token and 15
-            if (ml == 15) { while (true) { val b = src[i++].toInt() and 0xff; ml += b; if (b != 255) break } }
-            ml += 4
-            ensure(ml)
-            for (k in 0 until ml) { buf[o] = buf[o - offset]; o++ }
-        }
-        out.write(buf, 0, o)
         return out.toByteArray()
     }
 }

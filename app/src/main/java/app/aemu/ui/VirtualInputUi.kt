@@ -10,7 +10,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.DragHandle
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.RadioButtonChecked
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -67,6 +69,9 @@ internal fun ExtraNavButton(icon: ImageVector, label: String, active: Boolean, t
 
 internal val KeyboardIcon: ImageVector get() = Icons.Rounded.Keyboard
 internal val KeypadIcon: ImageVector get() = Icons.Rounded.Dialpad
+internal val SPenIcon: ImageVector get() = Icons.Rounded.Edit
+/** the S-Pen's side (action) button: a tap presses and releases it while the pen hovers, which opens Air Command */
+internal val SPenButtonIcon: ImageVector get() = Icons.Rounded.RadioButtonChecked
 
 /** last position and size of each floating window (by title), so it comes back as the person left it */
 private val lastWindowRect = mutableMapOf<String, FloatArray>()

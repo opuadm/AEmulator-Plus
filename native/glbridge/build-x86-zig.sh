@@ -8,6 +8,7 @@
 # and "system#lib64#egl" names are moved to the kernel's eglDir32 / eglDir, vendor/lib/egl and vendor/lib64/egl from API 26):
 #   x86_64  system#lib64#egl#libGLES_aemu.so   (64-bit programs: SurfaceFlinger, system_server, zygote64 apps)
 #   i386    system#lib#egl#libGLES_aemu.so     (32-bit programs of the same firmware: zygote_secondary apps, 32-bit services)
+# (emutls.c, next to this script: thread-locals on pthread keys, a lookup without a lock)
 # Neither has a SwiftShader behind it: guest.c runs in its "solo" mode there (own EGL display and configs, every context on the
 # phone's GPU). (g_api.h / h_api.h are the generated ones that sit next to guest.c: gen.py is only needed to change them)
 set -eu
@@ -27,51 +28,14 @@ S(__cxa_finalize) S(__cxa_atexit) S(strlen) S(malloc) S(calloc) S(realloc) S(fre
 S(strcmp) S(strncmp) S(memcmp) S(memset) S(memcpy) S(memmove) S(send) S(__system_property_get) S(getprogname) S(open) S(read)
 S(close) S(prctl) S(socket) S(connect) S(setsockopt) S(poll) S(abort) S(pthread_once) S(pthread_setspecific)
 S(pthread_getspecific) S(pthread_key_create) S(pthread_key_delete) S(pthread_mutex_lock) S(pthread_mutex_unlock)
-S(getauxval) S(dladdr) S(memfd_create)
+S(getauxval) S(dladdr) S(memfd_create) S(ioctl)
 int *__errno(void) { return 0; }
 EOT
-echo 'LIBC { global: __cxa_finalize; __cxa_atexit; strlen; malloc; calloc; realloc; free; strstr; strcmp; strncmp; memcmp; memset; memcpy; memmove; send; __system_property_get; getprogname; open; read; close; prctl; socket; connect; setsockopt; poll; abort; pthread_once; pthread_setspecific; pthread_getspecific; pthread_key_create; pthread_key_delete; pthread_mutex_lock; pthread_mutex_unlock; getauxval; dladdr; memfd_create; __errno; };' > "$STUB/libc.map"
+echo 'LIBC { global: __cxa_finalize; __cxa_atexit; strlen; malloc; calloc; realloc; free; strstr; strcmp; strncmp; memcmp; memset; memcpy; memmove; send; __system_property_get; getprogname; open; read; close; prctl; socket; connect; setsockopt; poll; abort; pthread_once; pthread_setspecific; pthread_getspecific; pthread_key_create; pthread_key_delete; pthread_mutex_lock; pthread_mutex_unlock; getauxval; dladdr; memfd_create; ioctl; __errno; };' > "$STUB/libc.map"
 echo 'void dlopen(void) {} void dlsym(void) {} void dlerror(void) {}' > "$STUB/dl.c"
 echo 'LIBC { global: dlopen; dlsym; dlerror; };' > "$STUB/dl.map"
 echo 'int __android_log_print(int p, const char *t, const char *f, ...) { return 0; }' > "$STUB/log.c"
 echo 'extern int *__errno(void); int *__errno_location(void) { return __errno(); }' > "$STUB/errno.c"
-cat > "$STUB/emutls.c" <<'EOT'
-/* emulated TLS on pthread keys, as the NDK's runtime does for API < 29 (zig's compiler-rt has no __emutls_get_address) */
-#include <pthread.h>
-#include <stdlib.h>
-#include <string.h>
-struct ctl { unsigned long size, align, index; void *templ; };
-struct arr { unsigned long n; void *p[1]; };
-static pthread_once_t once = PTHREAD_ONCE_INIT;
-static pthread_key_t key;
-static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-static unsigned long counter;
-static void mk(void) { pthread_key_create(&key, 0); }
-void *__emutls_get_address(struct ctl *c) {
-    pthread_once(&once, mk);
-    pthread_mutex_lock(&mu);
-    if (!c->index) c->index = ++counter;
-    unsigned long idx = c->index;
-    pthread_mutex_unlock(&mu);
-    struct arr *a = pthread_getspecific(key);
-    if (!a || a->n < idx) {
-        unsigned long n = idx + 8;
-        struct arr *b = calloc(1, sizeof(struct arr) + n * sizeof(void *));
-        if (!b) abort();
-        b->n = n;
-        if (a) { memcpy(b->p, a->p, a->n * sizeof(void *)); free(a); }
-        pthread_setspecific(key, b);
-        a = b;
-    }
-    if (!a->p[idx - 1]) {
-        void *p = calloc(1, c->size ? c->size : 1);
-        if (!p) abort();
-        if (c->templ) memcpy(p, c->templ, c->size);
-        a->p[idx - 1] = p;
-    }
-    return a->p[idx - 1];
-}
-EOT
 T="--target=$TARGET -fPIC -shared -nostdlib"
 $ZIG cc $T -Os -fno-builtin -Wl,--version-script,"$STUB/libc.map" -Wl,-soname,libc.so -o "$STUB/libc_stub.so" "$STUB/libc.c"
 $ZIG cc $T -Os -fno-builtin -Wl,--version-script,"$STUB/dl.map" -Wl,-soname,libdl.so -o "$STUB/libdl_stub.so" "$STUB/dl.c"
@@ -80,7 +44,7 @@ mkdir -p "$(dirname "$OUT")"
 $ZIG cc --target=$TARGET -fPIC -shared -O2 -fvisibility=hidden \
   -Wall -Wno-unused-function -fno-stack-protector -femulated-tls -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
   -Wl,-z,lazy -Wl,-z,norelro -Wl,-z,max-page-size=$PAGE -Wl,--build-id=none -Wl,--hash-style=both -Wl,--no-undefined -Wl,-s -Wl,-soname,libGLES_aemu.so \
-  -L"$STUB" -o "$OUT" guest.c "$STUB/errno.c" "$STUB/emutls.c" -lc_stub -ldl_stub -llog_stub
+  -L"$STUB" -o "$OUT" guest.c emutls.c "$STUB/errno.c" -lc_stub -ldl_stub -llog_stub
 # the library must carry nothing but bionic's imports: refuse a musl-only one
 if readelf --dyn-syms -W "$OUT" | awk '$7=="UND"{print $8}' | grep -E '^(__stack_chk_fail|__errno_location|__memcpy_chk|__sprintf_chk|__snprintf_chk|__fprintf_chk|__clock_gettime64|__emutls_get_address)(@|$)' >&2; then
   echo "error: $OUT imports a musl-only symbol (above)" >&2; exit 1

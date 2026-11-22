@@ -9,8 +9,9 @@
 //
 // The same file carries the other hooks an Android 7.x userland needs on the phone's kernel (what each one fixes is
 // noted at the function): extended attributes (installd), seccomp (mediaextractor/mediacodec), SO_MARK (netd), alarm
-// clocks (system_server), and the emulated touchpad and keyboard of the input method \"mouse and keyboard\" (vinput.h,
-// open() + ioctl() of the two emulator-owned nodes in /dev/input). The rest of aemushim.c (power, mounts, execve of
+// clocks (system_server), the emulated touchpad and keyboard of the input method \"mouse and keyboard\" (vinput.h,
+// open() + ioctl() of the two emulator-owned nodes in /dev/input), and the virtual console of Android-x86 builds that are
+// not \"user\" (/dev/tty0, VT_GETSTATE: InputFlinger's EventHub drops every event when the call fails). The rest of aemushim.c (power, mounts, execve of
 // scripts, netmgr, ...) is not ported.
 //
 // build: native/guestshim/build-x86.sh  ->  app/src/main/assets/engines/common-x86/libaemushim.so
@@ -18,6 +19,12 @@
 #define EXPORT __attribute__((visibility("default")))
 
 #define NR_open          5
+#define NR_read          3
+#define NR_write         4
+#define NR_close         6
+#define NR_lseek        19
+#define NR_sysinfo     116
+#define NR_memfd_create 356
 #define NR_ioctl        54
 #define NR_openat      295
 #define NR_readlink     85
@@ -177,6 +184,134 @@ EXPORT int getsockname(int fd, void *addr, unsigned *len)
     return 0;
 }
 
+/* ---- guest RAM budget (added for AEmulator Plus, 2026-11-21) -------------------------------------------------------
+ * The phone's /proc/meminfo and sysinfo() passed straight through: an x86 guest given 2 GB still saw all of the phone's memory.
+ * The budget is AEMU_RAM_KB from the host; this shim imports nothing from libc but __errno, so it is read from
+ * /proc/self/environ. Both answers are scaled like the ARM build's (aemushim.c): every kB value times guest / host total. */
+static unsigned long env_ram_kb(void)
+{
+    static int done;
+    static unsigned long val;
+    if (done) return val;
+    done = 1;
+    long fd = sys3(NR_open, (long)"/proc/self/environ", 0, 0);
+    if (fd < 0) return 0;
+    static const char key[] = "AEMU_RAM_KB=";      // 12 characters
+    char buf[1024];
+    int mi = 0;                                    // characters of the key matched; 12 = reading digits; -1 = skip to the next entry
+    unsigned long x = 0;
+    int found = 0;
+    for (; !found;) {
+        long n = sys3(NR_read, fd, (long)buf, sizeof buf);
+        if (n <= 0) { if (mi == 12) { val = x; } break; }
+        for (long i = 0; i < n; i++) {
+            char c = buf[i];
+            if (mi == 12) {
+                if (c >= '0' && c <= '9') { x = x * 10 + (unsigned long)(c - '0'); continue; }
+                val = x; found = 1; break;
+            }
+            if (c == 0) { mi = 0; continue; }
+            if (mi >= 0 && c == key[mi]) { mi++; continue; }
+            mi = -1;
+        }
+    }
+    sys3(NR_close, fd, 0, 0);
+    return val;
+}
+
+// v * num / den without libgcc; v unchanged when the quotient would not fit 32 bits
+static unsigned scale32(unsigned v, unsigned num, unsigned den)
+{
+    if (!den) return v;
+    unsigned long long p = (unsigned long long)v * num;
+    unsigned hi = (unsigned)(p >> 32), lo = (unsigned)p, q, rem;
+    if (hi >= den) return v;
+    __asm__("divl %4" : "=a"(q), "=d"(rem) : "a"(lo), "d"(hi), "r"(den));
+    return q;
+}
+
+EXPORT int sysinfo(void *si)
+{
+    long r = sys3(NR_sysinfo, (long)si, 0, 0);
+    if (r < 0) return fail(r);
+    unsigned long guest = env_ram_kb();
+    unsigned *w = (unsigned *)si;                  // 32-bit struct: totalram..freeswap are words 4..9, mem_unit word 13
+    unsigned unit = w[13] ? w[13] : 1;
+    unsigned total = scale32(w[4], unit, 1024);
+    if (!guest || !total || total <= guest) return 0;
+    for (int i = 4; i <= 9; i++) w[i] = scale32(scale32(w[i], unit, 1024), (unsigned)guest, total);
+    w[13] = 1024;
+    return 0;
+}
+
+static int path_is_meminfo(const char *p)
+{
+    static const char m[] = "/proc/meminfo";
+    int i = 0;
+    while (m[i] && p[i] == m[i]) i++;
+    return !m[i] && !p[i];
+}
+
+// the fake /proc/meminfo as a memfd, or -1 to let the real file be opened
+static long meminfo_fake(const char *path)
+{
+    if (!path || !path_is_meminfo(path)) return -1;
+    unsigned long guest = env_ram_kb();
+    if (!guest) return -1;
+    static char in[8192], out[8192 + 512];
+    long fd = sys3(NR_open, (long)path, 0, 0);
+    if (fd < 0) return -1;
+    long total = 0;
+    for (;;) {
+        long n = sys3(NR_read, fd, (long)(in + total), (long)sizeof in - 1 - total);
+        if (n <= 0) break;
+        total += n;
+        if (total >= (long)sizeof in - 1) break;
+    }
+    sys3(NR_close, fd, 0, 0);
+    if (total <= 0) return -1;
+    in[total] = 0;
+    unsigned long host = 0;
+    const char *p = in;
+    while (*p && (*p < '0' || *p > '9')) p++;
+    while (*p >= '0' && *p <= '9') host = host * 10 + (unsigned long)(*p++ - '0');
+    if (!host || guest >= host) return -1;
+    long o = 0;
+    p = in;
+    while (*p && o < (long)sizeof out - 64) {
+        const char *line = p, *e = p;
+        while (*e && *e != 0x0a) e++;
+        const char *d = line;
+        while (d < e && (*d < '0' || *d > '9')) d++;
+        const char *de = d;
+        unsigned v = 0;
+        while (de < e && *de >= '0' && *de <= '9') v = v * 10 + (unsigned)(*de++ - '0');
+        int kb = de + 3 <= e && de[0] == ' ' && de[1] == 'k' && de[2] == 'B';
+        if (d < e && kb) {
+            unsigned s = scale32(v, (unsigned)guest, (unsigned)host);
+            char num[12]; int k = 0;
+            do { num[k++] = (char)('0' + (int)(s % 10)); s /= 10; } while (s && k < 11);
+            int extra = k - (int)(de - d);          // keep the column: the new number ends where the old one did
+            const char *pe = d;
+            while (extra > 0 && pe - line >= 2 && pe[-1] == ' ' && pe[-2] == ' ') { pe--; extra--; }
+            for (const char *c = line; c < pe; c++) out[o++] = *c;
+            for (int j = (int)(de - d); j > k; j--) out[o++] = ' ';
+            while (k) out[o++] = num[--k];
+            for (const char *c = de; c < e; c++) out[o++] = *c;
+        } else {
+            for (const char *c = line; c < e; c++) out[o++] = *c;
+        }
+        if (*e) out[o++] = 0x0a;
+        p = *e ? e + 1 : e;
+    }
+    long m = sys3(NR_memfd_create, (long)"meminfo", 0, 0);
+    if (m < 0) return -1;
+    long w = 0;
+    while (w < o) { long n = sys3(NR_write, m, (long)(out + w), o - w); if (n <= 0) break; w += n; }
+    sys3(NR_lseek, m, 0, 0);
+    return m;
+}
+
 /* ---- mouse and keyboard (emulated evdev touchpad and keyboard, see vinput.h) ---------------------------------------
  * EventHub opens the two nodes the app leaves in /dev/input and asks them the EVIOC* questions; open() hands back a socket
  * to the app and ioctl() answers for it. Every other path and every other descriptor goes straight to the kernel call,
@@ -185,12 +320,85 @@ EXPORT int getsockname(int fd, void *addr, unsigned *len)
 
 #define VI_O_LARGEFILE 0100000
 
+/* ---- virtual console (/dev/tty0) ----------------------------------------------------------------------------------
+ * Android-x86 (5.x - 7.x) builds InputFlinger with -DCONSOLE_MANAGER -DANDROID_VT=7 on every variant but "user"
+ * (frameworks/native/services/inputflinger/Android.mk). EventHub::getEvents() then does, on every pass,
+ *     struct vt_stat vs;  int fd_vt = open("/dev/tty0", O_RDWR | O_SYNC);  if (fd_vt >= 0) { ioctl(fd_vt, VT_GETSTATE, &vs); close(fd_vt); }
+ * and, after each read() from an event node, drops the events when `vs.v_active != ANDROID_VT`. The guest has no VT:
+ * /dev/tty0 is not there, open() fails, `vs` stays uninitialised stack garbage and the comparison is a coin toss, so
+ * touch, keys and mouse are swallowed. The guest is always "on" the Android VT, so /dev/tty0 is answered here.
+ *
+ * open("/dev/tty0") hands back a descriptor of /dev/null (a real descriptor: dup, fork, close and the zygote fd check
+ * all behave, and guest_fd_name_ already shows it as /dev/null). ioctl() recognises the VT requests (0x5601..0x560f,
+ * plain numbers; V4L2's 'V' requests carry a size and never match) on a descriptor that is a character device 1:3 and
+ * answers them; every other request falls through to the kernel, which says ENOTTY for /dev/null, as it would for a
+ * console opened without a VT driver. No state is kept, so nothing goes stale when the descriptor is closed and its
+ * number reused. A real /dev/null that is handed a VT request is answered the same way; nobody sends one. */
+#define VT_ANDROID        7           // ANDROID_VT of Android.mk; the guest never switches away from it
+#define VT_GETMODE   0x5601
+#define VT_SETMODE   0x5602
+#define VT_GETSTATE  0x5603
+#define VT_RELDISP   0x5605
+#define VT_ACTIVATE  0x5606
+#define VT_WAITACTIVE 0x5607
+#define NR_fstat64     197
+#define VI_O_ACCMODE        03
+#define VI_O_NONBLOCK    04000
+#define VI_O_CLOEXEC  02000000
+#define VI_NOT_OURS    (-4096)        // same convention as vinput_open()
+
+// raw result of the open, VI_NOT_OURS when the path is not the console
+static long vt_open(const char *path, int flags)
+{
+    if (!vi_equal(path, "/dev/tty0")) return VI_NOT_OURS;
+    // only the bits that mean something for a character device; O_CREAT/O_TRUNC/O_SYNC & co. must not reach /dev/null
+    return sys3(NR_open, (long)"/dev/null", (flags & (VI_O_ACCMODE | VI_O_NONBLOCK | VI_O_CLOEXEC)) | VI_O_LARGEFILE, 0);
+}
+
+// i386 struct stat64: st_mode at byte 16, st_rdev (8 bytes, new_encode_dev) at byte 32, 96 bytes in all
+static int vt_fd(int fd)
+{
+    unsigned st[24];
+    if (sys3(NR_fstat64, fd, (long)st, 0) < 0) return 0;
+    return (st[4] & 0170000) == 0020000 && st[8] == 0x0103 && st[9] == 0;   // S_IFCHR, makedev(1, 3)
+}
+
+// VI_NOT_OURS: not a request the console answers, let the kernel have it
+static long vt_ioctl(unsigned req, void *arg)
+{
+    switch (req) {
+    case VT_GETSTATE: {                         // struct vt_stat { u16 v_active, v_signal, v_state; }
+        unsigned short *vs = arg;
+        if (!vs) return fail(-14 /* EFAULT */);
+        vs[0] = VT_ANDROID;
+        vs[1] = 0;
+        vs[2] = (unsigned short)(1u | 1u << VT_ANDROID);   // bit n = VT n in use: the system console and the Android VT
+        return 0;
+    }
+    case VT_GETMODE: {                          // struct vt_mode { char mode, waitv; short relsig, acqsig, frsig; }: VT_AUTO
+        unsigned char *vm = arg;
+        if (!vm) return fail(-14 /* EFAULT */);
+        for (int i = 0; i < 8; i++) vm[i] = 0;
+        return 0;
+    }
+    case VT_SETMODE:
+    case VT_RELDISP:
+        return 0;
+    case VT_ACTIVATE:                           // the argument is the VT number itself
+    case VT_WAITACTIVE:
+        return (long)arg == VT_ANDROID ? 0 : fail(-22 /* EINVAL */);
+    }
+    return VI_NOT_OURS;
+}
+
 EXPORT int open(const char *path, int flags, ...)
 {
     int mode = 0;
     if (flags & 0100 /* O_CREAT */) {
         __builtin_va_list ap; __builtin_va_start(ap, flags); mode = __builtin_va_arg(ap, int); __builtin_va_end(ap);
     }
+    { long mi = meminfo_fake(path); if (mi >= 0) return (int)mi; }
+    { long t = vt_open(path, flags); if (t != VI_NOT_OURS) return t < 0 ? fail(t) : (int)t; }
     long v = vinput_open(path, flags);
     if (v != -4096) return v < 0 ? fail(v) : (int)v;
     long r = sys3(NR_open, (long)path, flags | VI_O_LARGEFILE, mode);
@@ -212,6 +420,8 @@ EXPORT int openat(int dirfd, const char *path, int flags, ...)
     if (flags & 0100 /* O_CREAT */) {
         __builtin_va_list ap; __builtin_va_start(ap, flags); mode = __builtin_va_arg(ap, int); __builtin_va_end(ap);
     }
+    { long mi = meminfo_fake(path); if (mi >= 0) return (int)mi; }
+    { long t = vt_open(path, flags); if (t != VI_NOT_OURS) return t < 0 ? fail(t) : (int)t; }
     long v = vinput_open(path, flags);
     if (v != -4096) return v < 0 ? fail(v) : (int)v;
     long r = sys4(NR_openat, dirfd, (long)path, flags | VI_O_LARGEFILE, mode);
@@ -232,6 +442,10 @@ EXPORT int ioctl(int fd, int req, void *arg)
     if (((unsigned)req >> 8 & 255) == 'E') {
         int vk = vinput_fd(fd);
         if (vk) return vinput_ioctl(vk, (unsigned)req, arg);
+    }
+    if (((unsigned)req & ~255u) == 0x5600u && vt_fd(fd)) {
+        long v = vt_ioctl((unsigned)req, arg);
+        if (v != VI_NOT_OURS) return (int)v;
     }
     long r = sys3(NR_ioctl, fd, req, (long)arg);
     return r < 0 ? fail(r) : (int)r;

@@ -6,12 +6,12 @@ import java.io.IOException
 import java.io.InputStream
 
 /**
- * Whole-file compression of partition images: system.img.xz / .lzma / .lz4 / .zst / .br / .bz2 / .gz, and the same
+ * Whole-file compression of partition images: system.img.xz / .lzma / .lz4 (frame or legacy `lz4 -l`) / .zst / .br / .bz2 / .gz, and the same
  * wrappers around a file that kept its plain name (a "system.img" or "vendor.img" that is really LZMA / LZ4 / ...).
  * Detection is by content (magic bytes) first; the name only decides for formats without a magic (brotli, bare LZMA).
  */
 internal object ImageCodecs {
-    enum class Codec { GZIP, XZ, LZMA, BZIP2, LZ4, ZSTD, BROTLI }
+    enum class Codec { GZIP, XZ, LZMA, BZIP2, LZ4, LZ4_LEGACY, ZSTD, BROTLI }
 
     /** Trailing compression suffix of a file name. */
     val SUFFIX = Regex("(?i)\\.(lzma|xz|lz4|zst|zstd|bz2|gz|br)$")
@@ -25,6 +25,7 @@ internal object ImageCodecs {
             b(0) == 0xfd && b(1) == 0x37 && b(2) == 0x7a && b(3) == 0x58 && b(4) == 0x5a && b(5) == 0 -> Codec.XZ
             b(0) == 0x42 && b(1) == 0x5a && b(2) == 0x68 && b(3) in 0x31..0x39 -> Codec.BZIP2
             b(0) == 0x04 && b(1) == 0x22 && b(2) == 0x4d && b(3) == 0x18 -> Codec.LZ4
+            b(0) == 0x02 && b(1) == 0x21 && b(2) == 0x4c && b(3) == 0x18 -> Codec.LZ4_LEGACY // `lz4 -l`
             b(0) == 0x28 && b(1) == 0xb5 && b(2) == 0x2f && b(3) == 0xfd -> Codec.ZSTD
             isLzma(h, name) -> Codec.LZMA
             isBrotli(h, name) -> Codec.BROTLI
@@ -40,6 +41,7 @@ internal object ImageCodecs {
             Codec.LZMA -> ArcStreams.lzma(raw) // no memory limit (system images are packed with big dictionaries)
             Codec.BZIP2 -> ArcStreams.bzip2(raw)
             Codec.LZ4 -> ArcStreams.lz4(raw)
+            Codec.LZ4_LEGACY -> ArcStreams.lz4Legacy(raw)
             Codec.ZSTD -> ArcStreams.zstd(raw)
             Codec.BROTLI -> ArcStreams.brotli(raw)
         }

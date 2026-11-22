@@ -48,6 +48,8 @@ data class VmTheme(
     val skinHeight: Int = 0,
     /** the skin's own hardware keys; with any, the on-screen bar is hidden while the skin is shown */
     val skinKeys: List<SkinKey> = emptyList(),
+    /** where the emulated LED sits on the skin picture; a skin saved without it gets the spot above its screen when read */
+    val skinLed: SkinPoint? = null,
     val builtIn: Boolean = false,
     /** one of the device skins bundled with the app: [frameImage] is then an asset of the APK, not a file in [VmThemes.dir] */
     val fromSkinPack: Boolean = false,
@@ -68,6 +70,10 @@ data class VmTheme(
         .put("frameImage", frameImage ?: JSONObject.NULL).put("screenCorner", screenCorner)
         .put("skinScreen", skinScreen?.toJson() ?: JSONObject.NULL).put("skinWidth", skinWidth).put("skinHeight", skinHeight)
         .put("skinKeys", JSONArray(skinKeys.map { it.toJson() }))
+        .put("skinLed", skinLed?.toJson() ?: JSONObject.NULL)
+
+    /** This theme with its LED position set: as it is, or (skin without one) right above the screen. */
+    fun withLed(): VmTheme = if (skinLed != null || skinScreen == null) this else copy(skinLed = SkinPoint.aboveScreen(skinScreen))
 
     companion object {
         const val NAME_MAX = 32
@@ -89,7 +95,8 @@ data class VmTheme(
                 skinScreen = SkinRect.fromJson(o.optJSONArray("skinScreen")),
                 skinWidth = o.optInt("skinWidth").coerceIn(0, 8192), skinHeight = o.optInt("skinHeight").coerceIn(0, 8192),
                 skinKeys = o.optJSONArray("skinKeys")?.let { a -> List(a.length()) { a.optJSONObject(it)?.let(SkinKey::fromJson) }.filterNotNull().take(16) } ?: emptyList(),
-            )
+                skinLed = SkinPoint.fromJson(o.optJSONArray("skinLed")),
+            ).withLed()
         }
 
         /** only names this app wrote ("<id>.img"): never a path */
@@ -137,13 +144,19 @@ object VmThemes {
     @Volatile private var skinCache: List<VmTheme>? = null
 
     /**
-     * The device skins that come with the app (by @regectt), read from assets/skins/skins.json. Fixed like [BUILT_IN]:
-     * to change one, duplicate it into the custom themes.
+     * The device skins that come with the app (by @regectt), read from assets/skins/skins.json, then the ones added later in
+     * assets/skins/skins-extra.json (a skin id found twice is taken once). Fixed like [BUILT_IN]: to change one, duplicate
+     * it into the custom themes. Each pack file is read on its own, so a broken one does not hide the other.
      */
-    fun skins(ctx: Context): List<VmTheme> = skinCache ?: runCatching {
-        val a = JSONArray(ctx.assets.open("$SKIN_ASSETS/skins.json").bufferedReader(Charsets.UTF_8).use { it.readText() })
+    fun skins(ctx: Context): List<VmTheme> = skinCache ?: SKIN_PACKS.flatMap { readSkinPack(ctx, it) }.distinctBy { it.id }
+        .also { if (it.isNotEmpty()) skinCache = it }
+
+    private val SKIN_PACKS = listOf("skins.json", "skins-extra.json")
+
+    private fun readSkinPack(ctx: Context, file: String): List<VmTheme> = runCatching {
+        val a = JSONArray(ctx.assets.open("$SKIN_ASSETS/$file").bufferedReader(Charsets.UTF_8).use { it.readText() })
         List(a.length()) { VmTheme.fromJson(a.getJSONObject(it)).copy(builtIn = true, fromSkinPack = true) }
-    }.getOrDefault(emptyList()).also { if (it.isNotEmpty()) skinCache = it }
+    }.getOrDefault(emptyList())
 
     fun all(ctx: Context) = BUILT_IN + skins(ctx) + custom(ctx)
 
@@ -186,7 +199,8 @@ object VmThemes {
         val picture = imageFile(ctx, t)?.let { f -> runCatching { importImage(ctx, f.readBytes()) }.getOrNull() }
         val lost = t.frameImage != null && picture == null
         return t.copy(id = UUID.randomUUID().toString(), name = name, builtIn = false, fromSkinPack = false, frameImage = picture,
-            skinScreen = if (lost) null else t.skinScreen, skinKeys = if (lost) emptyList() else t.skinKeys)
+            skinScreen = if (lost) null else t.skinScreen, skinKeys = if (lost) emptyList() else t.skinKeys,
+            skinLed = if (lost) null else t.skinLed)
     }
 
     /**

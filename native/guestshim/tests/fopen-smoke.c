@@ -25,6 +25,20 @@ static int test_main(void) {
     CHECK(equal(qt_redirect("/proc/net/xt_qtaguid/ctrl", buf, sizeof(buf)), "/dev/null"));
     CHECK(equal(qt_redirect("/proc/net/xt_qtaguid", buf, sizeof(buf)), "/data/.aemu_qtaguid"));
     CHECK(equal(qt_redirect(path, buf, sizeof(buf)), path));
+    /* Added for AEmulator Plus (2026-11-19): /proc/cpuinfo is answered from the file AEMU_CPUINFO names, and only then */
+    CHECK(equal(qt_redirect("/proc/cpuinfo", buf, sizeof(buf)), "/proc/cpuinfo"));
+    {
+        static char *spoof[] = { "PATH=/system/bin", "AEMU_CPUINFO=/data/.cpuinf", 0 };
+        static char *relative[] = { "AEMU_CPUINFO=data/.cpuinf", 0 };
+        char **saved = environ;
+        environ = spoof;
+        CHECK(equal(qt_redirect("/proc/cpuinfo", buf, sizeof(buf)), "/data/.cpuinf"));
+        CHECK(equal(qt_redirect("/proc/cpuinfo.bak", buf, sizeof(buf)), "/proc/cpuinfo.bak"));
+        CHECK(equal(qt_redirect("/proc/meminfo", buf, sizeof(buf)), "/proc/meminfo"));
+        environ = relative;
+        CHECK(equal(qt_redirect("/proc/cpuinfo", buf, sizeof(buf)), "/proc/cpuinfo"));
+        environ = saved;
+    }
     CHECK(!fopen(path, "z") && test_errno == 22);
     CHECK(!fopen(0, "r") && test_errno == 22);
     CHECK(!fopen(path, 0) && test_errno == 22);

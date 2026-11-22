@@ -11,13 +11,31 @@ internal object FirmwareContainers {
         h.size >= 3 && h[0] == 'B'.code.toByte() && h[1] == 'Z'.code.toByte() && h[2] == 'h'.code.toByte() -> Compression.BZIP2
         else -> null
     }
-    fun destination(root: java.io.File, relative: String): java.io.File {
+    private fun requireSafeRelative(relative: String) {
         require(!relative.startsWith('/') && !relative.contains('\\') && !relative.contains('\u0000') &&
             relative.split('/').none { it == ".." }) { "Unsafe firmware path" }
+    }
+
+    /**
+     * Only the folder that holds [file] is resolved, never [file] itself: the entry may be a symlink (one made a moment ago,
+     * or one of a pair that points at each other once several images are merged), and resolving it is exactly what makes the
+     * system answer "too many symbolic links". A parent that cannot be resolved because of a link loop is not an escape:
+     * nothing can be written through it, so the caller's own write or symlink call fails on that entry alone.
+     */
+    private fun requireInside(root: java.io.File, file: java.io.File) {
+        val parent = file.parentFile ?: return
+        val rootReal = root.canonicalPath
+        val real = try { parent.canonicalPath } catch (e: java.io.IOException) { return }
+        require(real == rootReal || real.startsWith(rootReal + java.io.File.separator)) { "Firmware path escapes guest root" }
+    }
+
+    fun destination(root: java.io.File, relative: String): java.io.File {
+        requireSafeRelative(relative)
         val file = java.io.File(root, relative)
-        require(file.canonicalPath == root.canonicalPath || file.canonicalPath.startsWith(root.canonicalPath + java.io.File.separator)) { "Firmware path escapes guest root" }
+        requireInside(root, file)
         return file
     }
+
     fun checkLink(relative: String, target: String) {
         require(target.isNotEmpty() && !target.contains('\\') && !target.contains('\u0000')) { "Unsafe firmware symlink" }
         val parent = relative.substringBeforeLast('/', "")

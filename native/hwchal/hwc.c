@@ -138,7 +138,28 @@ enum { L_FRAMEBUFFER = 0, L_OVERLAY = 1, L_BACKGROUND = 2, L_TARGET = 3 };
 #define FMT_RGB888 3
 #define FMT_RGB565 4
 #define FMT_BGRA 5
-#define VSYNC_NS 16666666L
+/* Added for AEmulator Plus (2026-11-20): the guest's screen refresh rate. The app sets two properties (VM settings > Screen refresh
+ * rate): ro.aemu.refresh_hz is the rate the display mode reports, ro.aemu.refresh_tick_hz the rate the vsync really ticks at (the
+ * same, or the phone's own maximum when the reported one is above it). Unset or out of 10..1000: 60 Hz, as before. */
+static long g_report_ns = 16666666L, g_tick_ns = 16666666L;
+static long hz_prop(const char *name) {
+    char v[92] = {0}; long n = 0;
+    if (__system_property_get(name, v) <= 0) return 0;
+    for (int i = 0; v[i] >= '0' && v[i] <= '9'; i++) { n = n * 10 + (v[i] - '0'); if (n > 100000) return 0; }
+    return (n >= 10 && n <= 1000) ? n : 0;
+}
+/* 1e9 / hz by shift-and-subtract: a 32-bit ARMv7-A core has no divide instruction, and the guest's libc exports no __aeabi_idiv, so a
+ * runtime "/" here would leave an undefined helper in the module (the build scripts refuse that). */
+static long hz_to_ns(long hz) {
+    uint32_t n = 1000000000u, d = (uint32_t)hz, q = 0, r = 0;
+    for (int i = 31; i >= 0; i--) { r = (r << 1) | ((n >> i) & 1u); if (r >= d) { r -= d; q |= 1u << i; } }
+    return (long)q;
+}
+static void read_refresh(void) {
+    long r = hz_prop("ro.aemu.refresh_hz"), t = hz_prop("ro.aemu.refresh_tick_hz");
+    if (r) g_report_ns = hz_to_ns(r);
+    if (t) g_tick_ns = hz_to_ns(t); else if (r) g_tick_ns = g_report_ns;
+}
 
 static void *base_of(struct hwc *d, const void *handle) {
     void *va = 0;
@@ -327,7 +348,7 @@ static int hwc_query(struct hwc *d, int what, int *value) {
     (void)d;
     switch (what) {
     case 0: *value = 0; return 0;                   /* no background layer */
-    case 1: *value = (int)VSYNC_NS; return 0;
+    case 1: *value = (int)g_report_ns; return 0;
     case 2: *value = 1; return 0;                   /* the primary display only */
     }
     return -22;
@@ -343,7 +364,7 @@ static int hwc_get_configs(struct hwc *d, int disp, uint32_t *configs, size_t *n
 static int hwc_get_attributes(struct hwc *d, int disp, uint32_t config, const uint32_t *attrs, int32_t *values) {
     if (disp || config) return -22;
     for (int i = 0; attrs[i]; i++) switch (attrs[i]) {
-    case 1: values[i] = (int32_t)VSYNC_NS; break;
+    case 1: values[i] = (int32_t)g_report_ns; break;
     case 2: values[i] = d->w; break;
     case 3: values[i] = d->h; break;
     case 4: case 5: values[i] = 160000; break;      /* as the plain framebuffer reports; the density is a property */
@@ -357,9 +378,15 @@ static void *vsync_thread(void *arg) {
     struct timespec64 t;
     clock_gettime(1 /* MONOTONIC */, &t);
     for (;;) {
-        t.tv_nsec += VSYNC_NS;
+        t.tv_nsec += g_tick_ns;
         if (t.tv_nsec >= 1000000000L) { t.tv_nsec -= 1000000000L; t.tv_sec++; }
-        clock_nanosleep(1, 1 /* TIMER_ABSTIME */, &t, 0);
+        /* Modified for AEmulator Plus (2026-11-20): never catch up. If the guest cannot deliver a vsync inside one period (above
+         * ~70 Hz under qemu) the target time falls further behind every tick, clock_nanosleep() returns at once and vsync fires
+         * back to back until the composer service dies. A tick a full period late is dropped: restart from now. */
+        struct timespec64 now_;
+        clock_gettime(1 /* MONOTONIC */, &now_);
+        if ((long long)now_.tv_sec * 1000000000LL + now_.tv_nsec > (long long)t.tv_sec * 1000000000LL + t.tv_nsec + (long long)g_tick_ns) t = now_;
+        else clock_nanosleep(1, 1 /* TIMER_ABSTIME */, &t, 0);
         const struct procs *p = d->procs;
         if (d->vsync_on && p && p->vsync) p->vsync(p, 0, t.tv_sec * 1000000000LL + t.tv_nsec);
     }
@@ -400,6 +427,7 @@ static int hwc_open(const struct hw_module *m, const char *id, struct hw_device 
         d->fb = fb;
         if (counted) d->frames = (uint32_t *)((char *)fb + bytes);
         long t;
+        read_refresh();
         pthread_create(&t, 0, vsync_thread, d);
         up = 1;
     }

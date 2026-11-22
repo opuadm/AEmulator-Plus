@@ -15,14 +15,14 @@ package app.aemu.importer
  * system-tree directories.
  */
 internal object PartitionNames {
-    private val SYSTEM = Regex("(?i)system(\\.ext4)?\\.img(\\.ext4)?|system_image\\.img|system\\.raw\\.img|system\\.rfs|factoryfs(\\.img|\\.rfs)?|system_signed(\\.img)?|system_a\\.(img|bin)")
+    private val SYSTEM = Regex("(?i)system(\\.ext4)?\\.img(\\.ext4)?|system\\.ext[234]|system_image\\.img|system\\.raw\\.img|system\\.rfs|factoryfs(\\.img|\\.rfs)?|system_signed(\\.img)?|system_a\\.(img|bin)")
     private val BOOT = Regex("(?i)boot(\\.img|_signed(\\.img)?)|boot_a\\.(img|bin)")
-    private val OEM = Regex("(?i)oem(\\.ext4)?\\.img(\\.ext4)?|oem_signed(\\.img)?|oem\\.rfs|oem_a\\.(img|bin)")
-    private val VENDOR = Regex("(?i)vendor(\\.ext4)?\\.img|vendor_a\\.(img|bin)")
+    private val OEM = Regex("(?i)oem(\\.ext4)?\\.img(\\.ext4)?|oem\\.ext[234]|oem_signed(\\.img)?|oem\\.rfs|oem_a\\.(img|bin)")
+    private val VENDOR = Regex("(?i)vendor(\\.ext4)?\\.img|vendor\\.ext[234]|vendor_a\\.(img|bin)")
     /** More partitions that keep their name as the mount point (carrier / region packs, GKI module partitions). The guest asks for them by that very path. */
     private const val EXTRA_NAMES = "cust|preload|carrier|hw_product|hw_odm|hw_country|special_preload|system_dlkm|vendor_dlkm|odm_dlkm"
     /** Partitions besides system / vendor / oem: Treble and dynamic-partition ones, and the skins' own (Xiaomi mi_ext, OPPO my_*, vivo vgc, Samsung prism / optics, Alcatel/TCL custpack: system/build.prop is a symlink into it). */
-    private val EXTRA = Regex("(?i)(product|system_ext|odm|custpack|mi_ext|vgc|prism|optics|my_[a-z0-9]+|$EXTRA_NAMES)(_[ab])?(\\.ext4|\\.erofs|\\.f2fs)?\\.img(\\.ext4)?(\\.lz4)?")
+    private val EXTRA = Regex("(?i)(product|system_ext|odm|custpack|mi_ext|vgc|prism|optics|my_[a-z0-9]+|$EXTRA_NAMES)(_[ab])?((\\.ext4|\\.erofs|\\.f2fs)?\\.img(\\.ext4)?|\\.ext[234])(\\.lz4)?")
     private val RECOVERY = Regex("(?i)recovery(\\.img|_signed(\\.img)?)(\\.lz4)?|recovery\\.(emmc|mmc)\\.win")
 
     /** The same partitions under their bare names (no extension at all); slot "_a" only, as above. */

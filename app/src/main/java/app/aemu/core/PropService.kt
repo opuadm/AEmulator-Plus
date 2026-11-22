@@ -24,7 +24,11 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
 
     private val server = UnixServer(paths.socket("property_service"), "props") { c ->
         val din = DataInputStream(c.inputStream)
-        val body = ByteArray(128)
+        // Added for AEmulator Plus (2026-11-20): the legacy setprop message is { u32 cmd; char name[N]; char value[92] }. N is 32 in classic
+        // bionic and 128 in the Android-x86 5.1 libc (224 bytes in all); it is the name field of the property area (LibcPropLayout).
+        val nameMax = (area as? PropAreaV1)?.nameMax ?: LibcPropLayout.CLASSIC_NAME_MAX
+        val msgSize = 4 + nameMax + 92
+        val body = ByteArray(maxOf(128, msgSize))
         din.readFully(body, 0, 4)
         val b = ByteBuffer.wrap(body).order(ByteOrder.LITTLE_ENDIAN)
         val cmd = b.getInt()
@@ -49,9 +53,9 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
             c.outputStream.write(ByteArray(4))   // PROP_SUCCESS
             return@UnixServer
         }
-        din.readFully(body, 4, 124)
-        val name = cstr(body, 4, 32)
-        val value = cstr(body, 36, 92)
+        din.readFully(body, 4, msgSize - 4)
+        val name = cstr(body, 4, nameMax)
+        val value = cstr(body, 4 + nameMax, 92)
         if (cmd == 1) apply(name, value) else log("props: unknown command $cmd")
     }
 
@@ -91,7 +95,24 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
         return true
     }
 
-    fun serve(): Boolean = server.start(log)
+    fun serve(): Boolean {
+        // Added for AEmulator Plus (2026-11-19): the handlers below run on this thread, one at a time and in order, never under
+        // the property lock: a slow ctl.* / boot observer used to hold every guest setprop (system_server's PowerManagerService
+        // included) until the watchdog killed system_server.
+        synchronized(eventsLock) {
+            if (events?.isShutdown != false) events = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "props-events").apply { isDaemon = true } }
+        }
+        return server.start(log)
+    }
+
+    private val eventsLock = Any()
+    @Volatile private var events: java.util.concurrent.ExecutorService? = null
+
+    private fun post(what: String, block: () -> Unit) {
+        val run = Runnable { try { block() } catch (e: Throwable) { log("props: $what failed: $e") } }
+        val ex = events
+        if (ex == null || ex.isShutdown) run.run() else try { ex.execute(run) } catch (_: java.util.concurrent.RejectedExecutionException) { run.run() }
+    }
 
     fun get(name: String): String? = area?.get(name)
 
@@ -114,9 +135,11 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
             // 10+: hwservicemanager asks for the service of an interface by the interface's name until it registers;
             // those services are started at boot here
             // (14+: servicemanager starts a lazy AIDL service the same way, as aidl/<name>; that one is not running yet)
-            if (what == "interface_start" && value.startsWith("aidl/")) { onCtl?.invoke(true, value); return }
+            if (what == "interface_start" && value.startsWith("aidl/")) { post("ctl.$what") { onCtl?.invoke(true, value) }; return }
             if (what.startsWith("interface_")) return
-            onCtl?.invoke(what == "start" || what == "restart", value) ?: log("props: ctl.$what=$value (no services)")
+            val h = onCtl
+            if (h == null) log("props: ctl.$what=$value (no services)")
+            else post("ctl.$what") { h(what == "start" || what == "restart", value) }
             return
         }
         if (name.startsWith("ro.") && get(name) != null) { rejects++; return }
@@ -129,7 +152,7 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
         if (name.startsWith("persist.")) {
             runCatching { File(paths.root, "data/property/$name").writeText(value) }
         }
-        onSet?.invoke(name, value)
+        onSet?.let { h -> post("set $name") { h(name, value) } }
     }
 
     @Synchronized
@@ -139,6 +162,7 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
     }
 
     fun stop() {
+        synchronized(eventsLock) { events?.shutdownNow(); events = null }
         server.stop()
         close()
     }

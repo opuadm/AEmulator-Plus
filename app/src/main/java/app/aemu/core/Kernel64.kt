@@ -23,7 +23,7 @@ enum class Kernel64(
     /** The guest sees a kernel with per-app traffic accounting (empty tables). 8.1 needs it to finish booting: its
      *  network policy service never reports "ready" with accounting off, and system_server waits 30 s for it. */
     val trafficAccounting: Boolean = false,
-    /** /dev/qemu_pipe cannot be opened or created. The framework of an emulator build (ro.kernel.qemu=1) opens it
+    /** /dev/qemu_pipe cannot be opened or created (the runner answers ENOENT, the node does not exist). The framework of an emulator build (ro.kernel.qemu=1) opens it
      *  read-write with O_CREAT for the host clipboard and takes whatever lands in that file for a message length. */
     val noQemuPipe: Boolean = false,
     /** vold is a binder service (9+): the storage service calls it without checking that it exists, so the engine's
@@ -196,7 +196,7 @@ enum class Kernel64(
     /** the policy's audio_policy_configuration.xml is replaced by the engine's single-output one (TreeFixer.audioPolicy) */
     val audioPolicyXml: Boolean = false,
     /** /proc/meminfo shows the image's RAM budget (the setting, or 4 GB), not the phone's memory */
-    val ramBudget: Boolean = false,
+    val ramBudget: Boolean = true,
     /** Debugging a guest that takes the phone's kernel down: aemu.log is synced to storage line by line, and
      *  <root>/dev/.aemu-stop-after (a number N) starts only the first N services of the plan */
     val syncLog: Boolean = false,
@@ -318,7 +318,7 @@ enum class Kernel64(
     // Android 9 over the vendor side of 8.1, which is what a generic system image of 9 is made for: the HALs are the
     // ones of kernel 27 (copied, so that the two can part), and the system finds its copy of their libraries by the
     // VNDK version the vendor side declares.
-    A9("28", 28..28, gpuBridge64 = true, webView64 = true, bridgeAsEmulation = true, qcomHandles = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
+    A9("28", 28..28, gpuBridge64 = true, webView64 = true, bridgeAsEmulation = true, qcomHandles = true, exynosHandles = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
         // (MIUI's system_server and the touch controller's lockdown bytes: as on 8.1)
         procFiles = mapOf("tp_lockdown_info" to "4636320131320200\n"),
         absentFeatures = listOf("consumerir", "fingerprint", "nfc", "nfc.hce", "nfc.hcef"), trafficAccounting = true, noQemuPipe = true, binderVold = true,
@@ -411,7 +411,11 @@ enum class Kernel64(
         // (the passthrough lookup takes any "-impl*.so": Qualcomm's ones wait for the secure world forever)
         firmwareAside = listOf("vendor#lib64#hw#android.hardware.keymaster@3.0-impl-qti.so", "vendor#lib64#hw#android.hardware.gatekeeper@1.0-impl-qti.so")),
     // Android 12: starts as kernel 30
-    A12("31", 31..31, derivedIdentity = true, gpuBridge64 = true, oneIncludePolicy = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
+    // Added for AEmulator Plus (2026-11-19): odmManifestFragmentsAside for 12: ColorOS 11.3 (Android 12) declares the Oplus HALs
+    // (performance, misc, charger, ...) in /odm/etc/vintf/manifest and none of their services run here, so every client blocks in
+    // getService() ("Waited one second for vendor.oplus.hardware.performance@1.0::IPerformance/default", "...misc@1.0::IOplusMisc/default")
+    // and the boot never gets past waiting for HALs. The odm fragments go aside as on 14+.
+    A12("31", 31..31, odmManifestFragmentsAside = true, derivedIdentity = true, gpuBridge64 = true, oneIncludePolicy = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
         absentFeatures = listOf("consumerir", "fingerprint", "nfc", "nfc.hce", "nfc.hcef", "bluetooth", "bluetooth_le"), trafficAccounting = true, noQemuPipe = true, binderVold = true,
         // (12 has no VNDK 27 any more: the 8.1 vendor side links against the oldest one there is)
         props = mapOf("ro.treble.enabled" to "false", "bpf.progs_loaded" to "1", "ro.product.first_api_level" to "27", "debug.stagefright.c2inputsurface" to "1",

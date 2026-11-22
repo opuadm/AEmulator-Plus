@@ -84,11 +84,14 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import android.content.Intent
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -125,6 +128,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Minimize
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Terminal
@@ -370,9 +377,18 @@ open class VmActivity : ComponentActivity() {
         vmRoot = root
         box = FrameLayout(this)
         surfaceView = SurfaceView(this)
+        // Added for AEmulator Plus (2026-11-20): the phone's display is asked to run at the rate the guest ticks at (a guest at 90 Hz on a
+        // phone that idles at 60), for the window and, from Android 11, for the guest's own surface.
+        val refreshTick = app.aemu.core.RefreshRate.resolve(s.fbHz, app.aemu.core.RefreshRate.hostHz(this), s.gpu).tick
+        window.attributes = window.attributes.apply { preferredRefreshRate = refreshTick.toFloat() }
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(h: SurfaceHolder) { vm.surface = h.surface }
-            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) { vm.surface = h.surface }
+            private fun hintRate(h: SurfaceHolder) {
+                if (android.os.Build.VERSION.SDK_INT >= 30) runCatching {
+                    h.surface.setFrameRate(refreshTick.toFloat(), android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                }
+            }
+            override fun surfaceCreated(h: SurfaceHolder) { vm.surface = h.surface; hintRate(h) }
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) { vm.surface = h.surface; hintRate(h) }
             override fun surfaceDestroyed(h: SurfaceHolder) { vm.surface = null }
         })
         // the guest's restart needs a fresh native window for the in-app GPU bridge (see GuestVm.reseatGlSurface)
@@ -402,6 +418,7 @@ open class VmActivity : ComponentActivity() {
         if (direct) { surfaceView.holder.setFixedSize(gw, gh); guest.direct = { app.aemu.core.GlHost.presented() } }
         surfaceView.visibility = if (useBridge || direct) View.VISIBLE else View.GONE
         guest.passthrough = useBridge
+        guest.bridgeMode = useBridge
         box.addView(surfaceView, FrameLayout.LayoutParams(-1, -1))
         box.addView(guest, FrameLayout.LayoutParams(-1, -1))
         // the theme's frame picture, behind the guest screen
@@ -459,7 +476,7 @@ open class VmActivity : ComponentActivity() {
             // a device skin is a portrait phone with its bar (if any) at the bottom
             if (skin != null && skinPic != null && fv != null && controlsTurns == 0 && aw <= ah) {
                 val l = app.aemu.core.DeviceSkin.layout(aw, (ah - controlsHeightPx).coerceAtLeast(1), skinPic.first, skinPic.second,
-                    skin, vmTheme.skinKeys, gw, gh)
+                    skin, vmTheme.skinKeys, gw, gh, led = vmTheme.skinLed ?: app.aemu.core.SkinPoint.aboveScreen(skin))
                 fun place(v: View, b: app.aemu.core.DeviceSkin.Box) {
                     val p = v.layoutParams as FrameLayout.LayoutParams
                     if (p.width != b.width || p.height != b.height || p.leftMargin != b.left || p.topMargin != b.top || p.gravity != (Gravity.LEFT or Gravity.TOP)) {
@@ -850,6 +867,42 @@ open class VmActivity : ComponentActivity() {
     }
     /** Puts the button back in its corner; done every time the emulator is started or opened again. */
     private fun resetMenuOffset() { menuOffset = Offset.Zero }
+
+    private var navCollapsed by mutableStateOf(false)
+    private var navHandleEdge by mutableStateOf(0)
+    private var navHandleOffset by mutableStateOf(Offset.Zero)
+    private var navHandlePlaced = false
+    private var navHandleArea by mutableStateOf(androidx.compose.ui.unit.IntSize.Zero)
+    private var navHandleSize by mutableStateOf(androidx.compose.ui.unit.IntSize.Zero)
+    private fun clampNavHandle(o: Offset): Offset {
+        val maxX = (navHandleArea.width - navHandleSize.width).coerceAtLeast(0).toFloat()
+        val maxY = (navHandleArea.height - navHandleSize.height).coerceAtLeast(0).toFloat()
+        val x = if (o.x.isFinite()) o.x.coerceIn(0f, maxX) else maxX / 2f
+        val y = if (o.y.isFinite()) o.y.coerceIn(0f, maxY) else maxY
+        return Offset(x, y)
+    }
+    private fun snapNavHandle(o: Offset): Offset {
+        val w = navHandleArea.width.toFloat()
+        val h = navHandleArea.height.toFloat()
+        val bw = navHandleSize.width.toFloat()
+        val bh = navHandleSize.height.toFloat()
+        val dBottom = h - o.y - bh
+        val dTop = o.y
+        val dStart = o.x
+        val dEnd = w - o.x - bw
+        navHandleEdge = when (minOf(minOf(dBottom, dTop), minOf(dStart, dEnd))) {
+            dBottom -> 0
+            dTop -> 1
+            dStart -> 2
+            else -> 3
+        }
+        return when (navHandleEdge) {
+            0 -> Offset(o.x, h - bh)
+            1 -> Offset(o.x, 0f)
+            2 -> Offset(0f, o.y)
+            else -> Offset(w - bw, o.y)
+        }
+    }
 
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) vm.mic.permissionGranted() }
 
@@ -1424,6 +1477,13 @@ open class VmActivity : ComponentActivity() {
                     if (want) { if (!guest.autoPages) guest.pages = 2; guest.format = vm.logoFormat }
                     guest.passthrough = !want; guest.poke()
                 }
+                // Added for AEmulator Plus (2026-11-19): the screen starts out transparent for the in-app GPU bridge, but with a spoofed
+                // GPU (and on Mali) glUp runs the standalone glserverd, which writes fb0 and never draws into the SurfaceView: the
+                // screen stayed empty. Follow whether the in-app bridge is really running; otherwise show fb0 like the software path.
+                if (guest.bridgeMode && !onFb) {
+                    val live = vm.glInApp
+                    if (guest.passthrough != live) { guest.passthrough = live; guest.poke() }
+                }
                 delay(200)
             }
         }
@@ -1433,15 +1493,40 @@ open class VmActivity : ComponentActivity() {
         LaunchedEffect(state) { if (state == GuestVm.State.RUNNING || state == GuestVm.State.FAILED || state == GuestVm.State.STOPPED) cardOverride = null }
         val cardMinimized = cardOverride ?: (state == GuestVm.State.BOOTING)
         val bootCard = state != GuestVm.State.RUNNING && !showLog && (state == GuestVm.State.FAILED || !cardMinimized)
-        // with the tab bar folded away, a tiny arrow at the top right brings it back
-        val revealArrow = tabBarHidden && panePos != 'B'
+        // MMI/FTM builds ignore Back/Home/Recents/Menu: unless the user chose buttons, show volume + power
+        // Recovery is driven by hardware keys too (and the strip must exist even when the user hid the navbar)
+        val navSetting = when {
+            vm.recoveryMode && vm.settings.navButtons == NavControls.DEFAULT_BUTTONS -> NavControls.RECOVERY_BUTTONS
+            vm.nativeBoot && vm.settings.navButtons == NavControls.DEFAULT_BUTTONS -> NavControls.MMI_BUTTONS
+            else -> vm.settings.navButtons
+        }
+        val buttons = NavControls.parse(navSetting).filter {
+            it != NavButton.RECENTS || vm.img.api >= 11
+        }
+        val skinKeys = skinLayout?.keys.orEmpty()
+        val showButtons = (vm.settings.showNavBar || vm.recoveryMode) && buttons.isNotEmpty() && (skinKeys.isEmpty() || vm.recoveryMode)
+        // "Go to recovery" (leave the stock recovery's "No command" screen): only in a stock recovery, whatever the settings
+        val stockRecovery = remember(vm.recoveryMode) { vm.recoveryMode && app.aemu.core.RecoveryImage.kind(vm.paths) == app.aemu.core.RecoveryImage.Kind.STOCK }
+        // Extra input methods (VM settings): the keypad is always available; mouse and keyboard needs the shim engine
+        val preOne = LegacyFirmware.isPreRelease(vm.img.release)
+        // a pre-1.0 build has no touch screen here: its keyboard is the ordinary key device (event0), not the mouse-and-keyboard nodes
+        val extraKeyboard = (vm.mouseKeyboardActive || preOne) && !vm.recoveryMode
+        val extraKeypad = vm.settings.keypad && !vm.recoveryMode && !vm.nativeUi && !preOne   // pre-1.0: the keyboard window carries the keypad
+        // S-Pen (VM settings > Controls): a button that switches S-Pen mode, the guest's pen digitizer is there from boot
+        // (the button needs the digitizer registered at this boot: switching the setting on in a running VM waits for the next boot)
+        val extraSpen = vm.spenActive && vm.input.spenEnabled && !vm.recoveryMode
+        val showStrip = showButtons || stockRecovery || extraKeyboard || extraKeypad || extraSpen
         Box(Modifier.fillMaxSize()) {
             if (bootCard) Box(Modifier.fillMaxSize().pointerInput(state) {
                 detectTapGestures {
                     if (state == GuestVm.State.PREPARING || state == GuestVm.State.BOOTING) cardOverride = true
                 }
             })
-            led?.takeIf { it.lit && showLed }?.let { LedIndicator(it, Modifier.align(Alignment.TopCenter)) }
+            led?.takeIf { it.lit && showLed }?.let { l ->
+                // on a device skin the LED sits where the skin puts it; otherwise it stays above the screen, top centre
+                val spot = skinLayout?.led
+                LedIndicator(l, Modifier.align(if (spot != null) Alignment.TopStart else Alignment.TopCenter), spot)
+            }
             if (!showLog) skinLayout?.keys?.forEach { (button, area) -> key(button, area) { SkinKeyZone(button, area) } }
             if (romNote.isNotBlank() && !vm.recoveryMode && !vm.lowPowerBoot && !showLog && !menu) {
                 Surface(shape = MaterialTheme.shapes.large,
@@ -1483,7 +1568,6 @@ open class VmActivity : ComponentActivity() {
             // top menu button (hidden while the log is open so it does not cover the log toolbar); drag to move it
             // The outer box is the border: the whole screen minus the status bar and an 8dp margin. It takes no touches itself.
             if (!showLog || vm.settings.hideMenuButton) Box(Modifier.fillMaxSize().statusBarsPadding().padding(8.dp)
-                .padding(top = if (revealArrow) 16.dp else 0.dp) // the menu button stays under the arrow
                 .onSizeChanged { menuArea = it }) {
             Box(Modifier.align(Alignment.TopEnd)
                 .offset { clampMenuOffset(menuOffset).let { IntOffset(it.x.roundToInt(), it.y.roundToInt()) } }
@@ -1506,6 +1590,13 @@ open class VmActivity : ComponentActivity() {
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text(stringResource(R.string.log)) }, leadingIcon = { Icon(Icons.Rounded.Terminal, null) },
                         onClick = { menu = false; showLog = true })
+                    if (tabBarHidden && panePos != 'B') DropdownMenuItem(text = { Text(stringResource(R.string.m_multitask)) }, leadingIcon = { Icon(Icons.Rounded.Apps, null) },
+                        onClick = { menu = false; foldTabBar(false) })
+                    // the Android button bar no longer folds away on every tap: fold it (and bring it back) from here
+                    if ((showStrip || vm.settings.trackball) && !showLog) DropdownMenuItem(
+                        text = { Text(stringResource(if (navCollapsed) R.string.nav_show else R.string.nav_hide)) },
+                        leadingIcon = { Icon(if (navCollapsed) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown, null) },
+                        onClick = { menu = false; navCollapsed = !navCollapsed })
                     // the tab closes, the machine keeps running (open it again from the library)
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_minimize)) }, leadingIcon = { Icon(Icons.Rounded.Close, null) },
                         onClick = { menu = false; minimizeTab() })
@@ -1611,30 +1702,13 @@ open class VmActivity : ComponentActivity() {
                 Dlg.NONE -> {}
             }
 
-            // MMI/FTM builds ignore Back/Home/Recents/Menu: unless the user chose buttons, show volume + power
-            // Recovery is driven by hardware keys too (and the strip must exist even when the user hid the navbar)
-            val navSetting = when {
-                vm.recoveryMode && vm.settings.navButtons == NavControls.DEFAULT_BUTTONS -> NavControls.RECOVERY_BUTTONS
-                vm.nativeBoot && vm.settings.navButtons == NavControls.DEFAULT_BUTTONS -> NavControls.MMI_BUTTONS
-                else -> vm.settings.navButtons
-            }
-            val buttons = NavControls.parse(navSetting).filter {
-                it != NavButton.RECENTS || vm.img.api >= 11
-            }
-            val skinKeys = skinLayout?.keys.orEmpty()
-            val showButtons = (vm.settings.showNavBar || vm.recoveryMode) && buttons.isNotEmpty() && (skinKeys.isEmpty() || vm.recoveryMode)
-            // "Go to recovery" (leave the stock recovery's "No command" screen): only in a stock recovery, whatever the settings
-            val stockRecovery = remember(vm.recoveryMode) { vm.recoveryMode && app.aemu.core.RecoveryImage.kind(vm.paths) == app.aemu.core.RecoveryImage.Kind.STOCK }
-            // Extra input methods (VM settings): the keypad is always available; mouse and keyboard needs the shim engine
-            val preOne = LegacyFirmware.isPreRelease(vm.img.release)
-            // a pre-1.0 build has no touch screen here: its keyboard is the ordinary key device (event0), not the mouse-and-keyboard nodes
-            val extraKeyboard = (vm.mouseKeyboardActive || preOne) && !vm.recoveryMode
-            val extraKeypad = vm.settings.keypad && !vm.recoveryMode && !vm.nativeUi && !preOne   // pre-1.0: the keyboard window carries the keypad
             var keyboardOpen by remember { mutableStateOf(false) }
             var keypadOpen by remember { mutableStateOf(false) }
-            val showStrip = showButtons || stockRecovery || extraKeyboard || extraKeypad
             LaunchedEffect(extraKeyboard) { if (!extraKeyboard) keyboardOpen = false }
             LaunchedEffect(extraKeypad) { if (!extraKeypad) keypadOpen = false }
+            var spenOn by remember { mutableStateOf(vm.input.spenMode) }
+            LaunchedEffect(extraSpen) { if (!extraSpen) spenOn = false }
+            LaunchedEffect(spenOn, extraSpen) { vm.input.setSpenMode(spenOn && extraSpen) }
             val stripTurns = controlsTurns
             val sideways = stripTurns % 2 != 0
             val stripAlignment = when (DisplayGeometry.edge(stripTurns)) {
@@ -1643,15 +1717,15 @@ open class VmActivity : ComponentActivity() {
                 DisplayGeometry.Edge.TOP -> Alignment.TopCenter
                 DisplayGeometry.Edge.BOTTOM -> Alignment.BottomCenter
             }
-            DisposableEffect(showStrip, vm.settings.trackball, showLog, stripTurns) {
+            DisposableEffect(showStrip, vm.settings.trackball, showLog, stripTurns, navCollapsed) {
                 heldNavKeys.releaseAll()
                 box.post { updateGuestLayout?.invoke() }
-                if ((!showStrip && !vm.settings.trackball) || showLog) {
+                if ((!showStrip && !vm.settings.trackball) || showLog || navCollapsed) {
                     controlsHeightPx = 0; box.post { updateGuestLayout?.invoke() }
                 }
                 onDispose { }
             }
-            if ((showStrip || vm.settings.trackball) && !showLog) {
+            if ((showStrip || vm.settings.trackball) && !showLog && !navCollapsed) {
                 Box(Modifier.align(stripAlignment).onSizeChanged { size ->
                     controlsHeightPx = if (sideways) size.width else size.height
                     box.post { updateGuestLayout?.invoke() }
@@ -1699,6 +1773,8 @@ open class VmActivity : ComponentActivity() {
                             @Composable fun ExtraButtons() {
                                 if (extraKeyboard) ExtraNavButton(KeyboardIcon, stringResource(R.string.vi_open_keyboard), keyboardOpen, vmTheme, extraRotation) { keyboardOpen = !keyboardOpen }
                                 if (extraKeypad) ExtraNavButton(KeypadIcon, stringResource(R.string.vi_open_keypad), keypadOpen, vmTheme, extraRotation) { keypadOpen = !keypadOpen }
+                                if (extraSpen) ExtraNavButton(SPenIcon, stringResource(R.string.vi_spen_toggle), spenOn, vmTheme, extraRotation) { spenOn = !spenOn }
+                                if (extraSpen) ExtraNavButton(SPenButtonIcon, stringResource(R.string.vi_spen_button), false, vmTheme, extraRotation) { vm.input.penButtonClick() }
                             }
                             if (extrasFirst) ExtraButtons()
                             if (stockRecovery && (stripTurns == 1 || stripTurns == 2)) GoToRecoveryButton(sideways)
@@ -1732,8 +1808,34 @@ open class VmActivity : ComponentActivity() {
                 if (keypadOpen && extraKeypad) KeypadWindow({ code, down -> vm.input.key(code, down) }, vm.input.homeCode) { keypadOpen = false }
             }
 
-            // the way back from the folded tab bar (drawn last, so nothing covers it)
-            if (revealArrow) TabBarRevealArrow(onShow = { foldTabBar(false) }, modifier = Modifier.align(Alignment.TopEnd))
+            if (navCollapsed && (showStrip || vm.settings.trackball) && !showLog) Box(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(8.dp)
+                .onSizeChanged { navHandleArea = it }) {
+                LaunchedEffect(navHandleArea, navHandleSize) {
+                    if (!navHandlePlaced && navHandleArea.width > 0 && navHandleSize.width > 0) {
+                        navHandlePlaced = true
+                        navHandleOffset = clampNavHandle(Offset((navHandleArea.width - navHandleSize.width) / 2f,
+                            (navHandleArea.height - navHandleSize.height).toFloat()))
+                    }
+                }
+                Box(Modifier
+                    .offset { IntOffset(navHandleOffset.x.roundToInt(), navHandleOffset.y.roundToInt()) }
+                    .pointerInput(Unit) {
+                        detectDragGestures(onDrag = { ch, d ->
+                            ch.consume()
+                            navHandleOffset = clampNavHandle(clampNavHandle(navHandleOffset) + d)
+                        }, onDragEnd = { navHandleOffset = snapNavHandle(navHandleOffset) })
+                    }
+                    .onSizeChanged { navHandleSize = it }) {
+                    FilledTonalIconButton(onClick = { navCollapsed = false }, modifier = Modifier.size(40.dp)) {
+                        Icon(when (navHandleEdge) {
+                            1 -> Icons.Rounded.KeyboardArrowDown
+                            2 -> Icons.Rounded.KeyboardArrowRight
+                            3 -> Icons.Rounded.KeyboardArrowLeft
+                            else -> Icons.Rounded.KeyboardArrowUp
+                        }, contentDescription = stringResource(R.string.nav_show))
+                    }
+                }
+            }
         }
     }
 
@@ -1778,7 +1880,7 @@ open class VmActivity : ComponentActivity() {
      * a dot. Blinks with the guest's on/off times.
      */
     @Composable
-    private fun LedIndicator(l: app.aemu.core.Lights.Led, modifier: Modifier) {
+    private fun LedIndicator(l: app.aemu.core.Lights.Led, modifier: Modifier, spot: Pair<Int, Int>? = null) {
         var on by remember(l) { mutableStateOf(true) }
         LaunchedEffect(l) {
             if (l.onMs > 0 && l.offMs > 0) while (true) { on = true; delay(l.onMs.toLong()); on = false; delay(l.offMs.toLong()) }
@@ -1789,9 +1891,13 @@ open class VmActivity : ComponentActivity() {
         val sony = vm.img.skin.contains("Xperia", true) || vm.img.brand.contains("Sony", true)
         val density = androidx.compose.ui.platform.LocalDensity.current
         val y = with(density) { (guestTopPx.toDp() - 10.dp).coerceAtLeast(4.dp) }
+        // with a skin the LED is centred on its spot; without one it keeps its place above the guest screen
+        fun placed(w: androidx.compose.ui.unit.Dp, h: androidx.compose.ui.unit.Dp): Modifier =
+            if (spot == null) modifier.offset(y = y)
+            else modifier.offset { androidx.compose.ui.unit.IntOffset(spot.first - w.roundToPx() / 2, spot.second - h.roundToPx() / 2) }
         if (sony) {
             Box(
-                modifier.offset(y = y)
+                placed(160.dp, 6.dp)
                     .width(160.dp)
                     .height(6.dp)
                     .alpha(alpha)
@@ -1804,7 +1910,7 @@ open class VmActivity : ComponentActivity() {
             )
         } else {
             Box(
-                modifier.offset(y = y).size(14.dp)
+                placed(14.dp, 14.dp).size(14.dp)
                     .alpha(alpha)
                     .background(androidx.compose.ui.graphics.Brush.radialGradient(listOf(c, c.copy(alpha = 0.55f), Color.Transparent)), CircleShape)
             )

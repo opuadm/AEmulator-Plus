@@ -13,6 +13,7 @@ import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.PushbackInputStream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
@@ -30,6 +31,26 @@ public final class ArcStreams {
     public static InputStream lzma(InputStream in) throws IOException { return open(NativeArc.LZMA, in); }
     public static InputStream bzip2(InputStream in) throws IOException { return open(NativeArc.BZIP2, in); }
     public static InputStream lz4(InputStream in) throws IOException { return open(NativeArc.LZ4F, in); }
+    /** The LZ4 legacy format ({@code lz4 -l}, magic 02 21 4C 18): what Linux initramfs / old Android ramdisks use. */
+    public static InputStream lz4Legacy(InputStream in) throws IOException { return open(NativeArc.LZ4L, in); }
+
+    /**
+     * An {@code .lz4} file of either flavour: the frame format ({@code lz4}, magic 04 22 4D 18) or the legacy one
+     * ({@code lz4 -l}). Decided by the first four bytes; anything else is handed to the frame decoder, which reports it.
+     */
+    public static InputStream lz4Any(InputStream in) throws IOException {
+        PushbackInputStream p = new PushbackInputStream(in, 4);
+        byte[] m = new byte[4];
+        int n = 0;
+        while (n < 4) {
+            int r = p.read(m, n, 4 - n);
+            if (r < 0) break;
+            n += r;
+        }
+        if (n > 0) p.unread(m, 0, n);
+        boolean legacy = n == 4 && m[0] == 0x02 && m[1] == 0x21 && m[2] == 0x4c && m[3] == 0x18;
+        return legacy ? lz4Legacy(p) : lz4(p);
+    }
     public static InputStream zstd(InputStream in) throws IOException { return open(NativeArc.ZSTD, in); }
     public static InputStream brotli(InputStream in) throws IOException { return open(NativeArc.BROTLI, in); }
 
@@ -52,6 +73,7 @@ public final class ArcStreams {
             case NativeArc.LZMA: return new LZMAInputStream(i, -1); // -1: no memory limit (system images use big dictionaries)
             case NativeArc.BZIP2: return new BZip2CompressorInputStream(i, true);
             case NativeArc.LZ4F: return new FramedLZ4CompressorInputStream(i, true);
+            case NativeArc.LZ4L: return new Lz4LegacyInputStream(i);
             case NativeArc.ZSTD: return new ZstdInputStream(i);
             case NativeArc.BROTLI: return new BrotliInputStream(i);
             case NativeArc.COPY: return i;

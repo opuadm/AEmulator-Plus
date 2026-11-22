@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
 
@@ -155,7 +156,7 @@ final class LgKdz {
         return t;
     }
 
-    static List<Artifact> extractKdz(File f, File work, Consumer<String> log) throws IOException {
+    static List<Artifact> extractKdz(File f, File work, Predicate<String> want, Consumer<String> log) throws IOException {
         if (!work.exists() && !work.mkdirs()) throw new IOException("cannot create work directory");
         List<Artifact> out = new ArrayList<>();
         IOException firstError = null;
@@ -166,7 +167,7 @@ final class LgKdz {
                 long at = scanMagic(r, DZ_MAGIC_BYTES);
                 if (at < 0) throw new IOException("LG KDZ: unrecognized file table and no DZ payload found");
                 log.accept("LG KDZ: unknown table layout, DZ payload found at 0x" + Long.toHexString(at));
-                return extractDzRange(r, at, r.length() - at, work, log);
+                return extractDzRange(r, at, r.length() - at, work, want, log);
             }
             log.accept("LG KDZ: " + t.files.size() + " file(s) [" + t.layout + "]");
             int n = 0;
@@ -178,24 +179,24 @@ final class LgKdz {
                 byte[] mag = readAt(r, e.offset, (int) Math.min(e.size, 16));
                 try {
                     if (isDz(mag) || (lower.endsWith(".dz") && mag.length >= 4)) {
-                        out.addAll(extractDzRange(r, e.offset, e.size, new File(work, "dz" + (n++)), log));
+                        out.addAll(extractDzRange(r, e.offset, e.size, new File(work, "dz" + (n++)), want, log));
                     } else if (mag.length >= 4 && isLgBin(u32(mag, 0))) {
                         File dir = new File(work, "bin" + (n++)); dir.mkdirs();
                         File copy = new File(dir, safe(e.name));
                         copyRange(r, e.offset, e.size, copy);
-                        try { out.addAll(FirmwareToolset.extract(copy, new File(dir, "out"), log)); }
+                        try { out.addAll(FirmwareToolset.extract(copy, new File(dir, "out"), want, log)); }
                         catch (IOException | RuntimeException ex) { throw ex; }
                         catch (Exception ex) { throw new IOException(ex); }
                         finally { copy.delete(); }
                     } else if (lower.endsWith(".img") || lower.endsWith(".bin")) {
-                        Role role = FirmwareToolset.roleFor(e.name);
-                        String canon = role == Role.SYSTEM ? "system.img" : role == Role.BOOT ? "boot.img"
-                            : role == Role.RECOVERY ? "recovery.img" : role == Role.OEM ? "oem.img" : null;
-                        if (canon != null) {
+                        String base = partBase(e.name);
+                        if (want.test(base)) {
                             File dir = new File(work, "img" + (n++)); dir.mkdirs();
-                            File d = new File(dir, canon);
+                            File d = new File(dir, base + ".img");
                             copyRange(r, e.offset, e.size, d);
-                            out.add(new Artifact(d, role));
+                            out.add(new Artifact(d, FirmwareToolset.roleFor(base + ".img")));
+                        } else {
+                            log.accept("LG KDZ: skipping " + e.name);
                         }
                     } else {
                         log.accept("LG KDZ: skipping " + e.name);
@@ -206,7 +207,7 @@ final class LgKdz {
                 }
             }
         }
-        out = firstPerRole(out);
+        out = firstPerName(out);
         if (out.isEmpty()) {
             if (firstError != null) throw firstError;
             throw new IOException("LG KDZ: no system/boot/recovery image inside");
@@ -221,7 +222,7 @@ final class LgKdz {
      * firmware payloads and hands each to the DZ / LG BIN / raw image handling used for the newer KDZ files.
      * Also accepts the already decrypted cabinet.
      */
-    static List<Artifact> extractEncryptedKdz(File f, File work, Consumer<String> log) throws IOException {
+    static List<Artifact> extractEncryptedKdz(File f, File work, Predicate<String> want, Consumer<String> log) throws IOException {
         if (!work.exists() && !work.mkdirs()) throw new IOException("cannot create work directory");
         byte[] head = readHead(f, 12);
         boolean encrypted = isEncryptedKdz(head, f.length());
@@ -256,25 +257,23 @@ final class LgKdz {
                     File tot = new File(dir, m.getName().replaceFirst("(?i)\\.wdb$", "") + ".tot");
                     decryptWdb(m, dllSize, tot, log);
                     m.delete();                               // the encrypted copy is not needed any more
-                    try { out.addAll(FirmwareToolset.extract(tot, new File(dir, "out"), log)); }
+                    try { out.addAll(FirmwareToolset.extract(tot, new File(dir, "out"), want, log)); }
                     catch (IOException | RuntimeException ex) { throw ex; }
                     catch (Exception ex) { throw new IOException(ex); }
                     finally { tot.delete(); }
                 } else if (isDz(mag) || isLegacyDz(mag) || (lower.endsWith(".dz") && mag.length >= 4)) {
-                    out.addAll(extractDz(m, new File(work, "dz" + (n++)), log));
+                    out.addAll(extractDz(m, new File(work, "dz" + (n++)), want, log));
                 } else if (mag.length >= 4 && isLgBin(u32(mag, 0))) {
                     File dir = new File(work, "bin" + (n++)); dir.mkdirs();
-                    try { out.addAll(FirmwareToolset.extract(m, new File(dir, "out"), log)); }
+                    try { out.addAll(FirmwareToolset.extract(m, new File(dir, "out"), want, log)); }
                     catch (IOException | RuntimeException ex) { throw ex; }
                     catch (Exception ex) { throw new IOException(ex); }
                 } else if (lower.endsWith(".img") || lower.endsWith(".bin")) {
-                    Role role = FirmwareToolset.roleFor(m.getName());
-                    String canon = role == Role.SYSTEM ? "system.img" : role == Role.BOOT ? "boot.img"
-                        : role == Role.RECOVERY ? "recovery.img" : role == Role.OEM ? "oem.img" : null;
-                    if (canon != null) {
+                    String base = partBase(m.getName());
+                    if (want.test(base)) {
                         File dir = new File(work, "img" + (n++)); dir.mkdirs();
-                        File d = new File(dir, canon);
-                        if (m.renameTo(d)) out.add(new Artifact(d, role));
+                        File d = new File(dir, base + ".img");
+                        if (m.renameTo(d)) out.add(new Artifact(d, FirmwareToolset.roleFor(base + ".img")));
                     } else {
                         log.accept("LG KDZ: skipping " + m.getName());
                     }
@@ -289,7 +288,7 @@ final class LgKdz {
             }
         }
         deleteTree(cabDir);
-        out = firstPerRole(out);
+        out = firstPerName(out);
         if (out.isEmpty()) {
             if (firstError != null) throw firstError;
             throw new IOException("LG KDZ: no system/boot/recovery image inside");
@@ -391,13 +390,13 @@ final class LgKdz {
         String slice, name; long targetSize, dataSize, addr; byte[] md5; long pos, dataPos;
     }
 
-    static List<Artifact> extractDz(File f, File work, Consumer<String> log) throws IOException {
+    static List<Artifact> extractDz(File f, File work, Predicate<String> want, Consumer<String> log) throws IOException {
         try (RandomAccessFile r = new RandomAccessFile(f, "r")) {
-            return extractDzRange(r, 0, r.length(), work, log);
+            return extractDzRange(r, 0, r.length(), work, want, log);
         }
     }
 
-    static List<Artifact> extractDzRange(RandomAccessFile r, long base, long len, File work, Consumer<String> log) throws IOException {
+    static List<Artifact> extractDzRange(RandomAccessFile r, long base, long len, File work, Predicate<String> want, Consumer<String> log) throws IOException {
         if (!work.exists() && !work.mkdirs()) throw new IOException("cannot create work directory");
         byte[] hd = readAt(r, base, (int) Math.min(len, 0xC0));
         if (isLegacyDz(hd)) return LgLegacyDz.extract(r, base, len, work, log);
@@ -415,23 +414,23 @@ final class LgKdz {
 
         List<Artifact> out = new ArrayList<>();
         IOException firstError = null;
-        String[][] wanted = {
-            {"system", "system_a", "systema", "system.img"},
-            {"boot", "boot_a", "boota", "kernel"},
-            {"recovery", "recovery_a", "recoverya", "recoveryb", "recovery_b"},
-            {"oem", "oem_a", "oema", "oem_b", "oemb"},
-        };
-        Role[] roles = {Role.SYSTEM, Role.BOOT, Role.RECOVERY, Role.OEM};
-        String[] files = {"system.img", "boot.img", "recovery.img", "oem.img"};
-        for (int i = 0; i < wanted.length; i++) {
-            List<Chunk> cl = null; String used = null;
-            for (String n : wanted[i]) { cl = slices.get(n); if (cl != null) { used = n; break; } }
-            if (cl == null) continue;
-            File dst = new File(work, files[i]);
+        // every slice the guest can use, not just system / boot / recovery / oem: a DZ of an Android 10+ phone keeps system_ext, vendor,
+        // product and odm inside "super" (or as slices of their own). What is wanted is decided by [want] (the importer's own rules);
+        // of an A/B pair the "_a" slice (or the unsuffixed one) is taken.
+        Map<String, String> best = new LinkedHashMap<>();
+        for (String key : slices.keySet()) {
+            String pb = partBase(key);
+            if (!want.test(pb)) { log.accept("LG DZ: skipping slice " + key); continue; }
+            String cur = best.get(pb);
+            if (cur == null || slotRank(key) < slotRank(cur)) best.put(pb, key);
+        }
+        for (Map.Entry<String, String> be : best.entrySet()) {
+            String pb = be.getKey(), used = be.getValue();
+            File dst = new File(work, pb + ".img");
             try {
-                assemble(r, cl, dst, log);
-                out.add(new Artifact(dst, roles[i]));
-                log.accept("LG DZ: " + used + " -> " + files[i] + " (" + (dst.length() >> 20) + " MB)");
+                assemble(r, slices.get(used), dst, log);
+                out.add(new Artifact(dst, FirmwareToolset.roleFor(pb + ".img")));
+                log.accept("LG DZ: " + used + " -> " + pb + ".img (" + (dst.length() >> 20) + " MB)");
             } catch (IOException | RuntimeException ex) {
                 dst.delete();
                 log.accept("LG DZ: " + used + " failed: " + ex.getMessage());
@@ -604,17 +603,39 @@ final class LgKdz {
         }
     }
 
-    private static List<Artifact> firstPerRole(List<Artifact> in) {
+    /** One artifact per partition file name: the same partition found twice (two DZ files, a KDZ table entry and a slice) is kept once. */
+    private static List<Artifact> firstPerName(List<Artifact> in) {
         List<Artifact> out = new ArrayList<>();
-        boolean sys = false, boot = false, rec = false, oem = false;
+        java.util.Set<String> seen = new java.util.HashSet<>();
         for (Artifact a : in) {
-            if (a.role == Role.SYSTEM) { if (sys) continue; sys = true; }
-            else if (a.role == Role.BOOT) { if (boot) continue; boot = true; }
-            else if (a.role == Role.RECOVERY) { if (rec) continue; rec = true; }
-            else if (a.role == Role.OEM) { if (oem) continue; oem = true; }
+            if (!seen.add(a.file.getName().toLowerCase(Locale.US))) continue;
             out.add(a);
         }
         return out;
+    }
+
+    /** "system_a" / "systema" / "system.img" -> "system", "kernel" -> "boot": the partition a slice or table entry is, whatever it is called. */
+    static String partBase(String n) {
+        String x = n.toLowerCase(Locale.US);
+        int slash = Math.max(x.lastIndexOf('/'), x.lastIndexOf('\\'));
+        if (slash >= 0) x = x.substring(slash + 1);
+        if (x.endsWith(".img") || x.endsWith(".bin")) x = x.substring(0, x.length() - 4);
+        switch (x) {
+            case "kernel": case "boota": case "bootb": return "boot";
+            case "systema": case "systemb": return "system";
+            case "recoverya": case "recoveryb": return "recovery";
+            case "oema": case "oemb": return "oem";
+            default: break;
+        }
+        if (x.endsWith("_a") || x.endsWith("_b")) x = x.substring(0, x.length() - 2);
+        return x;
+    }
+
+    /** 1 for the inactive slot ("_b"), 0 otherwise. */
+    static int slotRank(String n) {
+        String x = n.toLowerCase(Locale.US);
+        if (x.endsWith(".img") || x.endsWith(".bin")) x = x.substring(0, x.length() - 4);
+        return x.endsWith("_b") || x.equals("systemb") || x.equals("bootb") || x.equals("recoveryb") || x.equals("oemb") ? 1 : 0;
     }
 
     private static boolean isLgBin(long m) { return m == 0xAA55EC44L || m == 0xAA55A5A5L || m == 0xAA55DD44L; }

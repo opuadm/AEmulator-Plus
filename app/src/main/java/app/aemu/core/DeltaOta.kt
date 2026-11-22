@@ -25,7 +25,7 @@ import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 /** A reason the OTA cannot be applied; the message is meant for the person using the app. */
-class OtaException(message: String, @androidx.annotation.StringRes override val resId: Int = 0, vararg args: Any?) :
+class OtaException(message: String, @param:androidx.annotation.StringRes override val resId: Int = 0, vararg args: Any?) :
     Exception(message), LocalizedError {
     override val resArgs: Array<out Any?> = args
 }
@@ -421,6 +421,11 @@ object DeltaOta {
     // raw writes of radio / modem / bootloader partitions (the Droid's "mbm", the CDMA baseband); the boot partition is not among them
     private val RAW_OTHER = Regex("""\bwrite_raw_image\s*\(\s*$Q\s*,\s*"(?!boot")[^"]*"\s*\)""")
     private val BASEBAND = Regex("""\b[A-Za-z0-9_]+\.update_cdma_bp\s*\(\s*$Q\s*,\s*$Q\s*\)""")
+    // HTC (Nexus One / Desire, Android 2.x): assert(htc.install_radio(package_extract_file("radio.img"), 480, 800, 16,
+    // package_extract_file("install.565"), package_extract_file("error.565"))); flashes the baseband and shows its progress
+    // pictures on the phone's screen; a VM has neither, so the call is cut out like the other baseband writes
+    private const val RADIO_ARG = "(?:package_extract_file\\s*\\(\\s*$Q\\s*\\)|\\d+|$Q)"
+    private val INSTALL_RADIO = Regex("\\b[A-Za-z0-9_]+\\.install_radio\\s*\\(\\s*$RADIO_ARG(?:\\s*,\\s*$RADIO_ARG)*\\s*\\)")
     private val VERIFY = Regex("""\bassert\s*\(\s*sha1_check\s*\(\s*read_file\s*\(\s*"([^"]+)"\s*\)\s*((?:,\s*"[0-9a-fA-F]{40}"\s*)+)\)\s*\)\s*;""")
     private val SHA1_ANY = Regex("""\bsha1_check\s*\(""")
     private val READ_ANY = Regex("""\bread_file\s*\(""")
@@ -527,10 +532,11 @@ object DeltaOta {
         // (sbl1, tz, rpm, aboot...) that a VM does not have; the whole section is cut out like the other partitions
         val bootloaders = BOOTLOADER.findAll(afterGate).count()
         val stagedBootloaders = BOOTLOADER_IF.findAll(afterGate).count()
-        val rawImages = RAW_OTHER.findAll(afterGate).count() + BASEBAND.findAll(afterGate).count() + EdifyCompat.skippedFirmware(afterGate)
+        val rawImages = RAW_OTHER.findAll(afterGate).count() + BASEBAND.findAll(afterGate).count() +
+            INSTALL_RADIO.findAll(afterGate).count() + EdifyCompat.skippedFirmware(afterGate)
         val formatsMetadata = METADATA_FORMAT.containsMatchIn(afterGate)
         val text = afterGate.replace(BOOTLOADER, "").replace(BOOTLOADER_END, "").replace(BOOTLOADER_IF, "")
-            .replace(RAW_OTHER, "").replace(BASEBAND, "").replace(BOOTLOADER_ENV, "").replace(METADATA_FORMAT, "")
+            .replace(RAW_OTHER, "").replace(BASEBAND, "").replace(INSTALL_RADIO, "").replace(BOOTLOADER_ENV, "").replace(METADATA_FORMAT, "")
         val devImages = RAW_DEV_EXTRACT.findAll(text).count()
         val bare = text.replace(Regex(Q), "\"\"")
 

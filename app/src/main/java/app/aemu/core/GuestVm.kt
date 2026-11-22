@@ -81,7 +81,9 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // except an x86-64 one: since 2026-11-14 the bridge has an x86-64 build (native/glbridge/build64-x86_64.sh, EngineAssets.X86_64_GPU_BRIDGE))
         if (img.arch != GuestArch.ARM && s.gpu &&
             !(if (img.engine == Engine.N64) img.arch == GuestArch.X86_64 && EngineAssets.exists(ctx, EngineAssets.X86_64_GPU_BRIDGE)
-              else EngineAssets.exists(ctx, "engines/${Engine.KK.id}${img.arch.assetSuffix}/libGLES.so"))) s.copy(gpu = false, hwui = false) else s
+              // Modified for AEmulator Plus (2026-11-20): x86-32 on the KK engine uses the open i386 bridge (see EngineAssets.X86_I386_GPU_BRIDGE)
+              else EngineAssets.kkX86OpenBridge(ctx, img.engine, img.arch) ||
+                  EngineAssets.exists(ctx, "engines/${Engine.KK.id}${img.arch.assetSuffix}/libGLES.so"))) s.copy(gpu = false, hwui = false) else s
     }.let { s ->
         // Broadcom V3D firmware: SurfaceFlinger composes into fb0 through the emulated /dev/v3d, never through EGL, so the in-app GPU
         // bridge would show a blank surface. Software path (fb0 view) only.
@@ -140,7 +142,12 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
     @Volatile var failure: Msg? = null
         private set
     @Volatile var surface: Surface? = null
-        set(v) { field = v; if (engine == Engine.KK) GlBridge.surface(v) else if (engine == Engine.N64 && kernel.gpuBridge64) GlHost.surface(v) }
+        set(v) {
+            field = v
+            // (x86-32 on the KK engine: the open bridge's host renderer, GlHost, shows the frames, as on the native engine)
+            if (EngineAssets.kkX86OpenBridge(ctx, engine, img.arch)) GlHost.surface(v)
+            else if (engine == Engine.KK) GlBridge.surface(v) else if (engine == Engine.N64 && kernel.gpuBridge64) GlHost.surface(v)
+        }
 
     private val lines = CopyOnWriteArrayList<String>()
     private val listeners = CopyOnWriteArrayList<(String) -> Unit>()
@@ -199,6 +206,9 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
     /** Mouse and keyboard: evdev nodes from libaemushim (ARM and x86-32 on the qemu engines) or from the native runner; not in recovery or framework-less boots. */
     val mouseKeyboardSupported get() = VirtualInputPolicy.mouseKeyboardSupported(engine, img.arch, recoveryMode, nativeUi, LegacyFirmware.isPreRelease(img.release))
     val mouseKeyboardActive get() = settings.mouseKeyboard && mouseKeyboardSupported
+    /** S-Pen: the sec_e-pen digitizer comes from libaemushim (qemu engines) or the native runner; not in recovery, framework-less boots or pre-1.0 builds, and only where the guest knows stylus tools (4.0+). */
+    val spenSupported get() = VirtualInputPolicy.spenSupported(recoveryMode, nativeUi, LegacyFirmware.isPreRelease(img.release), img.api)
+    val spenActive get() = settings.spen && spenSupported
     val cameraSupported get() = engine == Engine.KK && img.api in 14..25 && !recoveryMode && !nativeUi
     private val camera = HostCameraBridge(ctx, paths, { settings.camera && cameraSupported }, ::log)
     fun cameraVisible(visible: Boolean) { camera.visible(visible) }
@@ -773,6 +783,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // 1. дерево
         val fixer = TreeFixer(ctx, paths, img, ::log)
         fixer.fixup()
+        // Added for AEmulator Plus (2026-11-19): the GPU names of the chip this boot reports, for the qemu engines' GL servers (glUp)
+        gpuVendor = fixer.soc.gpuVendor; gpuRenderer = fixer.soc.gpuRenderer; gpuLogged = false
         battery.start()
         // политика звука уже подменялась раньше — обновить её файлы (обёртка/AOSP) до текущей версии
         if (File(paths.root, "system/.aemu-parked/system#lib#hw#audio_policy.default.so").isFile) swapAudioPolicy()
@@ -803,9 +815,18 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         var glInfo = ""
         // Added for AEmulator Plus (2026-11-02): a 32-bit-only firmware has no lib64; its bridge is the armv7 build that
         // TreeFixer.installPure32GpuBridge put next to the 32-bit SwiftShader
+        // (VM settings > Record GL calls: the host renderer keeps its recent calls for the log export; set before any start below)
+        if (!GlHost.trace(s.gpu && s.glTrace) && s.gpu && s.glTrace) log("GL call recording: not applied, libaemugl.so predates it (rebuild it: sh native/glbridge/build.sh)")
         val pure32Gpu = engine == Engine.N64 && isPure32Tree(paths.root) && File(paths.root, "${kernel.eglDir32}/libGLES_aemu.so").isFile
         if (engine == Engine.N64 && kernel.gpuBridge64 && s.gpu &&
             (pure32Gpu || File(paths.root, "${kernel.eglDir}/libGLES_aemu.so").isFile)) {
+            // Added for AEmulator Plus (2026-11-19): the chip the VM reports also names its GPU (blank = the phone's real GPU strings)
+            val gpuSpoof = GlHost.identity(fixer.soc.gpuVendor, fixer.soc.gpuRenderer)
+            if (fixer.soc.gpuRenderer.isNotBlank()) log("GPU bridge: guest sees ${fixer.soc.gpuVendor} / ${fixer.soc.gpuRenderer}" + when {
+                gpuSpoof -> ""
+                !GlHost.loaded -> " (not applied: libaemugl.so did not load: ${GlHost.loadError.ifBlank { "unknown error" }})"
+                else -> " (not applied: libaemugl.so predates it, rebuild it: sh native/glbridge/build.sh)"
+            })
             val r = GlHost.start(paths.socket("aemu_gl").absolutePath)
             log("GPU bridge: $r")
             glBridge = r.startsWith("ok"); glInfo = r
@@ -816,9 +837,20 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // threads share their tiles through those - in mode 1 they stay on it and a page draws only its background)
         if (engine == Engine.KK && s.gpu && File(paths.dir, "glopen").isFile && File(paths.root, "system/lib/egl/libGLES_split.so").isFile) {
             paths.socket("aemu_gl").parentFile?.mkdirs()
+            GlHost.identity(fixer.soc.gpuVendor, fixer.soc.gpuRenderer)
             val r = GlHost.start(paths.socket("aemu_gl").absolutePath)
             log("open GPU bridge (32-bit): $r")
             if (r.startsWith("ok")) overrides["debug.aemu.gl"] = File(paths.dir, "glopen").readText().trim().takeIf { it.isNotEmpty() } ?: "2"
+        }
+        // Added for AEmulator Plus (2026-11-20): x86-32 firmware on the KK engine. The i386 bridge (TreeFixer.eglConfig put it under every
+        // name libEGL looks for) is the whole EGL of the guest ("solo" mode): every context, SurfaceFlinger's too, goes to the host renderer.
+        if (s.gpu && EngineAssets.kkX86OpenBridge(ctx, engine, img.arch) && File(paths.root, "system/lib/egl/libGLES_aemu.so").isFile) {
+            paths.socket("aemu_gl").parentFile?.mkdirs()
+            GlHost.identity(fixer.soc.gpuVendor, fixer.soc.gpuRenderer)
+            val r = GlHost.start(paths.socket("aemu_gl").absolutePath)
+            log("GPU bridge (x86-32, open i386 bridge): $r")
+            glBridge = r.startsWith("ok"); glInfo = r
+            if (!glBridge) log("GPU bridge: the host renderer did not start; the guest will find no GL")
         }
         // 7.0+ libEGL ignores egl.cfg and takes the first libGLES_*.so it finds; without the bridge: the software one
         if (img.api >= 24 && !s.gpu) {
@@ -835,6 +867,24 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         overrides["qemu.sf.lcd_density"] = s.density.toString()
         // MIUI 10 forces the density of the phone's own panel from this one (440 on a 540-pixel screen)
         if (listOf("system/build.prop", "vendor/build.prop").any { runCatching { File(paths.root, it).readText() }.getOrDefault("").contains("persist.miui.density_v2") }) overrides["persist.miui.density_v2"] = s.density.toString()
+        // Added for AEmulator Plus (2026-11-19): FunTouch 9's prop files turn ro.build.eyecare.support on, and the
+        // battery service's first backlight callback then initialises the eye-comfort adapter, whose HIDL lookup
+        // (vendor.display.color@1.0 IDisplayColor.getService) throws on a GSI without that vendor HAL - an uncaught
+        // exception on a binder callback thread that ended the first system_server about 40 s into FunTouch 9.2's
+        // boot ("android_os_HwBinder: Uncaught exception!", services dying in waves). A phone without eye care
+        // ships the flag unset and the lights service keeps its plain path, so a vivo tree that carries no
+        // display.color HAL gets the flag turned off the same way.
+        runCatching {
+            val vivoTree = File(paths.root, "system/bin/vivo_daemon").isFile || File(paths.root, "system/framework/WfdCommon.jar").isFile ||
+                File(paths.root, "system_ext/priv-app/WfdService").isDirectory || File(paths.root, "system/priv-app/WfdService").isDirectory
+            val eyeHal = listOf("vendor/bin/hw", "system/vendor/bin/hw", "vendor/lib64/hw", "system/vendor/lib64/hw").any { d ->
+                File(paths.root, d).listFiles().orEmpty().any { it.name.contains("display.color", true) }
+            }
+            if (vivoTree && img.api < 30 && !eyeHal) {
+                overrides["ro.build.eyecare.support"] = "0"
+                log("props: ro.build.eyecare.support turned off (vivo tree without a display.color HAL; the eye-comfort init would end system_server)")
+            }
+        }
         // Panels mounted sideways (Galaxy Tab 10.1 GT-P7300: "ro.sf.hwrotation=90", fb 800x1280 on a landscape UI) make
         // SurfaceFlinger turn the whole UI inside the framebuffer. Here the framebuffer IS the screen the user sees at
         // the resolution they picked, so the rotation only shows up as a UI lying on its side: 1280x720 came up as a
@@ -878,6 +928,13 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             overrides["ro.hardware"] = it
             log("props: ro.hardware=$it (from settings)")
         }
+        // Added for AEmulator Plus (2026-11-19): the chip the VM reports (VM settings > SoC). ro.board.platform on every release,
+        // ro.soc.model / ro.soc.manufacturer from Android 12; the same record gives /proc/cpuinfo and /sys/devices/soc0 (TreeFixer).
+        // Before run/props.extra below, so a debug line there still wins.
+        fixer.soc.props.forEach { (k, v) -> overrides[k] = v }
+        StorageSpoof.props(StorageType.parse(s.storageType)).forEach { (k, v) -> overrides[k] = v }
+        RamSpoof.props(RamType.parse(s.ramType)).forEach { (k, v) -> overrides[k] = v }
+        log("props: SoC ${fixer.soc.label}" + fixer.soc.props.entries.joinToString("") { ", ${it.key}=${it.value}" })
         if (s.camera && cameraSupported) overrides["ro.hardware.camera"] = "aemu_host"
         if (img.api in 9..25 && engine != Engine.N64) overrides["ro.hardware.sensors"] = "aemu_host"
         if (engine == Engine.N64) {
@@ -966,7 +1023,27 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // зигота 4.4+ заранее открывает EGL; дети после fork наследуют соединение моста, и гостевая
         // библиотека моста уходит в бесконечную рекурсию (падение по стеку в каждом приложении)
         if (img.api >= 19) overrides["ro.zygote.disable_gl_preload"] = "1"
+        // Added for AEmulator Plus (2026-11-21): Samsung 6.0 firmware (S6 / Note 5) leaves config.disable_renderscript=1 in the
+        // property area. android.renderscript.RenderScript then never initialises (sInitialized=false) and every
+        // RenderScript.create() logs "called when disabled; someone is likely to crash" and returns null; the apps
+        // dereference it at once (wallpaper picker BitmapRegionTileSource.blur, Camera ImageUtils.blur after the first photo,
+        // Music AndroidBlurGenerator in PlayerService.onCreate). The vendor RS drivers are parked (libRS computes on the CPU, see
+        // TreeFixer), so RenderScript works here; keep it on, and pinned because the firmware's init sets it back.
+        if (img.api >= 21) {
+            overrides["config.disable_renderscript"] = "0"
+            props.pinned = props.pinned + "config.disable_renderscript"
+        }
         if (engine == Engine.N64) overrides.putAll(kernel.props)
+        // Added for AEmulator Plus (2026-11-20): the guest's screen refresh rate. The engine's composers (native/hwchal, native/hwcomposer)
+        // report ro.aemu.refresh_hz as the display mode's vsync period and tick their vsync at ro.aemu.refresh_tick_hz: the chosen rate,
+        // or the phone's maximum when the chosen one is above it. Only with the GPU bridge: SwiftShader cannot draw frames that fast.
+        run {
+            val rr = RefreshRate.resolve(s.fbHz, RefreshRate.hostHz(ctx), glBridge)
+            overrides["ro.aemu.refresh_hz"] = rr.reported.toString()
+            overrides["ro.aemu.refresh_tick_hz"] = rr.tick.toString()
+            if (rr.reported != RefreshRate.DEFAULT_HZ || rr.tick != RefreshRate.DEFAULT_HZ)
+                log("display: reports ${rr.reported} Hz, vsync ticks at ${rr.tick} Hz" + if (rr.capped) " (the phone's display tops out there)" else "")
+        }
         if (glBridge) {
             overrides["ro.hardware.egl"] = "aemu"
             if (kernel.bridgeAsEmulation) {
@@ -1245,6 +1322,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             fixer.restoreSonySetupFlow()
         fixer.noScreenSleep()
         if (s.skipSetupWizard) fixer.provisionBeforeBoot()
+        InitPlan.forgetLazyAidl()
+        ctlPlan = null
         props.onSet = { k, v -> onProp(k, v) }
         props.onCtl = { start, svc -> onCtl(start, svc) }
 
@@ -1257,6 +1336,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         input.detectHome(paths.root)
         input.trackballEnabled = settings.trackball
         input.mouseKeyboardEnabled = mouseKeyboardActive
+        input.spenEnabled = spenActive
         input.api = img.api
         // 64-bit firmware on the native engine reads 24-byte events; a 32-bit-only one (qemu-arm) reads 16-byte ones
         input.wide = InputService.wideFor(engine, isPure32Tree(paths.root))
@@ -1270,6 +1350,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         if (s.radio) {
             if (cdmaPlan.cdma) log("radio: CDMA emulation on (" + (if (cdmaPlan.lteOnCdma) "firmware is LTE on CDMA" else "CDMA-only phone") + ")")
             else if (cdmaPlan.firmwareLteOnCdma) log("radio: firmware declares LTE on CDMA, CDMA emulation is off in settings: telephony.lteOnCdmaDevice cleared, GSM phone")
+            if (img.api >= 26) TreeFixer(ctx, paths, img, ::log).writeRadioHalConfig { ril.halConfig(it) }
             ril.serve()
         } else log("radio: emulation disabled in settings")
         vold.serve()
@@ -1314,6 +1395,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             val f = File(paths.root, "dev/.aemu-ram")
             if (kernel.ramBudget) f.writeText((GuestRunner.guestRamMb(img.api, s.ramMb) * 1024L).toString()) else f.delete()
         }
+        // the disk size the guest reports (the free space is the phone's own, see StorageSpoof)
+        if (engine == Engine.N64) StorageSpoof.writeNode(paths.root, s.storageGb)
         lmk = GuestLmk(paths.root, s.lowRam, ::log, RamChoice.resolve(s.ramMb), MemoryMode.parse(s.memoryMode)).also { it.start() }
         val netCfg = startNetDebug(s) ?: if (s.netProxy) net.start() else GuestRunner.NetConfig()
         runner.sdcardHost = sd
@@ -1365,7 +1448,12 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         }
 
         r.derivedExports = emptyMap()
-        if (engine == Engine.N64 && File(paths.root, "apex/com.android.sdkext/bin/derive_classpath").isFile) runCatching {
+        // Modified for AEmulator Plus (2026-11-19): derive_classpath aborts on anything below Android 12 ("Check failed:
+        // android::modules::sdklevel::IsAtLeastS() derive_classpath must only be run on Android 12 or above", exit 134): a
+        // firmware of 11 (API 30) whose sdkext module was updated carries the tool but its own init.environ.rc has the class paths
+        if (engine == Engine.N64 && img.api < 31 && File(paths.root, "apex/com.android.sdkext/bin/derive_classpath").isFile)
+            log("derive_classpath: skipped (api ${img.api}, the firmware's own class paths from init.environ.rc are used)")
+        if (engine == Engine.N64 && img.api >= 31 && File(paths.root, "apex/com.android.sdkext/bin/derive_classpath").isFile) runCatching {
             val out = File(paths.root, "data/system/environ/classpath")
             out.parentFile?.mkdirs(); out.delete()
             // Modified for AEmulator Plus (2026-10-31): this tree is Android 15 (sdk 35) built from the branch that became
@@ -1451,6 +1539,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             setAdbd(true)
             log("★ adbd initialized ${(System.currentTimeMillis() - bootAt) / 1000} s after start: adb shell is available before the system finishes booting")
         }
+        // Magisk (VmSettings.magisk): init's post-fs-data stage, run by the host before the first service starts
+        if (!stopping) magiskPostFsData()
         for (svc in plan) {
             if (stopping) return
             if (svc.onDemand) { props.put("init.svc.${svc.name}", "stopped"); continue }
@@ -1586,6 +1676,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         if (!glDone) glUp()
         startTouchWizBootMedia() // no-op if already started above (e.g. a plan without surfaceflinger)
         log("system started: ${alive().joinToString()}")
+        magiskService()
         watchLegacyBoot()
         if (SetupWizardOption.runHelper(settings.skipSetupWizard,
                 File(paths.root, "data/system/aemu-setup-skip.properties").isFile)) {
@@ -1827,6 +1918,10 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         }
     }
 
+    /** Added for AEmulator Plus (2026-11-19): GL_VENDOR / GL_RENDERER the chip of this boot gives the guest (blank = the phone's own), see [GlIdentity] */
+    private var gpuVendor = ""
+    private var gpuRenderer = ""
+
     private fun glUp() {
         if (!settings.gpu) { log("GPU bridge off, software rendering"); return }
         val (w, h) = if (engine == Engine.GB) 480 to 800 else settings.width to settings.height
@@ -1843,12 +1938,21 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
                 }
             }
             Engine.GB -> {
+                // (Modified for AEmulator Plus, 2026-11-19: the slot's environment carries the GPU names of the chip, see glServerEnv)
                 Slot.start(ctx, VmSlots.glSlotClass(slot),
                     listOf("glserverd", "-s", paths.glSock.absolutePath, "-fb", paths.fb.absolutePath, "-w", "$w", "-h", "$h"),
-                    emptyMap(), paths.log("glserverd"))
+                    gpuEnv(emptyMap()), paths.log("glserverd"))
                 waitFor("GL bridge socket", 10_000) { paths.glSock.exists() }
             }
             Engine.KK -> {
+                if (EngineAssets.kkX86OpenBridge(ctx, engine, img.arch)) {
+                    // the host renderer (GlHost) was started in settings preparation; it needs the screen surface before the first frame
+                    // (no wait for the screen surface: the setter above hands it to GlHost whenever it arrives, and a boot that held
+                    // SurfaceFlinger back for 10 s waiting for it timed out)
+                    log("GPU bridge: x86-32, served by the host renderer (no glserverd)")
+                    surface?.let { GlHost.surface(it) }
+                    return
+                }
                 if (surface == null) waitFor("screen surface", 10_000) { surface != null }
                 val sf = surface
                 HostNative.relaxFdsanSafe()
@@ -1860,13 +1964,17 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
                 // (only the ES1 wallpaper shows). The standalone *_mali server keeps ES2 contexts out of that group, so Mali uses it
                 // for old images too.
                 val mali = HostInfo.gpu().contains("mali")
-                if (img.api < 21 && !mali && sf != null && GlBridge.start(sf, paths.glSock.absolutePath, paths.log("glbridge").absolutePath, w, h, false)) {
+                // Added for AEmulator Plus (2026-11-19): the in-app bridge lives in the app's own process, where the GPU names cannot be
+                // put in front of the driver's (no preload), so a VM that reports a GPU uses the standalone server, which can.
+                val spoofGpu = GlIdentity.active(gpuVendor, gpuRenderer) && paths.nativeBin(GlIdentity.LIB).isFile
+                if (img.api < 21 && !mali && !spoofGpu && sf != null && GlBridge.start(sf, paths.glSock.absolutePath, paths.log("glbridge").absolutePath, w, h, false)) {
                     log("★ GPU bridge running in-app: frames render straight to the surface")
                     waitFor("GL bridge socket", 5_000) { paths.glSock.exists() }
                     return
                 }
                 log(when {
                     img.api >= 21 -> "GPU bridge: standalone glserverd"
+                    spoofGpu -> "GPU bridge: standalone glserverd (the VM reports a GPU: the in-app bridge cannot rename it)"
                     mali -> "GPU bridge: standalone glserverd (Mali: the in-app bridge hands ES2 apps an ES 1.1 context)"
                     else -> "in-app GPU bridge failed, falling back to standalone glserverd"
                 })
@@ -1882,8 +1990,25 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
      *  client sockets in large chunks instead (7.1 GLES 2/3 scenes were bound by those reads) */
     private fun glServerEnv(): Map<String, String> {
         val buf = paths.nativeBin("libglbuf.so")
-        return if (buf.isFile) mapOf("LD_PRELOAD" to buf.absolutePath) else emptyMap()
+        return gpuEnv(if (buf.isFile) mapOf("LD_PRELOAD" to buf.absolutePath) else emptyMap())
     }
+
+    /**
+     * Added for AEmulator Plus (2026-11-19): [base] plus the preload that gives the guest the GPU names of the chip this VM
+     * reports (native/glid, see [GlIdentity]); [base] itself when the chip names no GPU or the library is not in this build.
+     * Logged once per start, so run/aemu.log shows whether the guest is told the VM's GPU or the phone's.
+     */
+    private fun gpuEnv(base: Map<String, String>): Map<String, String> {
+        if (!GlIdentity.active(gpuVendor, gpuRenderer)) return base
+        val env = GlIdentity.env(gpuVendor, gpuRenderer, paths.nativeBin(GlIdentity.LIB), base)
+        if (!gpuLogged) {
+            gpuLogged = true
+            log(if (GlIdentity.applied(env)) "GPU bridge: guest sees $gpuVendor / $gpuRenderer"
+                else "GPU bridge: the VM reports $gpuVendor / $gpuRenderer but ${GlIdentity.LIB} is not in this build: the guest sees the phone's GPU")
+        }
+        return env
+    }
+    private var gpuLogged = false
 
     /** guest files this kernel ships (asset names) */
     /**
@@ -2546,6 +2671,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         everBooted = true
         log("★ $why in ${(bootDoneAt - bootAt) / 1000} s (UI not verified)")
         setState(State.RUNNING)
+        Thread { magiskBootComplete() }.start()
         Thread { afterBoot() }.start()
     }
 
@@ -2743,6 +2869,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         log("apex stand-in: ${seen.size} modules")
     }.onFailure { log("apex stand-in: ${it.message}") }
 
+    @Volatile private var ctlPlan: List<GuestService>? = null
+
     private fun onCtl(start: Boolean, svc: String) {
         if (svc.startsWith("aidl/")) {
             // a lazy AIDL service (artd of 14+, a skin's daemon): started when servicemanager is asked for it, and
@@ -2760,7 +2888,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             Thread { runCatching { startService(def) } }.start()
             return
         }
-        val plan = servicePlan().filter { it.name !in InitPlan.NEVER_START }.ifEmpty { InitPlan.fallback(img, paths.root) }
+        // (the plan is worked out once per boot: it parses every .rc of the tree, and ctl.* comes by the dozen)
+        val plan = ctlPlan ?: servicePlan().filter { it.name !in InitPlan.NEVER_START }.ifEmpty { InitPlan.fallback(img, paths.root) }.also { ctlPlan = it }
         if (svc == "bootanim" || svc == "bootanimation" || svc == "samsungani") {
             if (!start) {
                 // 4.x sets service.bootanim.exit first and the animation quits on its own, closing its audio.
@@ -2916,6 +3045,18 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             val out = guestShell("settings put secure screensaver_enabled 0; settings put secure sleep_timeout 0; svc power stayon true", 60_000)
             log("tv: screensaver_enabled 0, sleep_timeout 0, svc power stayon true" + if (out.isNotBlank()) " (${out.trim().take(200)})" else "")
         }.onFailure { log("tv: could not switch the idle timers off: ${it.message}") }
+        // Added for AEmulator Plus (2026-11-21): Android 10+ caps the render rate of a screen at 60 Hz unless the user turned on a
+        // higher refresh setting (DisplayModeDirector: the default vote is render [0, 60]). SurfaceFlinger then picks the best whole
+        // divisor of the vsync under that cap: on a 144 Hz display that is 144 / 3 = 48 Hz (a log of an Android 17 image said
+        // "renderRate=48.00 Hz" with the mode at 144 Hz). A minimum refresh rate setting above the cap outranks the default vote and
+        // lifts it, so the guest is told its own composer's vsync rate as the minimum and peak. Only when the composer ticks above 60.
+        if (img.api >= 29) runCatching {
+            val tick = guestShell("getprop ro.aemu.refresh_tick_hz", 30_000).trim().toIntOrNull() ?: 0
+            if (tick > RefreshRate.DEFAULT_HZ) {
+                val out = guestShell("settings put system min_refresh_rate $tick.0; settings put system peak_refresh_rate $tick.0", 60_000)
+                log("display: min and peak refresh rate set to $tick Hz so the guest renders above 60 Hz" + if (out.isNotBlank()) " (${out.trim().take(200)})" else "")
+            }
+        }.onFailure { log("display: could not set the guest refresh rate: ${it.message}") }
         if (engine == Engine.N64 && kernel.webViewSingleProcess)
             runCatching { guestShell("cmd webviewupdate disable-multiprocess", 30_000) }
         TreeFixer(ctx, paths, img, ::log).noScreenSleep()
@@ -3417,20 +3558,13 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         val aosp = File(paths.root, "system/lib/libaemu_apaosp.so")
         val parked = File(paths.root, "system/.aemu-parked/system#lib#hw#audio_policy.default.so")
         val failedMark = File(paths.root, "system/.aemu-parked/audio-aosp-failed")
-        if (failedMark.isFile) { // the AOSP stand-in already crashed on this firmware: never install it again
-            // Modified for AEmulator Plus (2026-10-30): this used to put the firmware's own policy back on every boot, silently,
-            // and nothing else was ever tried (mediaserver crashed 12 times in a row, in the policy's constructor). The wrapper
-            // has a ROM mode for exactly this (the firmware's own policy behind it, binder thread pool started first):
-            // use it, and only when that crashes too (abandonRomPolicy) fall back to the bare firmware policy.
-            if (!File(paths.root, "system/.aemu-parked/audio-rom-failed").isFile && installRomPolicy()) return
-            if (parked.isFile) runCatching { parked.copyTo(f, overwrite = true); aosp.delete(); File(paths.root, "system/lib/libaemu_approm.so").delete() }
-                .onFailure { log("audio: cannot restore the firmware audio policy: ${it.message}") }
-            return
-        }
+        // Modified for AEmulator Plus (2026-11-20): decided before the failed-marker below. An image that crashed under the old
+        // stream-tail bug (mediaserver SIGSEGV pc=2) carries audio-aosp-failed, and that branch would keep it on the ROM-policy
+        // wrapper instead of the firmware's own policy this build needs.
         // The previous stream-tail bug made mediaserver crash and triggered a
         // policy fallback. ZR's stock policy itself was not the origin of PC=2;
         // the AOSP fallback has a different service ABI and crashes at 0x98.
-        val directTrack = img.api in 19..20 && runCatching {
+        val directTrack = AudioHalAbi.directTrackApi(img.api) && runCatching {
             AudioHalAbi.usesDirectTrackTail(File(paths.root, "system/lib/libnbaio.so").readBytes())
         }.getOrDefault(false)
         if (directTrack) {
@@ -3439,6 +3573,16 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
                 parked.copyTo(f, overwrite = true) // retain saved stock binary
                 log("audio: CAF direct-track, restored firmware audio policy")
             }.onFailure { log("audio: policy restore failed: ${it.message}") }
+            return
+        }
+        if (failedMark.isFile) { // the AOSP stand-in already crashed on this firmware: never install it again
+            // Modified for AEmulator Plus (2026-10-30): this used to put the firmware's own policy back on every boot, silently,
+            // and nothing else was ever tried (mediaserver crashed 12 times in a row, in the policy's constructor). The wrapper
+            // has a ROM mode for exactly this (the firmware's own policy behind it, binder thread pool started first):
+            // use it, and only when that crashes too (abandonRomPolicy) fall back to the bare firmware policy.
+            if (!File(paths.root, "system/.aemu-parked/audio-rom-failed").isFile && installRomPolicy()) return
+            if (parked.isFile) runCatching { parked.copyTo(f, overwrite = true); aosp.delete(); File(paths.root, "system/lib/libaemu_approm.so").delete() }
+                .onFailure { log("audio: cannot restore the firmware audio policy: ${it.message}") }
             return
         }
         // MediaTek: AudioPolicyService переделан (другие ops и слоты), политика AOSP в нём падает.
@@ -3704,6 +3848,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             synchronized(procs) { procs.remove("healthd") }?.let { runCatching { it.destroyForcibly() } }
             runCatching { startService(h) }
         }
+        // Zygisk: the daemon counts zygote restarts and takes itself out of the zygote after 3 crashes (init's "onrestart exec magisk --zygote-restart")
+        if (magiskOn) runCatching { log("magisk: zygote-restart -> ${magiskExec("--zygote-restart", 10_000)}") }
         runCatching { startService(z) }
         watchLegacyBoot()   // (a pre-1.0 build never reports boot completion by itself)
         img.services.firstOrNull { it.name == "zygote_secondary" }?.let { z2 ->
@@ -3889,6 +4035,138 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
     }
 
     fun installApk(apkOnSdcard: String): String = guestShell("pm install -r $apkOnSdcard", 600_000)
+
+    // ---- Magisk (VmSettings.magisk, see MagiskCore): the host plays the part of init's boot stages ----------------
+
+    private val magiskOn: Boolean get() =
+        settings.magisk && engine == Engine.N64 && !recoveryMode && !lowPowerBoot &&
+            MagiskCore.info(paths.root) != null && MagiskCore.hasArm64Userland(paths.root)
+
+    /** Runs a magisk command the way init's "exec" would, without letting the daemon it may start keep our pipe open. */
+    private fun magiskExec(args: String, timeoutMs: Long): String =
+        guestShell("/${MagiskCore.TMP}/magisk $args </dev/null >/dev/null 2>&1; echo exit=$?", timeoutMs).trim()
+
+    private fun magiskLogTail(): String =
+        runCatching { File(paths.root, "cache/magisk.log").readLines().takeLast(12).joinToString(" | ") }.getOrDefault("")
+
+    /** Before the first service: the stand-in tmpfs and the su links, "magisk --post-fs-data" (starts the daemon, merges
+     * module updates, runs post-fs-data scripts), then the modules' files are copied into the tree. Never fails the boot. */
+    private fun magiskPostFsData() {
+        runCatching {
+            if (!magiskOn) {
+                // switched off or removed since the last boot: put the tree back
+                if (MagiskCore.leftovers(paths.root)) { MagiskCore.deactivate(paths.root, ::log); log("magisk: off, the tree is back to stock") }
+                return
+            }
+            MagiskCore.Overlay.revert(paths.root, ::log)
+            MagiskCore.prepareTmp(paths.root)
+            MagiskCore.linkSystem(paths.root, ::log)
+            log("magisk: post-fs-data -> ${magiskExec("--post-fs-data", 45_000)}")
+            MagiskCore.unlockTmp(paths.root)    // its magic mount leaves directories at mode 000
+            val version = guestShell("/${MagiskCore.TMP}/magisk -v; /${MagiskCore.TMP}/magisk -V", 15_000).trim().replace('\n', ' ')
+            log("magisk: daemon answers \"$version\"")
+            // Zygisk (docs/magisk.md): with it on in magisk.db the daemon's post-fs-data sets the native-bridge property to libzygisk.so;
+            // its magic mount is ignored by the shim, so Overlay.apply copies the magisk binary into /system/lib64 under that name
+            val zygiskLib = MagiskCore.zygiskLibName(guestShell("getprop ${MagiskCore.NATIVE_BRIDGE_PROP}", 15_000))
+            log(if (zygiskLib != null) "magisk: zygisk on ($zygiskLib)" else "magisk: zygisk off")
+            val n = MagiskCore.Overlay.apply(paths.root, zygiskLib, ::log)
+            if (n > 0) log("magisk: $n module file(s) copied into the system")
+            if (!version.any { it.isDigit() }) log("magisk: the daemon did not answer; /cache/magisk.log: ${magiskLogTail()}")
+        }.onFailure { log("magisk: post-fs-data stage failed: ${it.message}") }
+    }
+
+    /** init's late_start: service.d and the modules' service.sh. */
+    private fun magiskService() {
+        if (!magiskOn) return
+        Thread {
+            runCatching { log("magisk: service -> ${magiskExec("--service", 60_000)}"); MagiskCore.unlockTmp(paths.root); if (MagiskCore.fixDbMode(paths.root)) log("magisk: magisk.db was mode 000, gave the owner access") }
+                .onFailure { log("magisk: service stage failed: ${it.message}") }
+        }.start()
+    }
+
+    /** sys.boot_completed: boot-completed.d / the modules' boot-completed.sh, and the Magisk app if it is not installed yet. */
+    private fun magiskBootComplete() {
+        // The app install is queued by the import of the APK (MagiskCore.appInstallPending) and does not wait for Root to be on;
+        // the daemon's stage and the manager set-up only run with it.
+        if (engine != Engine.N64 || recoveryMode || lowPowerBoot || MagiskCore.info(paths.root) == null || !MagiskCore.hasArm64Userland(paths.root)) return
+        val on = magiskOn
+        runCatching {
+            if (on) {
+                log("magisk: boot-complete -> ${magiskExec("--boot-complete", 60_000)}")
+                if (MagiskCore.fixDbMode(paths.root)) log("magisk: magisk.db was mode 000, gave the owner access")
+            }
+            val pending = MagiskCore.appInstallPending(paths.root)
+            val apk = File(paths.root, MagiskCore.APK_COPY)
+            if (pending || on) {
+                val have = guestShell("pm path ${MagiskCore.PACKAGE}", 60_000).contains("package:")
+                if (!apk.isFile) {
+                    if (pending) { MagiskCore.clearAppInstall(paths.root); log("magisk: queued app install dropped, the APK copy is gone") }
+                } else if (pending || !have) {
+                    val staged = File(paths.root, "data/local/tmp").apply { mkdirs() }.let { File(it, "aemu-magisk.apk") }
+                    java.nio.file.Files.copy(apk.toPath(), staged.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    staged.setReadable(true, false)
+                    // the queue entry goes as soon as the install has been called (whatever pm answered, even if the call threw):
+                    // it is a one-shot request, not retried at every boot
+                    try {
+                        val out = installApk("/data/local/tmp/aemu-magisk.apk").trim()
+                        log("magisk: app install${if (pending) " (queued by the import)" else ""} -> ${out.take(300)}")
+                    } finally {
+                        staged.delete()
+                        if (pending) {
+                            MagiskCore.clearAppInstall(paths.root)
+                            log("magisk: queued app install removed (${if (MagiskCore.appInstallPending(paths.root)) "STILL THERE" else "gone"})")
+                        }
+                    }
+                }
+            }
+            if (on) {
+                MagiskCore.unlockTmp(paths.root)
+                magiskManagerSetup()
+            }
+        }.onFailure { log("magisk: boot-complete stage failed: ${it.message}") }
+    }
+
+    /**
+     * Makes the Magisk app recognisable as the manager, then proves that its su works.
+     *
+     * The daemon finds the manager by the owner of /data/user_de/0/<package> (not /data/data/<package>). The shim answers
+     * a stat with the owner the guest gave the file (a chown leaves it in an extended attribute) and with root for the
+     * rest, so a directory nobody chowned reads as uid 0 and the real app (10132 in the logs) is a stranger to the
+     * daemon: its su ended in "Accessed denied" (the check that ran right after boot showed it). Not verified on a device
+     * which of the two the user_de directory was; the steps below are safe either way and log what they found.
+     * So: copy the owner of the data directory onto the device-encrypted one, and test again. If su still answers
+     * "denied", write the app's uid into magisk.db as an allowed policy: the daemon reads that table whatever it
+     * thinks of the manager (a request from any other app still goes through the prompt, which needs the manager).
+     */
+    private fun magiskManagerSetup() {
+        val t = MagiskCore.TMP
+        val pkg = MagiskCore.PACKAGE
+        fun sh(cmd: String, ms: Long = 30_000) = guestShell(cmd, ms).trim().replace("\n", " | ")
+        val uid = sh("stat -c %u /data/data/$pkg").toIntOrNull()
+        if (uid == null || uid < 10000) { log("magisk: the app's uid is unknown (\"$uid\"): is $pkg installed?"); return }
+        val before = sh("stat -c %u /data/user_de/0/$pkg")
+        if (before != uid.toString()) {
+            log("magisk: /data/user_de/0/$pkg belongs to uid \"$before\", the manager is $uid: chown -> " +
+                sh("chown $uid:$uid /data/user_de/0/$pkg 2>&1; stat -c %u /data/user_de/0/$pkg"))
+        }
+        fun trySu() = sh("su $uid -c 'su -c id' 2>&1 | head -3")
+        var answer = trySu()
+        if (!answer.contains("uid=0")) {
+            // the daemon keeps what it learnt about a uid for a few seconds
+            Thread.sleep(3_500)
+            answer = trySu()
+        }
+        if (!answer.contains("uid=0")) {
+            log("magisk: su for uid $uid still answers \"$answer\": adding an allow policy for it (policy 2 = allow)")
+            sh("/$t/magisk --sqlite 'REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($uid,2,0,1,1)'")
+            MagiskCore.fixDbMode(paths.root)
+            Thread.sleep(3_500)
+            answer = trySu()
+        }
+        log("magisk: check -> app-uid=$uid, db: " + sh("ls -ln /data/adb/magisk.db") +
+            " | policies: " + sh("/$t/magisk --sqlite 'select uid,policy from policies'") + " | su as the app: $answer")
+        if (!answer.contains("uid=0")) log("magisk: su still fails for the app; /cache/magisk.log: ${magiskLogTail()}")
+    }
 
     private fun pidOf(p: Process): Int? {
         var c: Class<*>? = p.javaClass

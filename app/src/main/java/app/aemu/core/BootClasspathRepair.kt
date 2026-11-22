@@ -58,6 +58,35 @@ object BootClasspathRepair {
             }
         }
 
+    /**
+     * Added for AEmulator Plus (2026-11-19). A firmware of Android 11 whose mainline modules (com.android.art, .i18n, ...) were
+     * updated to newer builds keeps the class path of its own init.environ.rc, and that names jars where the old modules had
+     * them: ColorOS 11.3 lists /apex/com.android.art/javalib/core-icu4j.jar, but the newer ART module no longer carries it and
+     * com.android.i18n does. The VM skips the missing entry ("Skipping non-existent dex file"), com.android.icu.text.* is on no
+     * class path and libicu_jni's JNI_OnLoad aborts the zygote ("Native registration unable to find class
+     * 'com/android/icu/text/TimeZoneNamesNative'", exit 134).
+     *
+     * An entry that is not a file in the tree is replaced, in its place, by the jar of the same name in exactly one other
+     * /apex/<module>/javalib. Entries that exist, and names found in none (or in several) modules, stay as they are.
+     */
+    fun relocate(root: File, list: String): String {
+        if (list.isBlank()) return list
+        val byName = HashMap<String, MutableList<String>>()
+        for (m in File(root, "apex").listFiles().orEmpty()) {
+            if (!m.isDirectory) continue
+            for (j in File(m, "javalib").listFiles().orEmpty()) if (j.isFile && j.name.endsWith(".jar"))
+                byName.getOrPut(j.name) { ArrayList() }.add("/apex/${m.name}/javalib/${j.name}")
+        }
+        if (byName.isEmpty()) return list
+        val have = list.split(':').toHashSet()
+        return list.split(':').joinToString(":") { e ->
+            if (e.isBlank() || !e.startsWith("/apex/") || File(root, e.removePrefix("/")).isFile) return@joinToString e
+            val found = byName[e.substringAfterLast('/')]?.filter { it != e }.orEmpty()
+            // (a jar the list already names at its real place is not named twice)
+            if (found.size == 1 && found[0] !in have) found[0] else e
+        }
+    }
+
     /** Forget the cached answer: the tree changed (a jar was patched or replaced). */
     fun forget(root: File) { cache.keys.removeAll { it.startsWith(root.absolutePath + "|") } }
 

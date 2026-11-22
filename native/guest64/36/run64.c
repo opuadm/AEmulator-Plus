@@ -186,11 +186,17 @@ static void bootstrap_lib(char *buf, char *n) {
     if (S4(NR_faccessat, AT_FDCWD, buf, 0, 0) != 0) memcpy(n, orig, len + 1);   // no such bootstrap copy: leave the request alone
 }
 
-static const char *xl(const char *p, char *buf, int *err) {
+// Added for AEmulator Plus (2026-11-21): mounts and device nodes, see vmount.h. rw = 0 translates without the mount table.
+static int g_vm;                                            // <root>/dev/.aemu-vmount exists: this VM has real mounts
+static void vm_rewrite(char *n, u64 cap);
+static const char *xl_x(const char *p, char *buf, int *err, int rw);
+static const char *xl(const char *p, char *buf, int *err) { return xl_x(p, buf, err, 1); }
+static const char *xl_x(const char *p, char *buf, int *err, int rw) {
     if (!p) return p;
     if (p[0] != '/') return p;
     char *n = buf + g_rootlen;              // normalised straight into its place after the root
     if ((*err = norm(p, n, PATH_MAX - g_rootlen))) return 0;
+    if (rw && g_vm) vm_rewrite(n, PATH_MAX - g_rootlen);       // what is mounted at this path (vmount.h)
     if ((pre(n, "/proc") && (n[5] == '/' || !n[5])) || (pre(n, "/sys") && (n[4] == '/' || !n[4]))) {
         // the image's own files win (fake sysfs, /proc/mounts); the rest is the phone's. No SELinux for the guest,
         // and none of the phone's suspend controls (reading its wakeup_count blocks the guest's power manager).
@@ -467,6 +473,32 @@ static long meminfo_open(void) {
     return fake_memfile("aemu-meminfo", out, o);
 }
 
+// Added for AEmulator Plus (2026-11-21): sysinfo(2) scaled to the same budget as /proc/meminfo. Android's Process.getTotalMemory()
+// (Settings > About phone, ActivityManager.MemoryInfo.totalMem, many apps) and sysconf(_SC_PHYS_PAGES) read this call, not the file, so a
+// 2 GB guest still reported all of the phone's memory (16 GB) after only /proc/meminfo had been scaled. arm64 struct sysinfo:
+// uptime@0, loads@8, totalram@32, freeram@40, sharedram@48, bufferram@56, totalswap@64, freeswap@72, procs@80, mem_unit@104.
+#define NR_sysinfo_ 179
+static long sysinfo_fake(void *si) {
+    char p[512], d[24];
+    long r = S1(NR_sysinfo_, si);
+    if (r < 0 || g_rootlen > 400) return r;
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-ram", 15);
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return r;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    if (n <= 0) return r;
+    d[n] = 0;
+    u64 ram = atou(d);                                          // budget in kB
+    u64 *w = (u64 *)si;
+    u32 unit = *(u32 *)((char *)si + 104);
+    if (!unit) unit = 1;
+    u64 total = w[4] * unit / 1024;                             // the phone's total in kB
+    if (!ram || total <= ram) return r;
+    for (int i = 4; i <= 9; i++) w[i] = (w[i] * unit / 1024) * ram / total * 1024;   // total, free, shared, buffer, swap total, swap free
+    *(u32 *)((char *)si + 104) = 1;
+    return r;
+}
+
 // /proc/self/stat of a 32-bit program: the thread count (field 20) without the translator's own helper thread. The
 // zygote of 15 reads it before every fork and aborts ("Failed to reach single-threaded state") when it is not 1.
 static long selfstat_open(void) {
@@ -688,13 +720,14 @@ static char g_input[108];
 // The input method "mouse and keyboard" (VM settings > Controls): an emulated touchpad and keyboard of their own take the
 // place of the touch screen. The app leaves two empty nodes in /dev/input (aemu-touchpad, aemu-keyboard) and serves one
 // socket for each (AEMU64_PAD, AEMU64_KBD); both stay empty when the method is off.
-static char g_pad[108], g_kbd[108];
+static char g_pad[108], g_kbd[108], g_spen[108];   // g_spen: the S-Pen digitizer (input method "S-Pen"), AEMU64_SPEN
 #define IN_TOUCH 0
 #define IN_PAD 1
 #define IN_KBD 2
+#define IN_SPEN 3
 #define IN_SLOTS 16
 static int g_infds[IN_SLOTS];                   // descriptors + 1
-static unsigned char g_inkind[IN_SLOTS];        // what each one is: IN_TOUCH, IN_PAD or IN_KBD
+static unsigned char g_inkind[IN_SLOTS];        // what each one is: IN_TOUCH, IN_PAD, IN_KBD or IN_SPEN
 static int g_innext;                            // where the next one goes when the table is full
 
 static int input_kind(int fd) { for (int i = 0; i < IN_SLOTS; i++) if (g_infds[i] == fd + 1) return g_inkind[i] + 1; return 0; }
@@ -796,8 +829,49 @@ static long vinput_ioctl(int kind, u32 cmd, u64 arg) {
     return -25; /* ENOTTY */
 }
 
+// The evdev questions of the emulated S-Pen digitizer ("sec_e-pen", input method "S-Pen"): a direct single-touch pen
+// (ABS_X/Y, PRESSURE, DISTANCE, TILT, BTN_TOUCH, BTN_TOOL_PEN, BTN_STYLUS). Same answers as native/guestshim/vinput.h.
+#define SPEN_XY_MAX 16383
+static long spen_ioctl(u32 cmd, u64 arg) {
+    u32 nr = cmd & 0xff, len = (cmd >> 16) & 0x3fff;
+    u8 *out = (u8 *)arg;
+    if (nr == 0x90 || nr == 0xa0 || nr == 0x03) return 0;                        // grab, clock id, repeat
+    if (!arg) return -EFAULT;
+    if (!(cmd & 0x80000000u)) return -25;                                        // ENOTTY: only reads are answered
+    if (nr == 0x01 && len == 4) { *(int *)arg = 0x010001; return 0; }            // EVIOCGVERSION
+    if (nr == 0x02 && len == 8) { u16 *id = (u16 *)arg; id[0] = 6 /* BUS_VIRTUAL */; id[1] = 0; id[2] = 4; id[3] = 1; return 0; }
+    if (nr >= 0x06 && nr <= 0x08) {                                              // name, physical path, unique ID
+        const char *s = nr == 6 ? "sec_e-pen" : nr == 7 ? "sec_e-pen/input1" : "aemu-spen";
+        u32 i = 0;
+        if (!len) return 0;
+        while (i + 1 < len && s[i]) { out[i] = (u8)s[i]; i++; }
+        out[i++] = 0;
+        return (long)i;
+    }
+    if (nr == 0x09 || nr == 0x18 || nr == 0x19 || nr == 0x1a || nr == 0x1b || (nr >= 0x20 && nr <= 0x3f)) {
+        memset(out, 0, len);
+        if (nr == 0x09) setbit(out, len, 1);                                     // INPUT_PROP_DIRECT
+        if (nr == 0x20) { setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 3); }   // SYN, KEY, ABS
+        if (nr == 0x21) { setbit(out, len, 320); setbit(out, len, 330); setbit(out, len, 331); }   // BTN_TOOL_PEN, BTN_TOUCH, BTN_STYLUS
+        if (nr == 0x23) { setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 24); setbit(out, len, 25); setbit(out, len, 26); setbit(out, len, 27); }
+        return (long)len;
+    }
+    if (nr >= 0x40 && nr < 0x80) {                                               // EVIOCGABS(axis)
+        int *a = (int *)arg; u32 ax = nr - 0x40, words = len / 4;
+        for (u32 i = 0; i < words && i < 6; i++) a[i] = 0;
+        if (words < 3) return -EINVAL;
+        if (ax == 0 || ax == 1) a[2] = SPEN_XY_MAX;
+        else if (ax == 24) a[2] = 4095;                                          // pressure
+        else if (ax == 25) a[2] = 255;                                           // distance (hover height)
+        else if (ax == 26 || ax == 27) { a[1] = -63; a[2] = 63; }                // tilt
+        else return -EINVAL;
+        return 0;
+    }
+    return -25; /* ENOTTY */
+}
+
 static long input_ioctl(int kind, u32 cmd, u64 arg) {
-    return kind == IN_TOUCH ? touch_ioctl(cmd, arg) : vinput_ioctl(kind, cmd, arg);
+    return kind == IN_TOUCH ? touch_ioctl(cmd, arg) : kind == IN_SPEN ? spen_ioctl(cmd, arg) : vinput_ioctl(kind, cmd, arg);
 }
 
 
@@ -932,9 +1006,10 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     if (g_crash) *a++ = "AEMU64_CRASH=1";
     static char e_input[130];
     if (g_input[0]) { memcpy(e_input, "AEMU64_INPUT=", 13); memcpy(e_input + 13, g_input, slen(g_input) + 1); *a++ = e_input; }
-    static char e_pad[135], e_kbd[135];
+    static char e_pad[135], e_kbd[135], e_spen[135];
     if (g_pad[0]) { memcpy(e_pad, "AEMU64_PAD=", 11); memcpy(e_pad + 11, g_pad, slen(g_pad) + 1); *a++ = e_pad; }
     if (g_kbd[0]) { memcpy(e_kbd, "AEMU64_KBD=", 11); memcpy(e_kbd + 11, g_kbd, slen(g_kbd) + 1); *a++ = e_kbd; }
+    if (g_spen[0]) { memcpy(e_spen, "AEMU64_SPEN=", 12); memcpy(e_spen + 12, g_spen, slen(g_spen) + 1); *a++ = e_spen; }
     static char e_nd[32], e_ns[32];
     if (nh_port) { memcpy(e_nd, "AEMU64_NETDBG=", 14); char t2[24], *s2 = utoa((u64)nh_port, t2 + sizeof t2); memcpy(e_nd + 14, s2, slen(s2) + 1); *a++ = e_nd; }
     if (nh_dns) { memcpy(e_ns, "AEMU64_NETDNS=", 14); char t2[24], *s2 = utoa((u64)nh_dns, t2 + sizeof t2); memcpy(e_ns + 14, s2, slen(s2) + 1); *a++ = e_ns; }
@@ -997,6 +1072,28 @@ static void own_put(long nr, long where, long uid, long gid) {        // nr: NR_
 }
 
 #define P(i) ((const char *)a[i])
+
+// ---------------------------------------------------------------------------------------------------- storage size
+// The disk size the guest is told it has (<root>/dev/.aemu-storage, in bytes; absent = the phone's own). Read once.
+// Added for AEmulator Plus (2026-11-19): the free space stays the phone's real free space, see statfs below.
+static u64 g_stor;
+static int g_stor_read;
+static u64 storage_bytes(void) {
+    if (g_stor_read) return g_stor;
+    g_stor_read = 1;
+    char p[512], d[24];
+    if (g_rootlen > 400) return 0;
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-storage", 19);
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return 0;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    if (n > 0) { d[n] = 0; g_stor = atou(d); }
+    return g_stor;
+}
+// the guest's data disk and its sdcard views (not /system, /proc, /sys, /dev)
+static int storage_path(const char *s) {
+    return s && (pre(s, "/data") || pre(s, "/storage") || pre(s, "/sdcard") || pre(s, "/mnt/"));
+}
 #define X(i) xl(P(i), b##i, &err)
 #define NEEDX(i) const char *h##i = X(i); if (!h##i && P(i)) return err
 
@@ -1189,7 +1286,9 @@ static long send_retry(long nr, const long *a0) {
     }
 }
 
-static long trap2(long nr, long *a, void *uc, char **pbp) {
+#include "../vmount.h"
+
+static long trap2_base(long nr, long *a, void *uc, char **pbp) {
     int err = 0;
     switch (nr) {
     case 233 /* madvise */: {
@@ -1210,6 +1309,8 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             // and asks what the descriptor is. The link is this program on the phone, which to the guest reads as
             // /dev/null (no section: the built-in configuration without the modules' libraries, "library not found"
             // for everything that lives in an APEX).
+            // Added for AEmulator Plus (2026-11-21): the same for another process (Magisk: is_client), see vmount.h
+            if (g_vm && !g_is32) { char *ex = PB(1); if (vm_proc_exe(P(1), ex)) { const char *h = xl(ex, b1, &err); if (h) return S4(nr, AT_FDCWD, h, a[2], a[3]); } }
             if (!g_is32 && g_exe[0] && seq(P(1), "/proc/self/exe")) { const char *h = xl(g_exe, b1, &err); if (h) return S4(nr, AT_FDCWD, h, a[2], a[3]); }
             // the control files of those cgroup directories: nothing is in a group (killProcessGroup has no one
             // to wait for), writes are taken, and the directories stay empty for rmdir
@@ -1219,6 +1320,9 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 if (!pre(l, "uid_") && !pre(l, "pid_") && l[0] != '.') return S4(NR_openat, AT_FDCWD, "/dev/null", a[2] & 02000003, 0);
             }
             if (P(1)[0] == '/' && P(1)[1] == 'd') {
+                // Added for AEmulator Plus (2026-11-19): nodes only an emulator has are absent, as on a phone (never created either)
+                if (seq(P(1), "/dev/qemu_pipe") || seq(P(1), "/dev/goldfish_pipe") || seq(P(1), "/dev/socket/qemud") ||
+                    seq(P(1), "/dev/qemu_trace")) return -2;     // ENOENT
                 if (pre(P(1), "/dev/ashmem")) {
                     return ashmem_open(a[2]);
                 }
@@ -1228,6 +1332,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder")) return binder_open(a[2], P(1));
                 if (seq(P(1), "/dev/input/aemu-touchpad")) return input_open_at(g_pad, IN_PAD, a[2]);
                 if (seq(P(1), "/dev/input/aemu-keyboard")) return input_open_at(g_kbd, IN_KBD, a[2]);
+                if (seq(P(1), "/dev/input/aemu-spen")) return input_open_at(g_spen, IN_SPEN, a[2]);
                 if (pre(P(1), "/dev/input/event")) return input_open(a[2]);
             }
             u64 pl = slen(P(1));
@@ -1276,6 +1381,8 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         if ((a[3] & 0x1000 /*AT_EMPTY_PATH*/) && P(1) && !P(1)[0]) { long f[6] = { a[0], a[2], 0, 0, 0, 0 }; return trap2(NR_fstat, f, uc, pbp); }
         char *b1 = PB(0);
         if (P(1)) {
+            // Added for AEmulator Plus (2026-11-21): the same for another process (Magisk: is_client), see vmount.h
+            if (g_vm && !g_is32) { char *ex = PB(1); if (vm_proc_exe(P(1), ex)) { const char *h = xl(ex, b1, &err); if (h) return S4(nr, AT_FDCWD, h, a[2], a[3]); } }
             if (!g_is32 && g_exe[0] && seq(P(1), "/proc/self/exe")) { const char *h = xl(g_exe, b1, &err); if (h) return S4(nr, AT_FDCWD, h, a[2], a[3]); }
             if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder") || pre(P(1), "/dev/ashmem")) {
                 struct kstat *st = (struct kstat *)a[2];
@@ -1383,7 +1490,8 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     case NR_statx: {
         char *b1 = PB(0);
         NEEDX(1);
-        return S5(nr, a[0], h1, a[2], a[3], a[4]);
+        // Added for AEmulator Plus (2026-11-21): the emulated root keeps the owner bits (vmount.h, vm_mode_fix)
+        return S5(nr, a[0], h1, vm_mode_fix(nr, a[0], h1, a[2]), a[3], a[4]);
     }
     case NR_fchown: own_put(7 /*fsetxattr*/, a[0], a[1], a[2]); return 0;
     case NR_fchownat: {
@@ -1396,6 +1504,10 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_readlinkat: {
         if (P(1)) {
+            if (g_vm) {      // Added for AEmulator Plus (2026-11-21): /proc/<pid>/exe of another guest process, see vmount.h
+                char *ex = PB(1);
+                if (vm_proc_exe(P(1), ex)) { u64 n = slen(ex); if (n > (u64)a[3]) n = (u64)a[3]; memcpy((void *)a[2], ex, n); return (long)n; }
+            }
             if (seq(P(1), "/proc/self/exe") && g_exe[0]) {
                 u64 n = slen(g_exe); if (n > (u64)a[3]) n = (u64)a[3];
                 memcpy((void *)a[2], g_exe, n); return (long)n;
@@ -1485,6 +1597,14 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             // a nearly full phone reads as a nearly full guest disk (no dropbox, low-storage modes): the guest's disk
             // is what is still free plus as much again
             u64 *s = (u64 *)a[1];               /* type, bsize, blocks, bfree, bavail */
+            u64 want = storage_bytes();
+            if (want && s[1] && storage_path(P(0))) {
+                // a disk of the chosen size whose free space is the phone's own free space (never more than the disk):
+                // used = size - free, so the guest cannot be told it may store more than the phone holds
+                u64 fr = s[4] * s[1];
+                if (fr > want) fr = want;
+                s[2] = want / s[1]; s[3] = s[4] = fr / s[1];
+            } else
             if (s[4] && s[2] > 2 * s[4]) { s[2] = 2 * s[4]; if (s[3] > s[2]) s[3] = s[2]; }
         }
         return r;
@@ -1515,6 +1635,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         NEEDX(1);
         return S3(nr, a[0], h1, a[2]);
     }
+    case NR_sysinfo_: return sysinfo_fake((void *)a[0]);
     case NR_getcwd: {
         char *t = PB(0);
         long r = S2(nr, t, PATH_MAX);
@@ -1650,7 +1771,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             }
         }
         return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
-    case NR_mount: case NR_umount2: case NR_chroot: case NR_capset: case NR_setgroups: case NR_unshare: return 0;
+    case NR_mount: case NR_umount2: case NR_chroot: case NR_capset: case NR_setgroups: case NR_unshare: case 268 /* setns */: return 0;
     case NR_prctl: return 0;                    // only PR_CAPBSET_DROP gets here
     case 107: {                                 // timer_create: the *_ALARM clocks need CAP_WAKE_ALARM (the Bluetooth
         long clk = a[0] == 8 ? 0 : a[0] == 9 ? 7 : a[0];   // stack of 10 stops on a refusal); the plain ones tick the same
@@ -1846,6 +1967,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_getsockopt: {
         if (is_nl_fd((int)a[0])) return 0;
+        if (g_vm && a[1] == 1 && a[2] == 31 /* SO_PEERSEC */) return vm_peersec(a[0], (char *)a[3], (u32 *)a[4]);   // Added for AEmulator Plus (2026-11-21): Zygisk, see vmount.h
         long r = S5(nr, a[0], a[1], a[2], a[3], a[4]);
         // SO_MARK read: fwmarkd of 8+ reads the socket's mark before setting its own (the set is forgiven above) and
         // answers every bind-to-network with -errno when this fails, so NetworkMonitor's probes never get out
@@ -2105,7 +2227,7 @@ static const u8 trapped[] = {
     NR_fchownat, NR_fchown, NR_openat, NR_readlinkat, NR_newfstatat, NR_fstat, NR_utimensat, NR_capget, NR_capset,
     NR_rt_sigaction, NR_reboot, NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid,
     NR_setresgid, NR_getresgid, NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid,
-    NR_getgid, NR_getegid, NR_bind, NR_connect, NR_execve, NR_setsockopt, NR_unshare, NR_timerfd_create,
+    NR_getgid, NR_getegid, NR_bind, NR_connect, NR_execve, NR_setsockopt, NR_unshare, 268 /* setns */, NR_timerfd_create,
     NR_close, NR_getsockopt, NR_sendto, NR_sendmsg, NR_getsockname, NR_socket, NR_dup3, NR_writev, 92 /* personality */, 107 /* timer_create */, 119 /* sched_setscheduler */,
 };
 
@@ -2122,6 +2244,10 @@ static void install_filter(void) {
     for (u64 i = 0; i < sizeof trapped; i++) f[n++] = JEQ(trapped[i], L_TRAP, 0);
     f[n++] = JEQ(NR_renameat2, L_TRAP, 0);
     f[n++] = JEQ(NR_statx, L_TRAP, 0);
+    f[n++] = JEQ(179 /* sysinfo */, L_TRAP, 0);
+    f[n++] = JEQ(268 /* setns */, L_TRAP, 0);
+    // Added for AEmulator Plus (2026-11-21): directory reads, to show a device node (a whiteout) as one (vmount.h)
+    if (g_vm) f[n++] = JEQ(61 /* getdents64 */, L_TRAP, 0);
     // Added for AEmulator Plus (2026-11-14): memfd_create, to refuse ART's dual-view JIT code cache to an x86 guest (see trap2)
     f[n++] = JEQ(NR_memfd_create, L_TRAP, 0);
     // glibc 2.33+ (the static qemu-arm's) answers faccessat() with faccessat2 first and falls back to faccessat only on ENOSYS;
@@ -2169,6 +2295,7 @@ static void install_filter(void) {
     AT(L_TRAP); f[n++] = RET(TRAP);
     AT(L_ALLOW); f[n++] = RET(ALLOW);
 #undef AT
+    if (n >= (int)(sizeof f / sizeof f[0]) || n > 250) die("seccomp filter too long", "");     // (jump offsets are bytes)
     for (int i = 0; i < n; i++) {
         if ((f[i].code & 7) != 5) continue;                     // jumps only
         if (f[i].jt >= 240) f[i].jt = (u8)(pos[f[i].jt - 240] - i - 1);
@@ -2245,11 +2372,13 @@ void aemu_main(u64 *sp) {
     const char *r = env_get(envp, "AEMU64_ROOT");
     if (!r || !r[0] || slen(r) >= sizeof g_root) die("AEMU64_ROOT is not set", "");
     memcpy(g_root, r, slen(r) + 1); g_rootlen = slen(g_root);
+    vm_init();                                                   // (vmount.h)
     if ((r = env_get(envp, "AEMU64_PROPS")) && slen(r) < sizeof g_props) memcpy(g_props, r, slen(r) + 1);
     g_crash = env_get(envp, "AEMU64_CRASH") != 0;
     if ((r = env_get(envp, "AEMU64_INPUT")) && slen(r) < sizeof g_input) memcpy(g_input, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_PAD")) && slen(r) < sizeof g_pad) memcpy(g_pad, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_KBD")) && slen(r) < sizeof g_kbd) memcpy(g_kbd, r, slen(r) + 1);
+    if ((r = env_get(envp, "AEMU64_SPEN")) && slen(r) < sizeof g_spen) memcpy(g_spen, r, slen(r) + 1);
     nh_set_env(env_get(envp, "AEMU64_NETDBG"), env_get(envp, "AEMU64_NETDNS"));
     if ((r = env_get(envp, "AEMU64_SDCARD")) && slen(r) < sizeof g_sd) { g_sdlen = slen(r); memcpy(g_sd, r, g_sdlen + 1); }
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
@@ -2317,6 +2446,7 @@ void aemu_main(u64 *sp) {
                     seq(g_exe, "/system/bin/keystore2");    // (it checks every call against the policy the same way)
     }
 
+    vm_exe_put();    // Added for AEmulator Plus (2026-11-21): /proc/<pid>/exe of this process for the others (vmount.h)
     // sockets init would have made for the service: AEMU64_SOCK_<name>=<host path>,<octal mode>[,seqpacket|dgram]
     static char sockenv[12][80]; int nsock = 0;
     for (char **e = envp; *e; e++) {

@@ -33,7 +33,7 @@ abstract class PropArea(protected val b: ByteBuffer, protected val chan: FileCha
         const val VERSION_V2 = 0xfc6ed0ab.toInt()
 
         /** Создаёт пустую область в файле: v2 для Oreo+ (API 26+), v1 для более старых. */
-        fun create(f: File, api: Int = 19): PropArea {
+        fun create(f: File, api: Int = 19, nameMax: Int = LibcPropLayout.CLASSIC_NAME_MAX): PropArea {
             f.parentFile?.mkdirs()
             RandomAccessFile(f, "rw").use { it.setLength(0); it.setLength(SIZE.toLong()) }
             val ch = RandomAccessFile(f, "rw").channel
@@ -53,7 +53,14 @@ abstract class PropArea(protected val b: ByteBuffer, protected val chan: FileCha
                 m.putInt(4, 0)
                 m.putInt(8, MAGIC)
                 m.putInt(12, VERSION_V1)
-                PropAreaV1(m, ch)
+                // Added for AEmulator Plus (2026-11-20): a guest libc whose legacy reader keeps the name in a longer field (Android-x86
+                // 5.1: serial at 0x80) needs records of that size; the header spare bytes (libc never reads them) remember it, so
+                // open() builds the same layout again.
+                if (nameMax != LibcPropLayout.CLASSIC_NAME_MAX) {
+                    m.putInt(V1_LAYOUT_MARK_AT, V1_LAYOUT_MARK)
+                    m.putInt(V1_LAYOUT_MARK_AT + 4, nameMax)
+                }
+                PropAreaV1(m, ch, nameMax)
             }
         }
 
@@ -70,11 +77,20 @@ abstract class PropArea(protected val b: ByteBuffer, protected val chan: FileCha
             }
             return when (version) {
                 VERSION_V2 -> PropAreaV2(m, ch)
-                VERSION_V1, 0 -> PropAreaV1(m, ch)
+                VERSION_V1, 0 -> PropAreaV1(m, ch, v1NameMax(m))
                 else -> {
-                    if (m.getInt(0) > 1000 && m.getInt(0) < SIZE) PropAreaV2(m, ch) else PropAreaV1(m, ch)
+                    if (m.getInt(0) > 1000 && m.getInt(0) < SIZE) PropAreaV2(m, ch) else PropAreaV1(m, ch, v1NameMax(m))
                 }
             }
+        }
+
+        const val V1_LAYOUT_MARK_AT = 16
+        const val V1_LAYOUT_MARK = 0x4c504541 // "AEPL"
+
+        /** Name field size of a v1 area: the one recorded at creation, the classic 32 otherwise. */
+        private fun v1NameMax(m: ByteBuffer): Int {
+            if (m.getInt(V1_LAYOUT_MARK_AT) != V1_LAYOUT_MARK) return LibcPropLayout.CLASSIC_NAME_MAX
+            return m.getInt(V1_LAYOUT_MARK_AT + 4).takeIf { it in 32..512 && it % 4 == 0 } ?: LibcPropLayout.CLASSIC_NAME_MAX
         }
 
         /** Разбор build.prop/default.prop: ключ=значение, комментарии, import не поддерживаем. */
@@ -93,16 +109,19 @@ abstract class PropArea(protected val b: ByteBuffer, protected val chan: FileCha
 }
 
 /** Формат bionic v1 (Android 1.0–7.1). */
-class PropAreaV1(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
+class PropAreaV1(b: ByteBuffer, chan: FileChannel?, val nameMax: Int = LibcPropLayout.CLASSIC_NAME_MAX) : PropArea(b, chan) {
+
+    /** one record: name field, serial (length in the top byte), value; 128 bytes classic, nameMax + 96 otherwise */
+    private val info: Int = nameMax + 4 + VALUE_MAX
 
     override val count: Int get() = b.getInt(0)
 
     override fun get(name: String): String? {
         val off = find(name) ?: return null
-        val serial = b.getInt(off + NAME_MAX)
+        val serial = b.getInt(off + nameMax)
         val len = (serial ushr 24).coerceIn(0, VALUE_MAX - 1)
         val v = ByteArray(len)
-        for (i in 0 until len) v[i] = b.get(off + NAME_MAX + 4 + i)
+        for (i in 0 until len) v[i] = b.get(off + nameMax + 4 + i)
         return String(v, Charsets.UTF_8)
     }
 
@@ -123,26 +142,26 @@ class PropAreaV1(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
     override fun put(name: String, value: String): Boolean {
         val nb = name.toByteArray(Charsets.UTF_8)
         var vb = value.toByteArray(Charsets.UTF_8)
-        if (nb.isEmpty() || nb.size >= NAME_MAX) return false
+        if (nb.isEmpty() || nb.size >= nameMax) return false
         if (vb.size >= VALUE_MAX) vb = vb.copyOf(VALUE_MAX - 1)
         val off = find(name)
         if (off != null) {
-            val s0 = b.getInt(off + NAME_MAX)
-            b.putInt(off + NAME_MAX, s0 or 1) // нечётный — «пишу»
-            for (i in vb.indices) b.put(off + NAME_MAX + 4 + i, vb[i])
-            b.put(off + NAME_MAX + 4 + vb.size, 0)
-            b.putInt(off + NAME_MAX, (vb.size shl 24) or (((s0 or 1) + 1) and 0xffffff))
+            val s0 = b.getInt(off + nameMax)
+            b.putInt(off + nameMax, s0 or 1) // нечётный — «пишу»
+            for (i in vb.indices) b.put(off + nameMax + 4 + i, vb[i])
+            b.put(off + nameMax + 4 + vb.size, 0)
+            b.putInt(off + nameMax, (vb.size shl 24) or (((s0 or 1) + 1) and 0xffffff))
             b.putInt(4, b.getInt(4) + 1)
             return true
         }
         val n = count
         val at = nextInfo(n)
         if ((n + 1) * 4 + TOC > firstInfo(n)) return false
-        if (at + INFO > b.capacity()) return false
-        for (i in 0 until INFO) b.put(at + i, 0)
+        if (at + info > b.capacity()) return false
+        for (i in 0 until info) b.put(at + i, 0)
         for (i in nb.indices) b.put(at + i, nb[i])
-        for (i in vb.indices) b.put(at + NAME_MAX + 4 + i, vb[i])
-        b.putInt(at + NAME_MAX, vb.size shl 24)
+        for (i in vb.indices) b.put(at + nameMax + 4 + i, vb[i])
+        b.putInt(at + nameMax, vb.size shl 24)
         b.putInt(TOC + n * 4, (nb.size shl 24) or at)
         b.putInt(0, n + 1)
         b.putInt(4, b.getInt(4) + 1)
@@ -152,7 +171,7 @@ class PropAreaV1(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
     override fun room(): Int {
         val n = count
         val byToc = (firstInfo(n) - TOC) / 4 - n
-        val byTail = (b.capacity() - nextInfo(n)) / INFO
+        val byTail = (b.capacity() - nextInfo(n)) / info
         return maxOf(0, minOf(byToc, byTail))
     }
 
@@ -180,13 +199,11 @@ class PropAreaV1(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
         if (n == 0) return firstInfo(0)
         var m = 0
         for (i in 0 until n) m = maxOf(m, b.getInt(TOC + i * 4) and 0xffffff)
-        return m + INFO
+        return m + info
     }
 
     companion object {
         private const val TOC = 32
-        private const val INFO = 128
-        private const val NAME_MAX = 32
         private const val VALUE_MAX = 92
         private const val INFO_START = 4096
     }

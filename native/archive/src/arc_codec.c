@@ -28,6 +28,7 @@ static const arc_ops *ops_for(int codec) {
     case ARC_XZ: case ARC_LZMA: return &arc_ops_lzma;
     case ARC_BZIP2: return &arc_ops_bz2;
     case ARC_LZ4F: return &arc_ops_lz4f;
+    case ARC_LZ4L: return &arc_ops_lz4l;
     case ARC_ZSTD: return &arc_ops_zstd;
     case ARC_BROTLI: return &arc_ops_brotli;
     default: return NULL;

@@ -1,8 +1,8 @@
 /*
  * aemuarc - one native library for every decompression format the firmware importer meets.
  *
- * Push decoders (arc_dec_*) for gzip / zlib / raw deflate / xz / lzma-alone / bzip2 / lz4 frame / zstd / brotli,
- * a streaming 7z reader (arc7z_*), and one-shot helpers. Pure C, no JNI in here (see src/arc_jni.c).
+ * Push decoders (arc_dec_*) for gzip / zlib / raw deflate / xz / lzma-alone / bzip2 / lz4 frame / lz4 legacy / zstd / brotli,
+ * a streaming 7z reader (arc7z_*), a streaming RAR reader (arcrar_*), and one-shot helpers. Pure C, no JNI in here (see src/arc_jni.c).
  * Third-party code is vendored in third_party/ (zlib, bzip2, lz4, zstd, brotli, 7-Zip LZMA SDK); see README.md.
  */
 #ifndef AEMUARC_H
@@ -26,7 +26,8 @@ enum arc_codec {
     ARC_BZIP2 = 6,     /* concatenated streams */
     ARC_LZ4F = 7,      /* LZ4 frame format, concatenated frames, skippable frames */
     ARC_ZSTD = 8,      /* concatenated frames, skippable frames */
-    ARC_BROTLI = 9
+    ARC_BROTLI = 9,
+    ARC_LZ4L = 10      /* LZ4 legacy format (`lz4 -l`, magic 0x184C2102): 8 MiB blocks, concatenated streams, zero padding */
 };
 
 enum arc_status {
@@ -90,6 +91,27 @@ int arc7z_info(const arc7z *a, uint32_t i, uint64_t *size, int *is_dir);
 int arc7z_select(arc7z *a, uint32_t i);
 /* >0 bytes, 0 at the end of the entry (its CRC is checked there), <0 an arc_status */
 int64_t arc7z_read(arc7z *a, uint8_t *buf, size_t cap);
+
+/* ---- RAR ------------------------------------------------------------------------------------------------------ */
+
+typedef struct arcrar arcrar;
+
+/*
+ * Opens a RAR archive (an SFX stub in front is skipped): RAR 3.x / 4.x (LZ, PPMd, the standard filters), RAR 5.x / 7.x
+ * (LZ and filters), stored entries of every version, solid archives. [mem_cap] bounds the decoder memory (window, PPMd model).
+ * Otherwise *err is ARC_E_UNSUPPORTED and the caller should use another reader: RAR 1.x / 2.x compression, encrypted
+ * data or headers, volume sets, custom RAR3 VM programs. Symbolic / hard links and file copies of RAR 5 are not listed.
+ * Entries are read like the 7z ones: arcrar_select(i), then arcrar_read until 0 (CRC32 is checked there, ARC_E_DATA on a
+ * mismatch). A solid entry decodes the entries before it that were not read (lazily, from the start of its chain).
+ */
+arcrar *arcrar_open(const arc_src *src, uint64_t mem_cap, int *err);
+void arcrar_close(arcrar *a);
+uint32_t arcrar_count(const arcrar *a);
+size_t arcrar_name16(const arcrar *a, uint32_t i, uint16_t *buf);
+int arcrar_info(const arcrar *a, uint32_t i, uint64_t *size, int *is_dir);
+int arcrar_select(arcrar *a, uint32_t i);
+/* >0 bytes, 0 at the end of the entry, <0 an arc_status */
+int64_t arcrar_read(arcrar *a, uint8_t *buf, size_t cap);
 
 #pragma GCC visibility pop
 #ifdef __cplusplus

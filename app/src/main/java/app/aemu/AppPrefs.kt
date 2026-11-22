@@ -200,6 +200,7 @@ object AppPrefs {
             trackballStepDp = p.getInt("def_trackball_step", 18).coerceIn(4, 48),
             mouseKeyboard = p.getBoolean("def_mouse_keyboard", false),
             keypad = p.getBoolean("def_keypad", false),
+            spen = p.getBoolean("def_spen", false),
             keepScreenOn = p.getBoolean("def_awake", d.keepScreenOn),
             showLed = p.getBoolean("def_led", d.showLed),
         )
@@ -210,7 +211,7 @@ object AppPrefs {
         .putBoolean("def_nav", s.showNavBar).putBoolean("def_awake", s.keepScreenOn).putBoolean("def_led", s.showLed)
         .putString("def_nav_buttons", s.navButtons).putBoolean("def_trackball", s.trackball)
         .putBoolean("def_trackball_dpad", s.trackballDpad).putInt("def_trackball_step", s.trackballStepDp)
-        .putBoolean("def_mouse_keyboard", s.mouseKeyboard).putBoolean("def_keypad", s.keypad).apply()
+        .putBoolean("def_mouse_keyboard", s.mouseKeyboard).putBoolean("def_keypad", s.keypad).putBoolean("def_spen", s.spen).apply()
 
     /** Контекст с выбранным языком — для attachBaseContext каждой активности. */
     /**

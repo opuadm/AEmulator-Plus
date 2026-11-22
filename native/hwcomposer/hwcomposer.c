@@ -104,7 +104,28 @@ static void hwc_log(int prio, const char *fmt, ...) {
 
 #define EXPORT __attribute__((visibility("default")))
 #define MAX_LAYERS 128
-#define VSYNC_NS 16666667
+/* Added for AEmulator Plus (2026-11-20): the guest's screen refresh rate. The app sets two properties (VM settings > Screen refresh
+ * rate): ro.aemu.refresh_hz is the rate the display mode reports, ro.aemu.refresh_tick_hz the rate the vsync really ticks at (the
+ * same, or the phone's own maximum when the reported one is above it). Unset or out of 10..1000: 60 Hz, as before. */
+static long g_report_ns = 16666667L, g_tick_ns = 16666667L;
+static long hz_prop(const char *name) {
+    char v[92] = {0}; long n = 0;
+    if (__system_property_get(name, v) <= 0) return 0;
+    for (int i = 0; v[i] >= '0' && v[i] <= '9'; i++) { n = n * 10 + (v[i] - '0'); if (n > 100000) return 0; }
+    return (n >= 10 && n <= 1000) ? n : 0;
+}
+/* 1e9 / hz by shift-and-subtract: a 32-bit ARMv7-A core has no divide instruction, and the guest's libc exports no __aeabi_idiv, so a
+ * runtime "/" here would leave an undefined helper in the module (the build scripts refuse that). */
+static long hz_to_ns(long hz) {
+    uint32_t n = 1000000000u, d = (uint32_t)hz, q = 0, r = 0;
+    for (int i = 31; i >= 0; i--) { r = (r << 1) | ((n >> i) & 1u); if (r >= d) { r -= d; q |= 1u << i; } }
+    return (long)q;
+}
+static void read_refresh(void) {
+    long r = hz_prop("ro.aemu.refresh_hz"), t = hz_prop("ro.aemu.refresh_tick_hz");
+    if (r) g_report_ns = hz_to_ns(r);
+    if (t) g_tick_ns = hz_to_ns(t); else if (r) g_tick_ns = g_report_ns;
+}
 #define DPI_MILLI 240000
 
 /* ---------------------------------------------------------------- state */
@@ -423,9 +444,15 @@ static void *worker(void *arg) {
     (void)arg;
     struct timespec t; now_ts(&t);
     for (;;) {
-        t.tv_nsec += VSYNC_NS;
+        t.tv_nsec += g_tick_ns;
         if (t.tv_nsec >= 1000000000) { t.tv_nsec -= 1000000000; t.tv_sec++; }
-        clock_nanosleep(CLOCK_MONOTONIC, 1 /*TIMER_ABSTIME*/, &t, NULL);
+        /* Modified for AEmulator Plus (2026-11-20): never catch up. The target time only moves by one period per tick, so when
+         * the guest (qemu) cannot deliver a vsync inside one period -- the case above ~70 Hz -- the target falls further behind
+         * on every tick, clock_nanosleep() returns at once and the callback fires back to back, flooding the composer service
+         * with one-way binder calls until it dies. A tick that is already a full period late is dropped: restart from now. */
+        struct timespec now_; now_ts(&now_);
+        if ((int64_t)now_.tv_sec * 1000000000LL + now_.tv_nsec > (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec + (int64_t)g_tick_ns) t = now_;
+        else clock_nanosleep(CLOCK_MONOTONIC, 1 /*TIMER_ABSTIME*/, &t, NULL);
 
         pthread_mutex_lock(&g_lock);
         HWC2_PFN_HOTPLUG hp = g_cb_hotplug; hwc2_callback_data_t hpd = g_cbd_hotplug;
@@ -438,7 +465,7 @@ static void *worker(void *arg) {
         if (hp && hp_pend) { LOGI("hotplug: display 0 connected"); hp(hpd, 0, HWC2_CONNECTION_CONNECTED); }
         if (von) {
             int64_t ts = (int64_t)t.tv_sec * 1000000000LL + (int64_t)t.tv_nsec;
-            if (v24) v24(v24d, 0, ts, VSYNC_NS);
+            if (v24) v24(v24d, 0, ts, (hwc2_vsync_period_t)g_tick_ns);
             else if (v) v(vd, 0, ts);
         }
     }
@@ -644,7 +671,7 @@ static int32_t h_getDisplayAttribute(hwc2_device_t *dev, hwc2_display_t d, hwc2_
     switch (attr) {
     case HWC2_ATTRIBUTE_WIDTH: *out = g_w; break;
     case HWC2_ATTRIBUTE_HEIGHT: *out = g_h; break;
-    case HWC2_ATTRIBUTE_VSYNC_PERIOD: *out = VSYNC_NS; break;
+    case HWC2_ATTRIBUTE_VSYNC_PERIOD: *out = (int32_t)g_report_ns; break;
     case HWC2_ATTRIBUTE_DPI_X:
     case HWC2_ATTRIBUTE_DPI_Y: *out = DPI_MILLI; break;
     case HWC2_ATTRIBUTE_CONFIG_GROUP: *out = 0; break;
@@ -893,7 +920,7 @@ static int32_t h_getDisplayConnectionType(hwc2_device_t *dev, hwc2_display_t d, 
     (void)dev; CHK_DISPLAY(d); if (t) *t = HWC2_DISPLAY_CONNECTION_TYPE_INTERNAL; return HWC2_ERROR_NONE;
 }
 static int32_t h_getDisplayVsyncPeriod(hwc2_device_t *dev, hwc2_display_t d, hwc2_vsync_period_t *p) {
-    (void)dev; CHK_DISPLAY(d); if (p) *p = VSYNC_NS; return HWC2_ERROR_NONE;
+    (void)dev; CHK_DISPLAY(d); if (p) *p = (hwc2_vsync_period_t)g_report_ns; return HWC2_ERROR_NONE;
 }
 static int32_t h_setActiveConfigWithConstraints(hwc2_device_t *dev, hwc2_display_t d, hwc2_config_t c,
         hwc_vsync_period_change_constraints_t *cons, hwc_vsync_period_change_timeline_t *tl) {
@@ -1109,6 +1136,7 @@ static int hwc_open(const struct hw_module_t *module, const char *name, struct h
         pthread_mutex_unlock(&g_lock);
         LOGI("hwc2fb open: %dx%d -> %s (%dbpp)", g_w, g_h, g_fbpath, g_fbbpp);
         pthread_t th;
+        read_refresh();
         pthread_create(&th, NULL, worker, NULL);
         pthread_detach(th);
     } else pthread_mutex_unlock(&g_lock);

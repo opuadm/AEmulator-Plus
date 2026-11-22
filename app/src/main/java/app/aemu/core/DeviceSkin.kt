@@ -33,6 +33,23 @@ data class SkinRect(val l: Float, val t: Float, val r: Float, val b: Float) {
     }
 }
 
+/** A point on a skin picture, in fractions of the picture's width and height (0..1): where the emulated LED sits. */
+data class SkinPoint(val x: Float, val y: Float) {
+    fun moved(dx: Float, dy: Float) = SkinPoint((x + dx).coerceIn(0f, 1f), (y + dy).coerceIn(0f, 1f))
+    fun toJson(): JSONArray = JSONArray().put(x.toDouble()).put(y.toDouble())
+
+    companion object {
+        /** how far above the screen's top edge the LED starts (fraction of the picture's height) */
+        const val LED_GAP = 0.012f
+        /** the LED's home: centred right above the screen, where it has always been shown */
+        fun aboveScreen(screen: SkinRect) = SkinPoint((screen.l + screen.r) / 2f, (screen.t - LED_GAP).coerceAtLeast(0.01f))
+        fun fromJson(a: JSONArray?): SkinPoint? = a?.takeIf { it.length() == 2 }?.let {
+            val x = it.optDouble(0).toFloat(); val y = it.optDouble(1).toFloat()
+            if (x.isNaN() || y.isNaN()) null else SkinPoint(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
+        }
+    }
+}
+
 /** A hardware key drawn on the skin (Back, Home, Menu...): touching that part of the picture presses the key. */
 data class SkinKey(val button: NavButton, val area: SkinRect) {
     fun toJson(): JSONObject = JSONObject().put("key", button.id).put("area", area.toJson())
@@ -50,7 +67,9 @@ object DeviceSkin {
     val RESOLUTIONS = listOf(240 to 320, 320 to 480, 480 to 800, 480 to 854, 540 to 960, 720 to 1280, 768 to 1280, 800 to 1280, 1080 to 1920)
 
     /** Pixel rectangles of one layout, in the coordinates of the area the skin is drawn in. */
-    data class Layout(val image: Box, val screen: Box, val guest: Box, val keys: List<Pair<NavButton, Box>>)
+    data class Layout(val image: Box, val screen: Box, val guest: Box, val keys: List<Pair<NavButton, Box>>,
+                      /** centre of the LED in pixels, null = the skin gives none (the LED stays at the top centre) */
+                      val led: Pair<Int, Int>? = null)
     data class Box(val left: Int, val top: Int, val width: Int, val height: Int) {
         val right get() = left + width
         val bottom get() = top + height
@@ -62,7 +81,7 @@ object DeviceSkin {
      * kept for the on-screen bar).
      */
     fun layout(areaW: Int, areaH: Int, imageW: Int, imageH: Int, screen: SkinRect, keys: List<SkinKey>,
-               guestW: Int, guestH: Int, offsetX: Int = 0, offsetY: Int = 0): Layout {
+               guestW: Int, guestH: Int, offsetX: Int = 0, offsetY: Int = 0, led: SkinPoint? = null): Layout {
         val scale = minOf(areaW.toFloat() / imageW.coerceAtLeast(1), areaH.toFloat() / imageH.coerceAtLeast(1))
         val iw = imageW * scale; val ih = imageH * scale
         val ix = offsetX + (areaW - iw) / 2f; val iy = offsetY + (areaH - ih) / 2f
@@ -72,7 +91,8 @@ object DeviceSkin {
         val g = minOf(s.width.toFloat() / guestW.coerceAtLeast(1), s.height.toFloat() / guestH.coerceAtLeast(1))
         val gw = (guestW * g).roundToInt().coerceAtLeast(1); val gh = (guestH * g).roundToInt().coerceAtLeast(1)
         return Layout(Box(ix.roundToInt(), iy.roundToInt(), iw.roundToInt(), ih.roundToInt()), s,
-            Box(s.left + (s.width - gw) / 2, s.top + (s.height - gh) / 2, gw, gh), keys.map { it.button to box(it.area) })
+            Box(s.left + (s.width - gw) / 2, s.top + (s.height - gh) / 2, gw, gh), keys.map { it.button to box(it.area) },
+            led?.let { (ix + it.x * iw).roundToInt() to (iy + it.y * ih).roundToInt() })
     }
 
     /**

@@ -145,6 +145,16 @@ object AudioHalAbi {
         if (found > 0) found else null
     }.getOrNull()
 
+    /**
+     * Added for AEmulator Plus, 2026-11-20. API levels on which the firmware's libnbaio may carry the CAF direct-track stream
+     * tail (see [usesDirectTrackTail]). This was 19..20, so an LG 5.0.1 (API 21) build with the very same libnbaio got the
+     * AOSP-layout HAL: its audio_stream_out is calloc'ed 8 bytes short of the +0x68 slot libnbaio reads
+     * get_presentation_position from, the read returns heap garbage (2) and AudioOut_2 calls it ("SIGSEGV pc=0x00000002, lr in
+     * libnbaio.so", mediaserver code 139 on every start). Widening the range cannot misdetect: the detector still has to find the
+     * exact Thumb prefix of the +0x68 reader, which the AOSP slot 0x60 does not match.
+     */
+    fun directTrackApi(api: Int): Boolean = api in 19..22
+
     fun usesDirectTrackTail(elf: ByteArray): Boolean {
         if (elf.size < 52 || elf[0] != 0x7f.toByte() || elf[1] != 'E'.code.toByte() ||
             elf[2] != 'L'.code.toByte() || elf[3] != 'F'.code.toByte() ||

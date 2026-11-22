@@ -23,4 +23,8 @@ class AudioHalAbiTest {
             assertFalse(AudioHalAbi.usesDirectTrackTail(fixture().apply { this[offset] = 2 }))
         }
     }
+    @Test fun directTrackApiCoversKitKatThroughLollipop() {
+        for (api in 19..22) assertTrue(api.toString(), AudioHalAbi.directTrackApi(api))
+        for (api in listOf(0, 16, 18, 23, 29)) assertFalse(api.toString(), AudioHalAbi.directTrackApi(api))
+    }
 }

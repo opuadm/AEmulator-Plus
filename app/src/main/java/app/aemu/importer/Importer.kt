@@ -1,3 +1,4 @@
+/* Modified for AEmulator Plus, 2026-11-22: a rar is first read by libaemuarc (RarReaders: RAR 3/4/5, PPMd, filters, solid; several times faster than junrar, and the only reader of RAR 5); junrar remains the fallback for what the native reader refuses (RAR 1.x/2.x, volume sets, custom filters) or fails on. */
 /* Modified for AEmulator Plus, 2026-11-18: a rar is unpacked whole to a temp folder in one pass and planned/imported from the files, like a 7z (extractRar, importExtractedArchive); planRar and its repeated per-member extraction are gone. */
 /* Modified for AEmulator Plus, 2026-11-15: Microsoft MS_ProjectA (Windows 10 Mobile Android subsystem) import: an LZX .cab holding aow.wim, or the bare WIM (importWindowsCab, importWimFile).
  * Modified for AEmulator Plus, 2026-11-07: the choice between several images in a 7z (system_a.img / system_b.img) unpacks the whole archive to a temp folder first and plans on the files (extractSevenZ, planExtracted). */
@@ -13,6 +14,7 @@
 package app.aemu.importer
 
 import app.aemu.R
+import app.aemu.archive.RarReaders
 import app.aemu.archive.SevenZReaders
 import app.aemu.archive.ArcStreams
 import android.content.Context
@@ -150,31 +152,39 @@ class Importer(
                 readSource(s, plan?.canonical?.get(iv.index.toString()) ?: s.name)
             }
             if (plan != null) for ((i, s) in ordered.withIndex()) if (i.toString() in plan.skip) log("skipped ${s.name}: another image of the same partition was chosen")
-            useDeferredBoot()
-            // build.prop is optional: some dumps/ports lack it, Analyzer infers the version from the tree
-            if (LegacyFirmware.frameworkDirName(root) == null && !File(root, "system/build.prop").isFile)
-                throw LocalizedIOException("no Android system partition found in file", R.string.imp_no_android_system_partition_found_in)
-            finishTree()
-            applyPendingCsc()
-            if (recovery == null) runCatching { rebuildRecoveryFromBoot() }.onFailure { log("recovery: rebuild from boot failed (${it.message}), skipped") }
-            if (recovery != null) recovery?.let { r -> runCatching { RecoveryImage.install(paths, r, log) }.onFailure { log("recovery: install failed (${it.message}), skipped") } }
-            // no recovery image of its own: early Samsung kernels hold the recovery in the same initramfs as Android's init.rc
-            else ramdisk?.let { rd -> runCatching { RecoveryImage.installEmbedded(paths, rd, log) }.onFailure { log("recovery: embedded recovery cannot be installed (${it.message}), skipped") } }
-            onProgress(lt(R.string.imp_analyzing_firmware), 0.97f)
-            val img = Analyzer(ctx, paths, ramdisk).analyze(id, name)
-            // x86 5.x/6.0 firmware of real devices has no libGLES_android.so: libEGL then aborts SurfaceFlinger
-            X86SoftwareGles.ensure(ctx, root, img.api, log)
-            TreeFixer(ctx, paths, img, log).sanitize()
-            ImageStore.save(ctx, img.copy(sizeBytes = ImageStore.du(paths.dir)))
-            onProgress(lt(R.string.import_ready), 1f)
-            log("import: $files files, ${bytes shr 20} MB")
-            return ImageStore.get(ctx, id)!!
+            return finishImport(id, name)
         } catch (t: Throwable) {
             ImageStore.delete(ctx, id)
             throw t
         } finally {
             tmp.listFiles()?.forEach { deleteTree(it) }
         }
+    }
+
+    /**
+     * The end of every import, whatever the container was: the deferred boot image is applied, the tree is checked and
+     * completed, the recovery is installed, the firmware analysed and sanitised, the machine saved.
+     */
+    private fun finishImport(id: String, name: String): GuestImage {
+        useDeferredBoot()
+        // build.prop is optional: some dumps/ports lack it, Analyzer infers the version from the tree
+        if (LegacyFirmware.frameworkDirName(root) == null && !File(root, "system/build.prop").isFile)
+            throw LocalizedIOException("no Android system partition found in file", R.string.imp_no_android_system_partition_found_in)
+        finishTree()
+        applyPendingCsc()
+        if (recovery == null) runCatching { rebuildRecoveryFromBoot() }.onFailure { log("recovery: rebuild from boot failed (${it.message}), skipped") }
+        if (recovery != null) recovery?.let { r -> runCatching { RecoveryImage.install(paths, r, log) }.onFailure { log("recovery: install failed (${it.message}), skipped") } }
+        // no recovery image of its own: early Samsung kernels hold the recovery in the same initramfs as Android's init.rc
+        else ramdisk?.let { rd -> runCatching { RecoveryImage.installEmbedded(paths, rd, log) }.onFailure { log("recovery: embedded recovery cannot be installed (${it.message}), skipped") } }
+        onProgress(lt(R.string.imp_analyzing_firmware), 0.97f)
+        val img = Analyzer(ctx, paths, ramdisk).analyze(id, name)
+        // x86 5.x/6.0 firmware of real devices has no libGLES_android.so: libEGL then aborts SurfaceFlinger
+        X86SoftwareGles.ensure(ctx, root, img.api, log)
+        TreeFixer(ctx, paths, img, log).sanitize()
+        ImageStore.save(ctx, img.copy(sizeBytes = ImageStore.du(paths.dir)))
+        onProgress(lt(R.string.import_ready), 1f)
+        log("import: $files files, ${bytes shr 20} MB")
+        return ImageStore.get(ctx, id)!!
     }
 
     private fun readSource(s: Source, name: String) {
@@ -222,6 +232,344 @@ class Importer(
         if (uri.scheme == "file") uri.path?.let { android.os.ParcelFileDescriptor.open(File(it), android.os.ParcelFileDescriptor.MODE_READ_ONLY) }
         else ctx.contentResolver.openFileDescriptor(uri, "r")
 
+    // ------------------------------------------------------------------ the one pipeline every container ends in
+
+    /**
+     * Every container (zip, 7z, rar, tar, KDZ / DZ, PAC, payload.bin, a disk with a partition table, a super image ...) only
+     * unpacks. What it unpacks, as [Staged] pieces, comes here, and this is the only place that decides
+     *  1. what each piece is: [PartKinds.classify], by the name, the magic bytes and what the container said it was;
+     *  2. which pieces the guest needs: a super image is replaced by its logical partitions (cut out in place, nothing copied),
+     *     bootloader / modem / vbmeta / data partitions are dropped, of several images of one partition the best one is used
+     *     (a standalone vendor.img beats the vendor inside super, slot "a" beats "b", a block-OTA pair or a set of sparse chunks
+     *     is only a fallback for a missing direct image);
+     *  3. in what order they are read: system first (it resets the tree layout), then vendor and the optional partitions
+     *     (system_ext, product, odm, the skins' own), then the boot side.
+     * A piece that is no partition at all (a nested archive, an unknown firmware container) goes back to [handle].
+     * The end of the import is [finishImport], run once by [importAll].
+     */
+    private fun importStaged(items: List<Staged>, origin: String, depth: Int) {
+        try {
+            val picks = ArrayList<Pick>()
+            val others = ArrayList<Staged>()
+            for (s in items) expandInto(s, picks, others)
+            for (p in choose(picks)) {
+                if (cancelled) throw IOException("cancelled")
+                applyPick(p)
+                if (p.s.origin == 0) p.s.release()
+            }
+            for (o in others) {
+                if (cancelled) throw IOException("cancelled")
+                try {
+                    // whitelist: a piece that is neither a known partition nor something that can hold one is not read at all
+                    if (holdsPartitions(o)) handleStaged(o, depth) else log("skipped ${o.name}: not a partition the guest uses")
+                } finally { o.release() }
+            }
+        } finally { items.forEach { it.release() } }
+    }
+
+    /** One file that was recognised somewhere as a partition (or may be one): the single-image way into [importStaged]. */
+    private fun stage(src: RandomSource, name: String, role: FirmwareToolset.Role?, depth: Int, hint: Part? = null) =
+        importStaged(listOf(SourceStaged(name, src, role).also { it.hint = hint }), name, depth)
+
+    /** A piece that is a partition: [part] says which, [head] is its first bytes (read only when something asks). */
+    private class Pick(val s: Staged, val part: Part, val base: String, headOf: () -> ByteArray) {
+        val head: ByteArray by lazy(headOf)
+    }
+
+    private fun headOf(src: RandomSource, n: Int): ByteArray {
+        val buf = ByteBuffer.allocate(minOf(src.size, n.toLong()).toInt())
+        src.read(0, buf)
+        return buf.array()
+    }
+
+    private fun expandInto(s: Staged, picks: MutableList<Pick>, others: MutableList<Staged>) {
+        if (cancelled) throw IOException("cancelled")
+        val norm = s.name.replace('\\', '/')
+        val base = norm.substringAfterLast('/')
+        // a caller that already knows what the piece is (it matched it by name or content) says so: nothing is read for it here
+        var part = s.hint ?: PartKinds.classify(base, s.use { headOf(it, 4160) }, PartitionNames.bareOk(norm, s.size), s.role)
+        // an image no name says anything about (mmcblk0p9, a GSI ...): a system partition only if its content says so
+        // (build.prop / framework in the file system); a userdata or cache image is not one
+        if (part.kind == PartKind.OTHER && s.size > 4096) s.use { contentKind(it) }?.let { part = it }
+        when (part.kind) {
+            PartKind.SKIP -> { log("skipped ${s.name}: partition the guest does not use"); s.release() }
+            PartKind.OTHER -> others.add(s)
+            PartKind.SUPER -> expandSuper(s, picks)
+            else -> picks.add(Pick(s, part, base) { s.use { headOf(it, 4160) } })
+        }
+    }
+
+    /**
+     * A "super" partition (dynamic partitions, Android 10+; a fastboot sparse super.img too) is replaced by its logical partitions:
+     * system, vendor, system_ext, product, odm and the rest, each cut out by its extents and read in place.
+     */
+    private fun expandSuper(s: Staged, picks: MutableList<Pick>) {
+        s.use { raw ->
+            val src = if (SparseSource.probe(raw)) SparseSource(listOf(raw)) else raw
+            val first = ByteBuffer.allocate(LP_PROBE).also { src.read(0, it) }.array()
+            val need = LpMetadata.headSize(first) ?: throw LocalizedIOException("super: unreadable partition metadata", R.string.imp_unreadable_gpt, "super")
+            val head = if (need <= first.size) first else ByteBuffer.allocate(need).also { src.read(0, it) }.array()
+            val parts = LpMetadata.parse(head) ?: throw LocalizedIOException("super: unreadable partition metadata", R.string.imp_unreadable_gpt, "super")
+            val list = LpMetadata.pick(parts)
+            if (list.isEmpty()) { log("super: no system partition among ${parts.joinToString { it.name }}"); return@use }
+            log("super: " + list.joinToString { "${it.name} ${it.size shr 20} MB" })
+            for (p in list) {
+                val logical = LpMetadata.baseName(p.name)
+                val part = PartKinds.logical(logical)
+                if (part.kind == PartKind.SKIP) { log("super: $logical skipped, not a name the guest root can hold"); continue }
+                val piece = SliceStaged("$logical.img", s, p.extents.map { it.superOffset to it.length }).also { it.origin = 1 }
+                picks.add(Pick(piece, part, "$logical.img") { piece.use { headOf(it, 4160) } })
+            }
+        }
+    }
+
+    /** What is read, in what order, and what is left out: see [importStaged]. */
+    private fun choose(picks: List<Pick>): List<Pick> {
+        fun slot(p: Pick) = if (p.base.lowercase().substringBefore('.').endsWith("_b")) 1 else 0
+        fun depth(p: Pick) = p.s.name.count { it == '/' || it == '\\' }
+        val better = compareBy<Pick>({ it.s.fallback }, { it.s.origin }, { slot(it) }, { depth(it) })
+        val kept = ArrayList<Pick>()
+        // boot-side images are not narrowed down here: takeBoot / takeRecovery keep the first usable one (shallowest first)
+        val groups = LinkedHashMap<String, MutableList<Pick>>()
+        for (p in picks) {
+            when (p.part.kind) {
+                PartKind.BOOT, PartKind.RECOVERY, PartKind.VENDOR_BOOT -> kept.add(p)
+                else -> groups.getOrPut("${p.part.kind}:${p.part.mount}") { ArrayList() }.add(p)
+            }
+        }
+        // two or more direct images of one partition (system_a + system_b slots excepted): the same question an archive raises
+        // (an inactive "_b" slot only counts when there is no "_a" / unsuffixed image)
+        fun direct(g: List<Pick>) = g.filter { !it.s.fallback && it.s.origin == 0 }.sortedWith(better).let { d -> d.filter { slot(it) == 0 }.ifEmpty { d } }
+        fun contested(g: List<Pick>) = direct(g).size > 1
+        val questions = groups.values.count { contested(it) }
+        var asked = 0
+        for ((key, g) in groups) {
+            var best = g.minWithOrNull(better)!!
+            if (contested(g)) {
+                val opts = direct(g)
+                val pick = chooser?.choose(PartitionPrompt(key.substringBefore(':').lowercase(), ++asked, questions, opts.map { it.s.name })) ?: 0
+                if (pick == PartitionChooser.CANCEL || cancelled) throw IOException("cancelled")
+                best = opts.getOrElse(pick) { opts[0] }
+            }
+            for (p in g) if (p !== best) log("skipped ${p.s.name}: ${best.s.name} is used for the same partition")
+            kept.add(best)
+        }
+        val wanted = kept.filter { p ->
+            when {
+                // a block-OTA pair or a set of sparse chunks only stands in for an image that is missing
+                p.s.fallback && p.part.kind == PartKind.SYSTEM && gotSystem -> false
+                p.s.fallback && p.part.kind == PartKind.VENDOR && gotVendor -> false
+                p.s.fallback && p.part.kind == PartKind.OEM && gotOem -> false
+                // the package has a vendor image of its own: the vendor inside "super" is not read a second time
+                p.part.kind == PartKind.VENDOR && p.s.origin == 1 && archiveHasVendorImage -> {
+                    log("super: vendor skipped, the package has a vendor image of its own"); false
+                }
+                else -> true
+            }
+        }
+        val extraOrder = listOf("system/system_ext", "system/product", "odm")
+        fun rank(p: Pick) = when (p.part.kind) {
+            PartKind.SYSTEM -> 0
+            PartKind.VENDOR -> 1
+            PartKind.EXTRA -> 2 + (extraOrder.indexOf(p.part.mount).let { if (it < 0) extraOrder.size else it })
+            PartKind.OEM -> 10
+            PartKind.GAPPS -> 11
+            PartKind.VENDOR_BOOT -> 12
+            PartKind.BOOT -> 13
+            PartKind.RECOVERY -> 14
+            else -> 20
+        }
+        return wanted.sortedWith(compareBy<Pick>({ rank(it) }, { depth(it) }))
+    }
+
+    private fun applyPick(p: Pick) {
+        val s = p.s
+        onProgress(lt(R.string.imp_extracting, p.base), -1f)
+        log("import: ${p.part.kind.name.lowercase()}${p.part.mount?.let { " -> /$it" } ?: ""} <- ${s.name}")
+        keepStockImage = s.keepStock && p.part.kind == PartKind.SYSTEM
+        try {
+            s.use { src ->
+                when (p.part.kind) {
+                    PartKind.SYSTEM -> {
+                        importImage(if (SparseSource.probe(src)) SparseSource(listOf(src)) else src, "system")
+                        gotSystem = true
+                    }
+                    PartKind.VENDOR -> importVendor(src)
+                    PartKind.OEM -> importOem(src)
+                    PartKind.GAPPS -> importGapps(src)
+                    PartKind.EXTRA -> importExtraAt(src, p.part.mount!!)
+                    PartKind.VENDOR_BOOT -> takeVendorBoot(src)
+                    PartKind.RECOVERY -> takeRecovery(streamOf(src), recoveryLabel(p.base, p.head))
+                    PartKind.BOOT -> if (ramdisk == null) applyBootImage(src, p)
+                    else -> {}
+                }
+            }
+        } finally { keepStockImage = false }
+    }
+
+    /** boot.img: the ramdisk, or the kernel version. An unnamed image whose ramdisk carries /sbin/recovery is a recovery. */
+    private fun applyBootImage(src: RandomSource, p: Pick) {
+        val data = readAllFrom(src)
+        val named = PartitionNames.isBoot(p.base, bareOk = true)
+        if (p.s.role != FirmwareToolset.Role.BOOT && !named && isAndroidImage(p.head) && hasRecoveryBinary(data))
+            takeRecovery(data.inputStream(), recoveryLabel(p.s.name, p.head))
+        else takeBoot(data)
+    }
+
+    /** Paths that mark a system tree: a classic /system, or the same one a level down in a system-as-root partition. */
+    private val SYSTEM_MARKERS = setOf("build.prop", "framework", "javalib", "system/build.prop", "system/framework")
+
+    /**
+     * What an image no name says anything about is, by its content: a dynamic-partitions container (LP metadata, also behind a
+     * sparse layer), or a system partition, i.e. a file system (ext4, EROFS, UBIFS, YAFFS2, SquashFS, also Motorola-signed or
+     * sparse) that holds a system tree, either at its top level or, for system-as-root, under system/. Null for anything else.
+     */
+    private fun contentKind(raw: RandomSource): Part? = runCatching {
+        val src = if (SparseSource.probe(raw)) SparseSource(listOf(raw)) else MotoImage.unwrap(raw)
+        val first = ByteBuffer.allocate(LP_PROBE).also { src.read(0, it) }.array()
+        when {
+            LpMetadata.headSize(first) != null -> Part.SUPER
+            systemTree(src) || isSquashFs(first) && squashHoldsSystem(src) -> Part.SYSTEM
+            else -> null
+        }
+    }.getOrNull()
+
+    private fun isSquashFs(h: ByteArray) = h.size >= 4 &&
+        (String(h, 0, 4, Charsets.ISO_8859_1).let { it == "hsqs" || it == "sqsh" })
+
+    /** ext4 / EROFS / UBIFS / YAFFS2: walks only until the first marker. */
+    private fun systemTree(src: RandomSource): Boolean {
+        var found = false
+        try {
+            when {
+                Ext4Reader.probe(src) -> Ext4Reader(src).let { fs ->
+                    if (AbLayout.isSystemAsRoot(fs)) return true
+                    fs.walk { path, _ -> if (path in SYSTEM_MARKERS) { found = true; throw FirstEntry() } }
+                }
+                ErofsReader.probe(src) -> ErofsReader(src).let { fs ->
+                    found = SYSTEM_MARKERS.any { fs.lookup(it) != null }
+                }
+                UbiFsReader.probe(src) -> UbiFsReader(src).walk { path, _ -> if (path in SYSTEM_MARKERS) { found = true; throw FirstEntry() } }
+                Yaffs2Reader.probe(src) -> Yaffs2Reader(src).walk { path, _ -> if (path in SYSTEM_MARKERS) { found = true; throw FirstEntry() } }
+            }
+        } catch (_: FirstEntry) {}
+        return found
+    }
+
+    /** SquashFS has no reader of its own here: the toolset converts it to a zip, whose entries are looked at (the first folder is the image's own). */
+    private fun squashHoldsSystem(src: RandomSource): Boolean {
+        val f = spill(streamOf(src), "probe.sqsh")
+        val work = File(tmp, "sqsh-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            val zip = FirmwareToolset.extract(f, work) { msg -> log(msg) }.firstOrNull { it.file.isFile }?.file ?: return false
+            return ZipFile.builder().setFile(zip).get().use { z ->
+                z.entries.toList().any { e -> e.name.replace('\\', '/').substringAfter('/', "").trimEnd('/') in SYSTEM_MARKERS }
+            }
+        } finally { deleteTree(work); deleteTree(f.parentFile ?: f) }
+    }
+
+    /** An archive, a compressed file or a firmware container: the only non-partition pieces worth opening. */
+    private fun holdsPartitions(s: Staged): Boolean {
+        val base = s.name.replace('\\', '/').substringAfterLast('/')
+        if (s.role == FirmwareToolset.Role.ARCHIVE || recognizedFirmwareTool(base, true) || NandDump.isMtdName(base)) return true
+        if (base.endsWith(".sin", true) || base.endsWith(".ftf", true) || base.endsWith(".tar", true) || base.endsWith(".md5", true) ||
+            base.endsWith(".win", true) || base.endsWith(".app", true)) return true
+        val h = s.use { headOf(it, 1100) }
+        fun at(vararg v: Int) = h.size >= v.size && v.indices.all { (h[it].toInt() and 255) == v[it] }
+        return at('P'.code, 'K'.code) || at('7'.code, 'z'.code) || at('R'.code, 'a'.code, 'r'.code) || at(0x1f, 0x8b) || at('M'.code, 'S'.code, 'C'.code, 'F'.code) ||
+            isTar(h) || ImageCodecs.detect(h, base) != null || FirmwareToolset.isHtcContainer(h) ||
+            (h.size >= 6 && String(h, 0, 5, Charsets.US_ASCII) == "07070") ||
+            CrxContainer.probe(h) || WimReader.probe(h) || HuaweiApp.probe(h) || AcerBin.probe(h) ||
+            (s.size > (1L shl 20) && (GptDisk.probe(h) || MbrDisk.probe(h))) || s.use { Iso9660.probe(it) }
+    }
+
+    /** A piece that is no partition (a nested archive, a firmware container): read like any file that was picked. */
+    private fun handleStaged(s: Staged, depth: Int) {
+        val name = s.name.replace('\\', '/').substringAfterLast('/')
+        if (s is FileStaged) FileChannel.open(s.file.toPath(), StandardOpenOption.READ).use { c -> handle(ChannelSource(c), c, name, depth + 1, s.role) }
+        else s.use { src -> handle(src, null, name, depth + 1, s.role) }
+    }
+
+    /** [base] under the folder of [path], so a piece keeps the depth it had in its archive (the shallowest boot image wins). */
+    private fun inFolder(path: String, base: String): String =
+        path.replace('\\', '/').substringBeforeLast('/', "").let { if (it.isEmpty()) base else "$it/$base" }
+
+    /**
+     * A zip entry as a piece. A stored entry is read in place, every time; a compressed one is inflated to a temp file the first
+     * time it is read and kept until it is released (a super image is read once per logical partition, it must not inflate again).
+     */
+    private fun zipStaged(zip: ZipFile, e: ZipArchiveEntry, name: String, hint: Part?): Staged {
+        val ch = zipChannel
+        var at = -1L
+        if (e.method == ZipArchiveEntry.STORED && ch != null) {
+            runCatching { zip.getRawInputStream(e).close() } // works out dataOffset
+            if (e.dataOffset > 0) at = e.dataOffset
+        }
+        val piece: Staged = if (at > 0 && ch != null) object : Staged(name) {
+            override val size: Long = e.size
+            override fun <T> use(block: (RandomSource) -> T): T = block(ChannelSource(ch, at, e.size))
+        } else object : Staged(name) {
+            private var file: File? = null
+            override val size: Long = maxOf(0L, e.size)
+            override fun <T> use(block: (RandomSource) -> T): T {
+                val f = file ?: spillEntry(zip, e).also { file = it }
+                return FileChannel.open(f.toPath(), StandardOpenOption.READ).use { block(ChannelSource(it)) }
+            }
+            override fun release() { file?.delete(); file = null }
+        }
+        piece.hint = hint
+        return piece
+    }
+
+    /** The partition of a block OTA inside a zip, rebuilt to a raw image only if the pipeline needs it. Only a fallback. */
+    private fun otaPairStaged(zip: ZipFile, dataE: ZipArchiveEntry, listE: ZipArchiveEntry, partition: String): Staged {
+        val hint = when (partition) {
+            "system" -> Part.SYSTEM
+            "vendor" -> Part.VENDOR
+            else -> Part(PartKind.EXTRA, PartitionNames.extraMount("$partition.img") ?: "system/$partition")
+        }
+        val piece = object : Staged("$partition.img") {
+            private var raw: File? = null
+            override val size: Long get() = raw?.length() ?: 0L
+            override fun <T> use(block: (RandomSource) -> T): T {
+                val f = raw ?: build().also { raw = it }
+                return FileChannel.open(f.toPath(), StandardOpenOption.READ).use { block(ChannelSource(it)) }
+            }
+            private fun build(): File {
+                onProgress(lt(R.string.imp_building_img_from_ota, partition), 0.5f)
+                val list = zip.getInputStream(listE).use { String(it.readBytes(), Charsets.UTF_8) }
+                val out = File(tmp, "$partition.raw")
+                zip.getInputStream(dataE).use { s ->
+                    val data = if (dataE.name.endsWith(".br", true)) ArcStreams.brotli(s) else s
+                    TransferList.build(list, data, out)
+                }
+                return out
+            }
+            override fun release() { raw?.delete(); raw = null }
+        }
+        piece.hint = hint
+        piece.fallback = true
+        piece.keepStock = partition == "system"
+        return piece
+    }
+
+    /**
+     * Split sparse chunks (system.img_sparsechunk.N, vendor.N ...) as one piece. Names like system.0 are ambiguous, so only a
+     * real sparse set counts; anything else is left alone. Only a fallback for a missing direct image.
+     */
+    private fun sparseSetStaged(parts: List<Staged>, partition: String): Staged? {
+        if (parts.isEmpty()) return null
+        val first = parts.first().name.substringAfterLast('/')
+        if (!parts.all { p -> p.use { SparseSource.probe(it) } }) {
+            log("ignoring $first: not a sparse image set"); parts.forEach { it.release() }; return null
+        }
+        log("sparse $partition in ${parts.size} part(s): ${parts.joinToString { it.name.substringAfterLast('/') }}")
+        return SparseSetStaged("$partition.img", parts).also {
+            it.hint = if (partition == "system") Part.SYSTEM else Part.VENDOR
+            it.fallback = true
+        }
+    }
+
     // ------------------------------------------------------------------ разбор контейнеров
 
     private fun handle(src: RandomSource, ch: FileChannel?, name: String, depth: Int, role: FirmwareToolset.Role? = null) {
@@ -237,7 +585,7 @@ class Importer(
         val bareRamdisk = decodeBareRamdisk(src, name, h)
         // a file called just "system" / "vendor" / "boot" ... (no extension): a partition image if it is big enough to be one
         val bare = PartitionNames.bareOk(name.replace('\\', '/'), src.size)
-        val codec = ImageCodecs.detect(h, name)?.takeIf { it != ImageCodecs.Codec.LZ4 }
+        val codec = ImageCodecs.detect(h, name)?.takeIf { it != ImageCodecs.Codec.LZ4 && it != ImageCodecs.Codec.LZ4_LEGACY }
         when {
             bareRamdisk != null -> takeBareRamdisk(bareRamdisk, name)
             // Chrome extension container (.crx / .crx3): a ZIP behind a header; the Play Games developer emulator is one
@@ -257,20 +605,8 @@ class Importer(
             depth > 0 && isSkippablePartition(name, h) -> log("skipped $name: partition the guest does not use")
             // raw NAND partition dump (mtd0.img ... mtdN.img): nothing in the name says which partition it is
             NandDump.isMtdName(name.replace('\\', '/').substringAfterLast('/')) -> importMtdDump(src, name)
-            name.endsWith(".ofp", true) && h.size > 4 && h[0] == 'P'.code.toByte() && h[1] == 'K'.code.toByte() && h[2].toInt() == 3 && h[3].toInt() == 4 -> {
-                val source = spill(streamOf(src), name)
-                val toolWork = File(tmp, "tool-${System.nanoTime()}").apply { mkdirs() }
-                try {
-                    val artifacts = FirmwareToolset.extract(source, toolWork) { msg -> log(msg) }
-                    if (artifacts.isEmpty()) throw LocalizedIOException("OFP ZIP produced no files", R.string.imp_ofp_zip_produced_no_files)
-                    for (artifact in artifacts) {
-                        if (!artifact.file.isFile) continue
-                        FileChannel.open(artifact.file.toPath(), StandardOpenOption.READ).use { c ->
-                            handle(ChannelSource(c), c, artifact.file.name, depth + 1, artifact.role)
-                        }
-                    }
-                } finally { deleteTree(toolWork); source.delete() }
-            }
+            name.endsWith(".ofp", true) && h.size > 4 && h[0] == 'P'.code.toByte() && h[1] == 'K'.code.toByte() && h[2].toInt() == 3 && h[3].toInt() == 4 ->
+                importViaToolset(src, name, depth)
             // Sony .sin partition image (a member of an .ftf bundle, or picked on its own); v4 is a bare tar/gzip,
             // so the name is checked before the archive probes below
             name.endsWith(".sin", true) || (h.size > 4 && h[0].toInt() == 3 && String(h, 1, 3, Charsets.ISO_8859_1) == "SIN") ->
@@ -305,25 +641,21 @@ class Importer(
             // HTC: RUU_*.exe installer, Dream-style .nbh, 256-byte-signed rom.zip / *_signed.img.
             // Routed explicitly so the heuristic probes below never look at a multi-hundred-MB executable.
             FirmwareToolset.isHtcContainer(h) -> importViaToolset(src, name, depth)
-            // A boot/recovery image that a container extractor (PAC, NBH, TOT/BIN, KDZ, OFP, payload.bin, RUU, ...)
-            // already classified: its role decides, whatever the partition happened to be called in that container
-            // ("005-recovery.img", "02_Recovery.img", "mmcblk0p15", ...).
-            // oem: optional, never boot-critical. Matched before the sparse/ext4 probes below, which would take it for system.
-            role == FirmwareToolset.Role.OEM || isOemName(name.replace('\\', '/').substringAfterLast('/'), bare) -> importOem(src)
-            // optional /vendor partition (vendor.img, vendor_a.bin): matched before the ext4 probe, which would take it for system
-            isVendorName(name.replace('\\', '/').substringAfterLast('/'), bare) -> importVendor(src)
-            // product / system_ext / odm and the skins' own partitions (mi_ext, my_*, vgc, prism, optics)
-            isExtraName(name.replace('\\', '/').substringAfterLast('/'), bare) -> importExtra(src, name.replace('\\', '/').substringAfterLast('/'))
-            role == FirmwareToolset.Role.RECOVERY && src.size < 64_000_000 && isAndroidImage(h) ->
-                takeRecovery(streamOf(src), recoveryLabel(name, h))
-            role == FirmwareToolset.Role.RECOVERY && src.size < 64_000_000 && isLz4Frame(h) ->
-                takeRecovery(streamOf(src), recoveryLabel(name, h))
-            SparseSource.probe(src) -> importImage(SparseSource(listOf(src)), "system")
-            Ext4Reader.probe(src) -> importImage(src, "system")
-            MotoImage.probe(src) -> importImage(src, "system")
-            UbiFsReader.probe(src) -> importImage(src, "system")
-            Yaffs2Reader.probe(src) -> importImage(src, "system")
-            ErofsReader.probe(src) -> importImage(src, "system")
+            // Everything that is a partition goes the same way as the pieces of an archive do: through importStaged, which decides
+            // what it is, whether the guest needs it and where it is read to. The arms here only say "this is a partition" early
+            // enough that the generic probes below (sparse / ext4 / tar / gzip ...) do not take it for something else.
+            // oem / vendor / product, system_ext, odm and the skins' own partitions / a dynamic-partitions container (super), and a
+            // boot-side image that a container extractor (PAC, NBH, TOT/BIN, KDZ, OFP, payload.bin, RUU, ...) already classified:
+            // its role decides, whatever the partition happened to be called in that container ("005-recovery.img", "mmcblk0p15", ...)
+            role == FirmwareToolset.Role.OEM || isOemName(name.replace('\\', '/').substringAfterLast('/'), bare) ||
+                isVendorName(name.replace('\\', '/').substringAfterLast('/'), bare) ||
+                isExtraName(name.replace('\\', '/').substringAfterLast('/'), bare) ||
+                PartitionNames.isSuper(name.replace('\\', '/').substringAfterLast('/'), bare) ||
+                role == FirmwareToolset.Role.RECOVERY && src.size < 64_000_000 && (isAndroidImage(h) || isLz4(h)) ->
+                stage(src, name, role, depth)
+            // an image no name says anything about: a system partition if its file system says so
+            SparseSource.probe(src) || Ext4Reader.probe(src) || MotoImage.probe(src) || UbiFsReader.probe(src) ||
+                Yaffs2Reader.probe(src) || ErofsReader.probe(src) -> stage(src, name, role, depth, Part.SYSTEM)
             // Compression signatures win over misleading suffixes (a gzip file named *.tgz.tar is not a plain tar).
             // gzip / xz / lzma / bz2 / zstd / brotli; lz4 is handled further down (a recovery may be lz4-framed).
             codec != null -> importCompressed(ImageCodecs.open(codec, streamOf(src)), name, depth)
@@ -331,19 +663,13 @@ class Importer(
                 importTarStream(streamOf(src), name, depth, src)
             // a recovery image reached directly (extracted by the firmware toolset, nested archive, plain file)
             isRecoveryName(name.replace('\\', '/').substringAfterLast('/'), bare) && src.size < 64_000_000 ->
-                takeRecovery(streamOf(src), name.replace('\\', '/').substringAfterLast('/'))
-            // lz4-framed file that is not a recovery (system.img.lz4, a tar.lz4 ...): unpacked and recognised again
-            isLz4Frame(h) -> importCompressed(ArcStreams.lz4(streamOf(src)), name, depth)
-            h.size >= 8 && String(h, 0, 8, Charsets.ISO_8859_1) == "ANDROID!" -> {
-                val data = readAllFrom(src)
-                val base = name.replace('\\', '/').substringAfterLast('/')
-                // an unnamed / oddly named image ("part_7.img", "mmcblk0p9") whose ramdisk carries /sbin/recovery is a recovery
-                if (role != FirmwareToolset.Role.BOOT && !isBootName(base, bare) && hasRecoveryBinary(data)) takeRecovery(data.inputStream(), recoveryLabel(name, h))
-                else takeBoot(data)
-            }
+                stage(src, name, role, depth, Part.RECOVERY)
+            // lz4 file (frame format or legacy `lz4 -l`) that is not a recovery (system.img.lz4, a tar.lz4 ...): unpacked and recognised again
+            isLz4(h) -> importCompressed(ArcStreams.lz4Any(streamOf(src)), name, depth)
+            isAndroidImage(h) -> stage(src, name, role, depth, Part.BOOT)
             // system.img / factoryfs / factoryfs.img / factoryfs.rfs: a system partition whatever the filesystem
             isSystemImageName(name.replace('\\', '/').substringAfterLast('/'), bare) ->
-                importImage(if (SparseSource.probe(src)) SparseSource(listOf(src)) else src, "system")
+                stage(src, name, role, depth, Part.SYSTEM)
             else -> importViaToolset(src, name, depth)
         }
     }
@@ -360,27 +686,77 @@ class Importer(
     private fun importToolsetFile(source: File, name: String, depth: Int) {
         val toolWork = File(tmp, "tool-${System.nanoTime()}").apply { mkdirs() }
         try {
-            val artifacts = FirmwareToolset.extract(source, toolWork) { msg -> log(msg) }
+            val artifacts = FirmwareToolset.extract(source, toolWork, wantedPartition) { msg -> log(msg) }
             if (artifacts.isEmpty()) {
                 // *.bin is only a name guess ("allow-mbmloader-flashing-mbm.bin" of a Motorola package is a bootloader, not
                 // an LG container): inside an archive that is no reason to abort the whole import
                 if (depth > 0 && name.endsWith(".bin", true)) { log("skipped $name: not a firmware container"); return }
+                if (name.endsWith(".ofp", true)) throw LocalizedIOException("OFP ZIP produced no files", R.string.imp_ofp_zip_produced_no_files)
                 throw LocalizedIOException("unknown file format \"$name\"", R.string.imp_unknown_file_format, name)
             }
             // the unpacked copy is all that is needed from here on (unless an artifact IS the spilled file)
             if (artifacts.none { it.file == source }) source.delete()
+            // what the container unpacked goes through the same pipeline as the members of any archive
+            importStaged(artifacts.filter { it.file.isFile }.map { a ->
+                FileStaged(a.file, a.file.name, a.role, owned = a.cleanup && a.file != source)
+            }, name, depth)
+        } finally {
+            deleteTree(toolWork)
+            source.delete()
+        }
+    }
+
+    /** Which partitions of a multi-partition container (DZ / KDZ slices ...) are worth unpacking: the ones the pipeline would use. */
+    private val wantedPartition = java.util.function.Predicate<String> { n ->
+        PartKinds.classify("$n.img", ByteArray(0), true, null).kind.let {
+            it != PartKind.SKIP && it != PartKind.OTHER
+        }
+    }
+
+    private fun importPayloadFromZip(zip: ZipFile, e: ZipArchiveEntry, base: String, depth: Int) {
+        val ch = zipChannel
+        var window: Pair<Long, Long>? = null
+        if (ch != null && e.method == ZipArchiveEntry.STORED) {
+            runCatching { zip.getRawInputStream(e).close() }
+            if (e.dataOffset > 0 && e.dataOffset + e.size <= ch.size()) window = e.dataOffset to e.size
+        }
+        if (window == null || ch == null) { importToolsetFile(spillEntry(zip, e), base, depth); return }
+        val toolWork = File(tmp, "tool-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            val artifacts = FirmwareToolset.extractWindow(ch, window.first, window.second, toolWork) { msg -> log(msg) }
+            if (artifacts.isEmpty()) {
+                if (depth > 0 && base.endsWith(".bin", true)) { log("skipped $base: not a firmware container"); return }
+                throw LocalizedIOException("unknown file format \"$base\"", R.string.imp_unknown_file_format, base)
+            }
             for (artifact in artifacts) {
                 if (cancelled) throw IOException("cancelled")
                 if (!artifact.file.isFile) continue
                 FileChannel.open(artifact.file.toPath(), StandardOpenOption.READ).use { c ->
                     handle(ChannelSource(c), c, artifact.file.name, depth + 1, artifact.role)
                 }
-                if (artifact.cleanup && artifact.file != source) artifact.file.delete()
+                if (artifact.cleanup) artifact.file.delete()
             }
-        } finally {
-            deleteTree(toolWork)
-            source.delete()
-        }
+        } finally { deleteTree(toolWork) }
+    }
+
+    private fun runFilesParallel(count: Int, body: (Int, Int, java.util.concurrent.atomic.AtomicBoolean) -> Unit) {
+        if (count == 0) return
+        val cpus = Runtime.getRuntime().availableProcessors()
+        val threads = if (cpus >= 5) 4 else if (cpus >= 3) 2 else 1
+        val failed = java.util.concurrent.atomic.AtomicBoolean(false)
+        if (threads <= 1 || count < 24) { body(0, count, failed); return }
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        try {
+            val per = (count + threads - 1) / threads
+            val futures = (0 until threads).mapNotNull { t ->
+                val from = t * per
+                val to = minOf(from + per, count)
+                if (from >= to) null else pool.submit {
+                    try { body(from, to, failed) } catch (err: Throwable) { failed.set(true); throw err }
+                }
+            }
+            futures.forEach { it.get() }
+        } finally { pool.shutdown() }
     }
 
     private fun recognizedFirmwareTool(name: String, bare: Boolean = false): Boolean {
@@ -496,29 +872,6 @@ class Importer(
         }
     }
 
-    /**
-     * A partition delivered as several sparse chunks (vendor.img_sparsechunk.N, vendor.N ...), already copied to
-     * [parts] in order. Only a real sparse set is used (names like vendor.0 are ambiguous). The vendor partition is
-     * optional, so a failure there is logged and skipped; a split system one is not.
-     */
-    private fun importSplitSparse(parts: List<File>, partition: String) {
-        val chans = parts.map { FileChannel.open(it.toPath(), StandardOpenOption.READ) }
-        try {
-            val srcs = chans.map { ChannelSource(it) }
-            val names = parts.joinToString { it.name }
-            if (!srcs.all { SparseSource.probe(it) }) { log("ignoring ${parts.first().name}: not a sparse image set"); return }
-            log("sparse $partition in ${srcs.size} part(s): $names")
-            if (partition == "system") { importImage(SparseSource(srcs), "system"); gotSystem = true }
-            else try {
-                importImage(SparseSource(srcs), partition)
-                if (partition == "vendor") gotVendor = true
-            } catch (t: Throwable) {
-                if (cancelled) throw t
-                log("$partition: skipped, cannot read the partition (${t.message ?: t.javaClass.simpleName})")
-            }
-        } finally { chans.forEach { it.close() }; parts.forEach { it.delete() } }
-    }
-
     /** Keeps a CSC package aside (first one wins); it is read only once the system partition shows Samsung. */
     private fun takeCsc(s: InputStream, name: String) {
         if (pendingCsc != null) { drain(s); return }
@@ -575,7 +928,7 @@ class Importer(
             val rel = link.trimStart('/')
             if (!rel.startsWith("oem/")) continue
             val f = File(root, rel)
-            if (!f.canonicalPath.startsWith(File(root, "oem").canonicalPath)) continue
+            if (!insideTree(f, File(root, "oem"))) continue
             f.parentFile?.mkdirs()
             runCatching {
                 if (f.exists() || isLink(f)) { if (f.isDirectory && !isLink(f)) return@runCatching; f.delete() }
@@ -602,7 +955,7 @@ class Importer(
             val rel = link.trimStart('/')
             if (!rel.startsWith("$mount/")) continue
             val f = File(root, rel)
-            if (!f.canonicalPath.startsWith(File(root, mount).canonicalPath)) continue
+            if (!insideTree(f, File(root, mount))) continue
             f.parentFile?.mkdirs()
             runCatching {
                 if (f.exists() || isLink(f)) { if (f.isDirectory && !isLink(f)) return@runCatching; f.delete() }
@@ -836,10 +1189,13 @@ class Importer(
 
     private fun isAndroidImage(h: ByteArray) = h.size >= 8 && String(h, 0, 8, Charsets.ISO_8859_1) == "ANDROID!"
     private fun isLz4Frame(h: ByteArray) = h.size >= 4 && h[0] == 0x04.toByte() && h[1] == 0x22.toByte() && h[2] == 0x4d.toByte() && h[3] == 0x18.toByte()
+    /** `lz4 -l`: the legacy stream format (Linux initramfs, old ramdisks); libaemuarc reads it as ARC_LZ4L. */
+    private fun isLz4Legacy(h: ByteArray) = h.size >= 4 && h[0] == 0x02.toByte() && h[1] == 0x21.toByte() && h[2] == 0x4c.toByte() && h[3] == 0x18.toByte()
+    private fun isLz4(h: ByteArray) = isLz4Frame(h) || isLz4Legacy(h)
     /** takeRecovery decides about lz4 framing by the name, so a framed image always gets the suffix. */
     private fun recoveryLabel(name: String, h: ByteArray): String {
         val base = name.replace('\\', '/').substringAfterLast('/')
-        return if (isLz4Frame(h) && !base.endsWith(".lz4", true)) "$base.lz4" else base
+        return if (isLz4(h) && !base.endsWith(".lz4", true)) "$base.lz4" else base
     }
     private fun hasRecoveryBinary(img: ByteArray): Boolean =
         runCatching { BootImage.ramdisk(img)?.any { it.name.removePrefix("./") == "sbin/recovery" } == true }.getOrDefault(false)
@@ -851,7 +1207,7 @@ class Importer(
     private fun takeRecovery(i: InputStream, base: String) {
         runCatching {
             val data = BootImage.stripHtcSignature((if (base.endsWith(".lz4", true))
-                ArcStreams.lz4(i) else i).readBytes())
+                ArcStreams.lz4Any(i) else i).readBytes())
             if (recovery == null && data.size >= 512) { recovery = data; log("recovery: found $base, ${data.size shr 10} KB") }
         }.onFailure { log("recovery: cannot read $base (${it.message}), skipped") }
     }
@@ -899,7 +1255,6 @@ class Importer(
 
     private var zipChannel: FileChannel? = null
     /** partition images spilled out of a nested zip, imported only after that zip's temp file is gone (disk peak) */
-    private var deferred: MutableList<Pair<File, String>>? = null
 
     private fun importZip(ch: FileChannel, name: String, depth: Int) {
         val zip = ZipFile.builder().setSeekableByteChannel(ch).get()
@@ -912,8 +1267,9 @@ class Importer(
         val entries = zip.entries.toList()
         val total = entries.sumOf { maxOf(0L, it.size) }.coerceAtLeast(1)
         var done = 0L
-        // product / system_ext / odm ...: imported after the system image (see importExtra)
-        val extraEntries = ArrayList<Pair<String, ZipArchiveEntry>>()
+        // every partition image of the archive (system, vendor, product, system_ext, odm, boot, recovery, super ...): staged here,
+        // decided on and applied in one go by importStaged once the whole archive has been looked at
+        val pool = ArrayList<Staged>()
         // product.tar / system_ext.tar: files for system/product, system/system_ext; imported after the system image like the extra images
         val extraTars = ArrayList<Pair<String, ZipArchiveEntry>>()
         // сначала — сценарий установки (ссылки и права)
@@ -938,7 +1294,6 @@ class Importer(
         if (rawDump) log("raw system partition dump (build.prop and bin/ at the archive root)")
         // a package with a vendor.img of its own: the vendor inside a "super" partition is not read a second time
         archiveHasVendorImage = entries.any { !it.isDirectory && it.size > 0 && it.name.replace('\\', '/').substringAfterLast('/').let { b -> PartitionNames.isVendor(b) || PartitionChoice.tarGroup(b) == "vendor" } }
-        val bootEntries = ArrayList<Pair<String, ZipArchiveEntry>>()
         val pendingZips = ArrayList<ZipArchiveEntry>()
         // split sparse system (system.img_sparsechunk.N, system_sparsechunkN, system.img.N, system.N, system_N, …)
         val sparseChunks = SparseChunks.select(entries.filter { !it.isDirectory && !it.name.contains("__MACOSX/") }.map { it.name })
@@ -999,14 +1354,15 @@ class Importer(
                 // a whole .ftf bundle inside another archive
                 base.endsWith(".ftf", true) && e.size > 0 -> importSonyFile(spillEntry(zip, e), depth)
                 // boot.img at any depth; the shallowest valid one is taken after the loop
-                isBootName(base, bare) -> bootEntries.add(n to e)
-                isRecoveryName(base, bare) && e.size < 64_000_000 -> zip.getInputStream(e).use { takeRecovery(it, base) }
+                isBootName(base, bare) -> pool.add(zipStaged(zip, e, inFolder(n, base), Part.BOOT))
+                isRecoveryName(base, bare) && e.size < 64_000_000 -> pool.add(zipStaged(zip, e, inFolder(n, base), Part.RECOVERY))
                 CscPackage.isCscContainer(base) && e.size > 0 -> zip.getInputStream(e).use { takeCsc(it, base) }
-                isOemName(base, bare) -> withEntrySource(zip, e) { importOem(it) }
-                isSystemImageName(base, bare) ->
-                    withEntrySource(zip, e) { importImage(if (SparseSource.probe(it)) SparseSource(listOf(it)) else it, "system") }
-                isVendorName(base, bare) -> withEntrySource(zip, e) { importVendor(it) }
-                isExtraName(base, bare) && e.size > 4096 -> extraEntries.add(base to e)
+                isOemName(base, bare) -> pool.add(zipStaged(zip, e, inFolder(n, base), Part.OEM))
+                isSystemImageName(base, bare) -> pool.add(zipStaged(zip, e, inFolder(n, base), Part.SYSTEM))
+                isVendorName(base, bare) -> pool.add(zipStaged(zip, e, inFolder(n, base), Part.VENDOR))
+                isExtraName(base, bare) && e.size > 4096 ->
+                    pool.add(zipStaged(zip, e, inFolder(n, base), Part(PartKind.EXTRA, PartitionNames.extraMount(base, bareOk = true))))
+                PartitionNames.isSuper(base, bare) && e.size > 0 -> pool.add(zipStaged(zip, e, inFolder(n, base), Part.SUPER))
                 base.lowercase().endsWith(".zip") && (base.startsWith("image-") || depth == 0 && e.size > 50_000_000) ||
                     base.lowercase().endsWith(".rar") || base.lowercase().endsWith(".7z") -> {
                     handleNestedZip(spillEntry(zip, e), base, depth)
@@ -1027,7 +1383,7 @@ class Importer(
                 (base.endsWith(".nb0", true) || base.endsWith(".bin", true)) && e.size > AcerBin.MIN_SIZE &&
                     AcerBin.probe(zipEntryHead(zip, e, 1100)) -> importZipAcerBin(zip, e, base)
                 // payload.bin of an A/B OTA: the spilled copy is unpacked in place (it is already a private temp file)
-                base.equals("payload.bin", true) && e.size > 0 -> importToolsetFile(spillEntry(zip, e), base, depth + 1)
+                base.equals("payload.bin", true) && e.size > 0 -> importPayloadFromZip(zip, e, base, depth + 1)
                 recognizedFirmwareTool(base, bare) -> {
                     val nestedFile = spillEntry(zip, e)
                     try {
@@ -1040,15 +1396,13 @@ class Importer(
             done += maxOf(0L, e.size)
             onProgress(lt(R.string.imp_extracting, base), 0.9f * done / total)
         }
-        for ((_, be) in bootEntries.sortedBy { it.first.count { c -> c == '/' } }) {
-            if (ramdisk != null) break
-            zip.getInputStream(be).use { takeBoot(it.readBytes()) }
-        }
-        // Split boot dumps (kernel + ramdisk.gz, or an unpacked initrd/ folder) carry no boot.img: take the ramdisk directly,
-        // otherwise init.rc, /sbin/healthd and friends never reach the tree and system_server dies in BatteryService.
-        if (ramdisk == null && !systemAsRoot) takeLooseRamdisk(zip, entries, wrap, foundSysRoot)
-        for (partition in listOf("system", "vendor", "product", "system_ext", "odm")) {
-            if (partition == "system" && gotSystem) continue
+        // block OTA (system.new.dat + system.transfer.list; with dynamic partitions (10+) vendor, product, system_ext and odm come
+        // the same way): rebuilt only if nothing better was found, and none of them is boot-critical but system
+        val otaParts = (listOf("system", "vendor", "product", "system_ext", "odm") + entries.mapNotNull {
+            Regex("(?i)(?:.*/)?([a-z0-9_]+)\\.new\\.dat(?:\\.br)?").matchEntire(it.name)?.groupValues?.get(1)?.lowercase()
+        }.filter { PartitionNames.extraMount("$it.img") != null }).distinct()
+        for (partition in otaParts) {
+            if (partition == "system" && (gotSystem || pool.any { it.hint?.kind == PartKind.SYSTEM && !it.fallback })) continue
             val dataE = entries.firstOrNull { it.name.matches(Regex("(?i)(.*/)?$partition\\.new\\.dat(\\.br)?")) } ?: continue
             val dir = dataE.name.substringBeforeLast('/', "")
             val listE = entries.firstOrNull {
@@ -1059,45 +1413,22 @@ class Importer(
                 if (partition == "system") throw LocalizedIOException("$partition.transfer.list missing", R.string.imp_transfer_list_missing, partition)
                 log("$partition.transfer.list missing, skipping $partition.new.dat"); continue
             }
-            val list = zip.getInputStream(listE).use { String(it.readBytes(), Charsets.UTF_8) }
-            onProgress(lt(R.string.imp_building_img_from_ota, partition), 0.5f)
-            val raw = File(tmp, "$partition.raw")
-            // a Treble OTA (8.0+) carries the vendor partition the same way; with dynamic partitions (10+) product,
-            // system_ext and odm come as their own data files too, and none of them is boot-critical
-            val mount = if (partition == "product" || partition == "system_ext") "system/$partition" else partition
-            try {
-                zip.getInputStream(dataE).use { s ->
-                    val data = if (dataE.name.endsWith(".br", true)) ArcStreams.brotli(s) else s
-                    TransferList.build(list, data, raw)
-                }
-                keepStockImage = partition == "system"
-                FileChannel.open(raw.toPath(), StandardOpenOption.READ).use { c ->
-                    if (partition == "system") importImage(ChannelSource(c), mount)
-                    else runCatching { importImage(ChannelSource(c), mount) }.onFailure { if (cancelled) throw it; log("$partition partition: ${it.message}") }
-                }
-            } finally { keepStockImage = false; raw.delete() }
+            pool.add(otaPairStaged(zip, dataE, listE, partition))
         }
-        for ((base, e) in extraEntries) withEntrySource(zip, e) { importExtra(it, base) }
+        // split sparse system / vendor (system.img_sparsechunk.N, vendor.N, ...): the same naming schemes for both
+        val byName = entries.associateBy { it.name }
+        val liveNames = entries.filter { !it.isDirectory && !it.name.contains("__MACOSX/") }.map { it.name }
+        if (sparseChunks.isNotEmpty() && !gotSystem && pool.none { it.hint?.kind == PartKind.SYSTEM && !it.fallback })
+            sparseSetStaged(sparseChunks.map { zipStaged(zip, it, it.name, null) }, "system")?.let { pool.add(it) }
+        if (!gotVendor && pool.none { it.hint?.kind == PartKind.VENDOR && !it.fallback }) {
+            val vendorChunks = SparseChunks.select(liveNames, "vendor").mapNotNull { byName[it] }
+            if (vendorChunks.isNotEmpty()) sparseSetStaged(vendorChunks.map { zipStaged(zip, it, it.name, null) }, "vendor")?.let { pool.add(it) }
+        }
+        importStaged(pool, name, depth)
+        // Split boot dumps (kernel + ramdisk.gz, or an unpacked initrd/ folder) carry no boot.img: take the ramdisk directly,
+        // otherwise init.rc, /sbin/healthd and friends never reach the tree and system_server dies in BatteryService.
+        if (ramdisk == null && !systemAsRoot) takeLooseRamdisk(zip, entries, wrap, foundSysRoot)
         for ((base, e) in extraTars) { if (cancelled) throw IOException("cancelled"); importZipTar(zip, e, base, depth) }
-        if (sparseChunks.isNotEmpty() && !gotSystem) {
-            val parts = sparseChunks.map { spillEntry(zip, it) }
-            val chans = parts.map { FileChannel.open(it.toPath(), StandardOpenOption.READ) }
-            try {
-                val srcs = chans.map { ChannelSource(it) }
-                // names like system.0 / system_1 are ambiguous: only a real sparse set is used
-                if (srcs.all { SparseSource.probe(it) }) {
-                    log("sparse system in ${srcs.size} part(s): ${sparseChunks.joinToString { it.name.substringAfterLast('/') }}")
-                    importImage(SparseSource(srcs), "system")
-                } else log("ignoring ${sparseChunks.first().name}: not a sparse image set")
-            } finally { chans.forEach { it.close() }; parts.forEach { it.delete() } }
-        }
-        // split sparse vendor (vendor.img_sparsechunk.N, vendor.N, ...), same naming schemes as system
-        if (!gotVendor) {
-            val byName = entries.associateBy { it.name }
-            val vendorChunks = SparseChunks.select(
-                entries.filter { !it.isDirectory && !it.name.contains("__MACOSX/") }.map { it.name }, "vendor").mapNotNull { byName[it] }
-            if (vendorChunks.isNotEmpty()) importSplitSparse(vendorChunks.map { spillEntry(zip, it) }, "vendor")
-        }
         if (rawProgramEntries.isNotEmpty() && (!gotSystem || ramdisk == null || recovery == null || !gotOem)) importEdl(zip, entries, rawProgramEntries)
         // zips at any depth (Firmware/fw.zip): opened only if the outer archive had no system / boot
         for (pe in pendingZips) {
@@ -1383,6 +1714,61 @@ class Importer(
      * with an empty name or a ".." in it are left out. The result goes to [planExtracted] and [importExtractedArchive].
      */
     private fun extractRar(file: File, dir: File): List<Extracted> {
+        val viaNative = try {
+            extractRarNative(file, dir)
+        } catch (e: UnsupportedOperationException) { null } // not a format libaemuarc takes: junrar below
+        catch (e: NativeRarFailure) { null }                 // damaged or exotic data: junrar gives the final word
+        if (viaNative != null) return viaNative
+        dir.listFiles()?.forEach { it.delete() }
+        return extractRarJunrar(file, dir)
+    }
+
+    /** A failure inside libaemuarc (as opposed to a full disk or a cancel): the caller tries junrar. */
+    private class NativeRarFailure(cause: Throwable) : IOException(cause)
+
+    /** The native pass: one forward read of the rar, every file straight to [dir] (named e0, e1 ...). */
+    private fun extractRarNative(file: File, dir: File): List<Extracted> {
+        val out = ArrayList<Extracted>()
+        FileChannel.open(file.toPath(), java.nio.file.StandardOpenOption.READ).use { ch ->
+            val z = try { RarReaders.open(ch) } catch (e: IOException) { throw NativeRarFailure(e) }
+            z.use {
+                val total = z.entries().sumOf { if (it.isDirectory) 0L else it.size.coerceAtLeast(0) }
+                if (total > 16L * 1024 * 1024 * 1024 || dir.usableSpace < total + 64L * 1024 * 1024)
+                    throw LocalizedIOException("Not enough space to unpack firmware", R.string.imp_not_enough_space_to_unpack_firmware)
+                val buf = ByteArray(1 shl 20)
+                var done = 0L
+                var lastReport = 0L
+                var idx = 0
+                while (true) {
+                    if (cancelled) throw IOException("cancelled")
+                    val e = (try { z.nextEntry() } catch (x: IOException) { throw NativeRarFailure(x) }) ?: break
+                    val entryName = e.name.replace('\\', '/').trimStart('/')
+                    if (entryName.isBlank() || entryName.split('/').any { it == ".." }) continue
+                    if (e.isDirectory) { out.add(Extracted(entryName, 0, true, null)); continue }
+                    val base = entryName.substringAfterLast('/')
+                    onProgress(lt(R.string.imp_extracting, base), if (total > 0) done.toFloat() / total * 0.5f else -1f)
+                    val f = File(dir, "e${idx++}")
+                    f.outputStream().use { o ->
+                        while (true) {
+                            if (cancelled) throw IOException("cancelled")
+                            val r = try { z.read(buf, 0, buf.size) } catch (x: IOException) { throw NativeRarFailure(x) }
+                            if (r < 0) break
+                            o.write(buf, 0, r)
+                            done += r
+                            if (done - lastReport >= (32L shl 20)) {
+                                lastReport = done
+                                onProgress(lt(R.string.imp_extracting, base), if (total > 0) done.toFloat() / total * 0.5f else -1f)
+                            }
+                        }
+                    }
+                    out.add(Extracted(entryName, f.length(), false, f))
+                }
+            }
+        }
+        return out
+    }
+
+    private fun extractRarJunrar(file: File, dir: File): List<Extracted> {
         val out = ArrayList<Extracted>()
         RarArchive(file).use { rar ->
             val headers = rar.fileHeaders
@@ -1718,7 +2104,10 @@ class Importer(
             val foundSysRoot = findSystemRoot(items.map { it.name.replace('\\', '/').trimStart('/') })
             // the system folder is ignored when an image or a tar was picked for system instead
             val sysRoot = if (plan?.dropSystemFolder == true) null else foundSysRoot
+            // not partitions: nested archives, firmware containers, raw NAND dumps. They go back to handle() after the partitions.
             val nested = ArrayList<Pair<File, String>>()
+            // every partition image of the archive: staged, then decided on and applied in one go by importStaged
+            val pool = ArrayList<Staged>()
             val vdat = LinkedHashMap<String, MutableMap<String, File>>()
             // split sparse system / vendor: an entry is readable once, so chunks are spilled and sorted after the pass
             val splitParts = LinkedHashMap<String, MutableList<Pair<String, File>>>()
@@ -1748,16 +2137,20 @@ class Importer(
                         val part = if (SparseChunks.indexOf(n, "system") != null) "system" else "vendor"
                         splitParts.getOrPut(part) { ArrayList() }.add(n to spill(entryStream, base))
                     }
-                    isBootName(base, bare) -> takeBoot(entryStream.readBytes())
-                    isRecoveryName(base, bare) && e.size < 64_000_000 -> takeRecovery(entryStream, base)
+                    isBootName(base, bare) -> pool.add(FileStaged(spill(entryStream, base), inFolder(n, base)).also { it.hint = Part.BOOT })
+                    isRecoveryName(base, bare) && e.size < 64_000_000 ->
+                        pool.add(FileStaged(spill(entryStream, base), inFolder(n, base)).also { it.hint = Part.RECOVERY })
                     CscPackage.isCscContainer(base) && e.size > 0 -> takeCsc(entryStream, base)
-                    isOemName(base, bare) -> nested.add(spill(entryStream, base) to "oem")
-                    isVendorName(base, bare) -> nested.add(spill(entryStream, base) to "vendor")
-                    isExtraName(base, bare) && e.size > 4096 -> nested.add(spill(entryStream, base) to "extra")
+                    isOemName(base, bare) -> pool.add(FileStaged(spill(entryStream, base), inFolder(n, base)).also { it.hint = Part.OEM })
+                    isVendorName(base, bare) -> pool.add(FileStaged(spill(entryStream, base), inFolder(n, base)).also { it.hint = Part.VENDOR })
+                    isExtraName(base, bare) && e.size > 4096 ->
+                        pool.add(FileStaged(spill(entryStream, base), inFolder(n, base)).also {
+                            it.hint = Part(PartKind.EXTRA, PartitionNames.extraMount(base, bareOk = true))
+                        })
+                    PartitionNames.isSuper(base, bare) && e.size > 0 ->
+                        pool.add(FileStaged(spill(entryStream, base), inFolder(n, base)).also { it.hint = Part.SUPER })
                     base.equals("system.yaffs2.img", true) ||
-                        isSystemImageName(base, bare) -> {
-                        nested.add(spill(entryStream, base) to "system")
-                    }
+                        isSystemImageName(base, bare) -> pool.add(FileStaged(spill(entryStream, base), inFolder(n, base)).also { it.hint = Part.SYSTEM })
                     base.matches(Regex("(?i).*\\.(zip|rar|7z|tar|tar\\.md5|md5|tgz|tar\\.gz)")) &&
                         e.size > 0 && !base.startsWith("MODEM") && !base.startsWith("CP_") && !base.contains("CSC") -> {
                         nested.add(spill(entryStream, base) to "archive")
@@ -1790,31 +2183,22 @@ class Importer(
                 val byPath = files.toMap()
                 val chosen = SparseChunks.select(byPath.keys, part).mapNotNull { byPath[it] }
                 (files.map { it.second } - chosen.toSet()).forEach { it.delete() }
-                if (chosen.isEmpty() || (part == "system" && gotSystem) || (part == "vendor" && gotVendor)) chosen.forEach { it.delete() }
-                else importSplitSparse(chosen, part)
+                if (chosen.isEmpty()) continue
+                sparseSetStaged(chosen.map { FileStaged(it, it.name) }, part)?.let { pool.add(it) }
             }
             for ((key, pair) in vdat) {
                 val data = pair["data"]
                 val list = pair["list"]
-                if (data != null && list != null) {
-                    try {
-                        importVdatPair(data, list, key, depth + 1)
-                    } finally { data.delete(); list.delete() }
-                } else {
+                if (data != null && list != null) vdatStaged(data, list, key)?.let { pool.add(it) }
+                else {
                     pair.values.forEach { it.delete() }
                     log("incomplete VDAT pair in $kind archive: $key")
                 }
             }
-            for ((f, kind) in nested.sortedBy { nestedRank(it.first.name) }) {
+            importStaged(pool, name, depth)
+            for ((f, _) in nested.sortedBy { nestedRank(it.first.name) }) {
                 try {
-                    FileChannel.open(f.toPath(), StandardOpenOption.READ).use { c ->
-                        val src = ChannelSource(c)
-                        if (kind == "system") importImage(if (SparseSource.probe(src)) SparseSource(listOf(src)) else src, "system")
-                        else if (kind == "oem") importOem(src)
-                        else if (kind == "vendor") importVendor(src)
-                        else if (kind == "extra") importExtra(src, f.name)
-                        else handle(src, c, f.name, depth + 1)
-                    }
+                    FileChannel.open(f.toPath(), StandardOpenOption.READ).use { c -> handle(ChannelSource(c), c, f.name, depth + 1) }
                 } finally { f.delete() }
             }
             if (!gotSystem && nested.isEmpty()) log("no system found in archive $name")
@@ -1968,56 +2352,28 @@ class Importer(
         }
     }
 
-    private fun applyGptPart(kind: GptDisk.Kind, src: RandomSource, part: String? = null) {
-        when (kind) {
-            GptDisk.Kind.BOOT -> takeBoot(readAllFrom(src))
-            GptDisk.Kind.VENDOR_BOOT -> takeVendorBoot(src)
-            GptDisk.Kind.RECOVERY -> takeRecovery(streamOf(src), "recovery.img")
-            GptDisk.Kind.OEM -> importOem(src)
-            GptDisk.Kind.GAPPS -> importGapps(src)
-            GptDisk.Kind.VENDOR -> importVendor(src)
-            GptDisk.Kind.SYSTEM -> {
-                importImage(if (SparseSource.probe(src)) SparseSource(listOf(src)) else src, "system")
-                gotSystem = true
-            }
-            GptDisk.Kind.SUPER -> importSuper(src)
-            GptDisk.Kind.EXTRA -> if (part != null) importExtra(src, "$part.img")
-        }
+    /** One partition cut out of a disk (GPT or MBR): handed to the same pipeline as every other partition. */
+    private fun applyGptPart(kind: GptDisk.Kind, src: RandomSource, part: String? = null) =
+        importStaged(listOf(SourceStaged(part ?: kind.name.lowercase(), src).also { it.hint = gptPart(kind, part) }), part ?: kind.name, 0)
+
+    private fun gptPart(kind: GptDisk.Kind, part: String?): Part = when (kind) {
+        GptDisk.Kind.BOOT -> Part.BOOT
+        GptDisk.Kind.VENDOR_BOOT -> Part.VENDOR_BOOT
+        GptDisk.Kind.RECOVERY -> Part.RECOVERY
+        GptDisk.Kind.OEM -> Part.OEM
+        GptDisk.Kind.GAPPS -> Part.GAPPS
+        GptDisk.Kind.VENDOR -> Part.VENDOR
+        GptDisk.Kind.SYSTEM -> Part.SYSTEM
+        GptDisk.Kind.SUPER -> Part.SUPER
+        GptDisk.Kind.EXTRA -> part?.let { PartitionNames.extraMount("$it.img", bareOk = true) }?.let { Part(PartKind.EXTRA, it) } ?: Part.SKIP
     }
 
     /** True when the archive being read carries its own vendor image, so the one inside "super" is not read twice. */
     private var archiveHasVendorImage = false
 
-    /**
-     * A "super" partition (dynamic partitions, Android 10+) read in place: its logical partitions are cut out by their
-     * extents and imported like the separate images of an older package (system, vendor, product, system_ext, odm).
-     */
-    private fun importSuper(src: RandomSource) {
-        val first = ByteBuffer.allocate(LP_PROBE).also { src.read(0, it) }.array()
-        val need = LpMetadata.headSize(first) ?: throw LocalizedIOException("super: unreadable partition metadata", R.string.imp_unreadable_gpt, "super")
-        val head = if (need <= first.size) first else ByteBuffer.allocate(need).also { src.read(0, it) }.array()
-        val parts = LpMetadata.parse(head) ?: throw LocalizedIOException("super: unreadable partition metadata", R.string.imp_unreadable_gpt, "super")
-        val picks = LpMetadata.pick(parts)
-        if (picks.isEmpty()) { log("super: no system partition among ${parts.joinToString { it.name }}"); return }
-        log("super: " + picks.joinToString { "${it.name} ${it.size shr 20} MB" })
-        for (p in picks) {
-            if (cancelled) throw IOException("cancelled")
-            applyLogical(LpMetadata.baseName(p.name), ExtentSource(src, p.extents.map { it.superOffset to it.length }))
-        }
-    }
-
-    /** One logical partition of a super image, by its name without the slot suffix. */
-    private fun applyLogical(name: String, src: RandomSource) {
-        when (name) {
-            "system" -> { importImage(if (SparseSource.probe(src)) SparseSource(listOf(src)) else src, "system"); gotSystem = true }
-            "vendor" -> if (archiveHasVendorImage) log("super: vendor skipped, the package has a vendor image of its own") else importVendor(src)
-            // product, system_ext, odm and every other logical partition (cust, my_*, *_dlkm ...): each is mounted at its own name
-            else -> {
-                val mount = PartitionNames.extraMount("$name.img") ?: PartitionNames.logicalMount(name)
-                if (mount == null) log("super: $name skipped, not a name the guest root can hold") else importExtraAt(src, mount)
-            }
-        }
-    }
+    /** One logical partition of a super image read from a stream (see [importGptStream]), by its name without the slot suffix. */
+    private fun applyLogical(name: String, src: RandomSource) =
+        importStaged(listOf(SourceStaged("$name.img", src).also { it.hint = PartKinds.logical(name); it.origin = 1 }), name, 0)
 
     /** Random-access full dump (plain .img, nested file): partitions are used in place, nothing is copied. */
     private fun importGptDisk(src: RandomSource, name: String) {
@@ -2029,10 +2385,10 @@ class Importer(
         val picks = GptDisk.pick(GptDisk.parse(head) ?: throw LocalizedIOException("$name: unreadable GPT", R.string.imp_unreadable_gpt, name))
         if (picks.isEmpty()) throw LocalizedIOException("$name: no boot/recovery/system partition in GPT", R.string.imp_no_boot_recovery_system_partition_in, name)
         log("$name: full dump, partitions " + picks.joinToString { "${it.second.name} ${it.second.size shr 20} MB" })
-        for ((kind, p) in picks) {
-            if (cancelled) throw IOException("cancelled")
-            applyGptPart(kind, SliceSource(src, p.start, minOf(p.size, src.size - p.start)), p.name)
-        }
+        // all partitions of the disk go through the pipeline together (a super partition is expanded there, in place)
+        importStaged(picks.map { (kind, p) ->
+            SourceStaged(p.name, SliceSource(src, p.start, minOf(p.size, src.size - p.start))).also { it.hint = gptPart(kind, p.name) }
+        }, name, 0)
     }
 
     /**
@@ -2318,31 +2674,42 @@ class Importer(
         } finally { deleteTree(dir) }
     }
 
-    private fun importVdatPair(data: File, list: File, key: String, depth: Int) {
+    /**
+     * The partition of a block OTA (xxx.new.dat[.br] + xxx.transfer.list), rebuilt to a raw image only when the pipeline reaches
+     * it. Delta OTAs run on the stock image, which is rebuilt later from what is recorded here (see [SquashLayout]), so the system
+     * one is marked [Staged.keepStock]. Only a fallback: a direct image of the partition wins. Null (files dropped) for a
+     * partition the guest has no place for.
+     */
+    private fun vdatStaged(data: File, list: File, key: String): Staged? {
         val part = key.substringAfterLast('/').lowercase()
-        val mount = when { part.isBlank() || part == "system" -> "system"; part == "vendor" || part == "odm" -> part
-            part == "product" || part == "system_ext" -> "system/$part"; else -> {
-            log("skipping OTA partition \"$part\" (not system/vendor/product/system_ext/odm)"); return } }
-        val raw = File(tmp, "${if (key.isBlank()) "system" else key}.img")
-        val actualData = if (data.name.endsWith(".br", true)) {
-            val dec = File(tmp, "${if (key.isBlank()) "system" else key}.new.dat")
-            ArcStreams.brotli(FileInputStream(data)).use { input ->
-                dec.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
-            }
-            dec
-        } else data
-        try {
-            val transfer = list.readText(Charsets.UTF_8)
-            FileInputStream(actualData).use { dataIn ->
-                TransferList.build(transfer, dataIn, raw)
-            }
-            keepStockImage = mount == "system"
-            FileChannel.open(raw.toPath(), StandardOpenOption.READ).use { c -> importImage(ChannelSource(c), mount) }
-        } finally {
-            keepStockImage = false
-            if (actualData !== data) actualData.delete()
-            raw.delete()
+        val hint = when {
+            part.isBlank() || part == "system" -> Part.SYSTEM
+            part == "vendor" -> Part.VENDOR
+            PartitionNames.extraMount("$part.img") != null -> Part(PartKind.EXTRA, PartitionNames.extraMount("$part.img"))
+            else -> { log("skipping OTA partition \"$part\" (not system/vendor/product/system_ext/odm)"); data.delete(); list.delete(); return null }
         }
+        val stem = if (key.isBlank()) "system" else key
+        return object : Staged("$stem.img") {
+            private var raw: File? = null
+            override val size: Long get() = raw?.length() ?: 0L
+            override fun <T> use(block: (RandomSource) -> T): T {
+                val f = raw ?: build().also { raw = it }
+                return FileChannel.open(f.toPath(), StandardOpenOption.READ).use { block(ChannelSource(it)) }
+            }
+            private fun build(): File {
+                val out = File(tmp, "$stem.img")
+                val actual = if (data.name.endsWith(".br", true)) {
+                    val dec = File(tmp, "$stem.new.dat")
+                    ArcStreams.brotli(FileInputStream(data)).use { input -> dec.outputStream().use { o -> input.copyTo(o, 1 shl 20) } }
+                    dec
+                } else data
+                try {
+                    FileInputStream(actual).use { dataIn -> TransferList.build(list.readText(Charsets.UTF_8), dataIn, out) }
+                } finally { if (actual !== data) actual.delete() }
+                return out
+            }
+            override fun release() { raw?.delete(); raw = null; data.delete(); list.delete() }
+        }.also { it.hint = hint; it.fallback = true; it.keepStock = hint.kind == PartKind.SYSTEM }
     }
 
     private fun drain(input: InputStream) {
@@ -2427,56 +2794,13 @@ class Importer(
         } finally { deleteTree(work) }
     }
 
-    private fun withEntrySource(zip: ZipFile, e: ZipArchiveEntry, block: (RandomSource) -> Unit) {
-        // несжатую запись читаем прямо из архива по смещению, сжатую — через временный файл
-        val ch = zipChannel
-        if (e.method == ZipArchiveEntry.STORED && ch != null) {
-            runCatching { zip.getRawInputStream(e).close() } // вычисляет dataOffset
-            if (e.dataOffset > 0) { block(ChannelSource(ch, e.dataOffset, e.size)); return }
-        }
-        val t = spillEntry(zip, e)
-        deferred?.let { d -> d.add(t to e.name); return }
-        FileChannel.open(t.toPath(), StandardOpenOption.READ).use { c -> block(ChannelSource(c)) }
-        t.delete()
-    }
+    private fun withEntrySource(zip: ZipFile, e: ZipArchiveEntry, block: (RandomSource) -> Unit) = withInspectSource(zip, e, block)
 
-    /** a nested zip: its images are copied out first, the zip deleted, then the images unpacked */
+    /** A zip inside an archive: read like any other (its partitions go through importStaged), deleted afterwards. */
     private fun handleNestedZip(t: File, base: String, depth: Int) {
-        val outer = deferred
-        val mine = ArrayList<Pair<File, String>>()
-        deferred = mine
         try {
             FileChannel.open(t.toPath(), StandardOpenOption.READ).use { c -> handle(ChannelSource(c), c, base, depth + 1) }
-        } finally { deferred = outer; t.delete() }
-        try {
-            // system first (it resets the tree layout), then vendor / oem, then product / system_ext / odm ...:
-            // the extras are mounted under system/ and must never be taken for the system image itself
-            fun rank(entry: String): Int {
-                val b = entry.substringAfterLast('/')
-                return when {
-                    PartitionNames.extraMount(b, bareOk = true) != null -> 3
-                    isOemName(b, bare = true) -> 2
-                    isVendorName(b, bare = true) -> 1
-                    else -> 0
-                }
-            }
-            for ((f, entry) in mine.sortedBy { rank(it.second) }) {
-                if (cancelled) throw IOException("cancelled")
-                val entryBase = entry.substringAfterLast('/')
-                FileChannel.open(f.toPath(), StandardOpenOption.READ).use { c ->
-                    val src = ChannelSource(c)
-                    when {
-                        PartitionNames.extraMount(entryBase, bareOk = true) != null -> importExtra(src, entryBase)
-                        isOemName(entryBase, bare = true) -> importOem(if (SparseSource.probe(src)) SparseSource(listOf(src)) else src)
-                        isVendorName(entryBase, bare = true) -> importVendor(src)
-                        isSystemImageName(entryBase, bare = true) ->
-                            importImage(if (SparseSource.probe(src)) SparseSource(listOf(src)) else src, "system")
-                        else -> log("$entryBase: not a partition image the importer uses, skipped")
-                    }
-                }
-                f.delete()
-            }
-        } finally { mine.forEach { it.first.delete() } }
+        } finally { t.delete() }
     }
 
     private fun spillEntry(zip: ZipFile, e: ZipArchiveEntry): File = zip.getInputStream(e).use { spill(it, e.name.substringAfterLast('/')) }
@@ -2726,7 +3050,7 @@ class Importer(
     private fun InputStream.nonClosing(): InputStream = object : java.io.FilterInputStream(this) { override fun close() {} }
 
     private fun maybeLz4(s: InputStream, name: String): InputStream =
-        if (name.endsWith(".lz4", true)) ArcStreams.lz4(s.nonClosing()) else s.nonClosing()
+        if (name.endsWith(".lz4", true)) ArcStreams.lz4Any(s.nonClosing()) else s.nonClosing()
 
     private fun hardlink(n: String, target: String) {
         val src = FirmwareContainers.destination(root, target.removePrefix("./").trimStart('/'))
@@ -2791,6 +3115,7 @@ class Importer(
         // a system-as-root partition too: its top level is the guest root, which the layout's prefix says
         val layoutPartition = SystemLayout.partitionOf(mount)
         val cap = if (layoutPartition != null) SystemLayout.Capture(fs, src, SystemLayout.prefixOf(mount, asRoot)) else null
+        val fileTasks = ArrayList<Pair<String, Ext4Reader.Node>>()
         fs.walk { path, node ->
             if (cancelled) throw IOException("cancelled")
             if (asRoot && AbLayout.skipRootEntry(path, node.isFile, node.isLink)) return@walk
@@ -2799,16 +3124,36 @@ class Importer(
             when {
                 node.isDir -> { f.mkdirs(); cap?.dir(path, node.perm) }
                 node.isLink -> { val t = fs.linkTarget(node); symlinks.add(t to "/$rel"); cap?.link(path, t) }
-                node.isFile -> {
-                    f.parentFile?.mkdirs()
-                    val md = java.security.MessageDigest.getInstance("SHA-1")
-                    f.outputStream().buffered(1 shl 20).use { fs.copy(node, java.security.DigestOutputStream(it, md)) }
-                    cap?.file(path, node, md.digest())
-                    applyMode(f, node.perm)
-                    files++; bytes += node.size
-                }
+                node.isFile -> fileTasks.add(path to node)
             }
             if (++n % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
+        }
+        fun extractOne(path: String, node: Ext4Reader.Node): ByteArray {
+            val rel = if (asRoot) path else "$mount/$path"
+            val f = FirmwareContainers.destination(root, rel)
+            f.parentFile?.mkdirs()
+            val md = java.security.MessageDigest.getInstance("SHA-1")
+            f.outputStream().buffered(1 shl 20).use { fs.copy(node, java.security.DigestOutputStream(it, md)) }
+            applyMode(f, node.perm)
+            return md.digest()
+        }
+        val digests = arrayOfNulls<ByteArray>(fileTasks.size)
+        val errors = arrayOfNulls<Throwable>(fileTasks.size)
+        runFilesParallel(fileTasks.size) { from, to, failed ->
+            for (i in from until to) {
+                if (failed.get()) return@runFilesParallel
+                try {
+                    if (cancelled) throw IOException("cancelled")
+                    digests[i] = extractOne(fileTasks[i].first, fileTasks[i].second)
+                } catch (err: Throwable) { errors[i] = err; failed.set(true); return@runFilesParallel }
+            }
+        }
+        for (i in fileTasks.indices) {
+            errors[i]?.let { throw it }
+            val (path, node) = fileTasks[i]
+            cap?.file(path, node, digests[i]!!)
+            files++; bytes += node.size
+            if (i % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
         }
         if (cap != null && layoutPartition != null) {
             onProgress(lt(R.string.imp_recording_the_layout_of_image, mount), -1f)
@@ -3093,6 +3438,7 @@ class Importer(
         }.getOrDefault(false)
         if (asRoot) { systemAsRoot = true; log("image system: system-as-root layout (root file system in the partition)") }
         var n = 0
+        val fileTasks = ArrayList<Pair<String, ErofsReader.Node>>()
         fs.walk { path, node ->
             if (asRoot && AbLayout.skipRootEntry(path, node.type == 1, node.type == 2)) return@walk
             val rel = if (asRoot) path else "$mount/$path"
@@ -3107,16 +3453,35 @@ class Importer(
                         throw IOException("EROFS symlink escapes guest root: $rel")
                     symlinks.add(node.target to "/$rel")
                 }
-                1 -> {
-                    f.parentFile?.mkdirs()
-                    // Links are only created by finishTree, after all file bytes.
-                    if (isLink(f)) throw IOException("EROFS destination is a symlink: $rel")
-                    f.outputStream().buffered(1 shl 20).use { fs.copy(node, it) }
-                    applyMode(f, fs.fileMode(node) and 0xfff)
-                    files++; bytes += f.length()
-                }
+                1 -> fileTasks.add(path to node)
             }
             if (++n % 150 == 0) onProgress("$mount: ${path.substringAfterLast('/')}", -1f)
+        }
+        fun extractOne(path: String, node: ErofsReader.Node): Long {
+            val rel = if (asRoot) path else "$mount/$path"
+            val f = FirmwareContainers.destination(root, rel)
+            f.parentFile?.mkdirs()
+            // Links are only created by finishTree, after all file bytes.
+            if (isLink(f)) throw IOException("EROFS destination is a symlink: $rel")
+            f.outputStream().buffered(1 shl 20).use { fs.copy(node, it) }
+            applyMode(f, fs.fileMode(node) and 0xfff)
+            return f.length()
+        }
+        val lengths = LongArray(fileTasks.size)
+        val errors = arrayOfNulls<Throwable>(fileTasks.size)
+        runFilesParallel(fileTasks.size) { from, to, failed ->
+            for (i in from until to) {
+                if (failed.get()) return@runFilesParallel
+                try {
+                    if (cancelled) throw IOException("cancelled")
+                    lengths[i] = extractOne(fileTasks[i].first, fileTasks[i].second)
+                } catch (err: Throwable) { errors[i] = err; failed.set(true); return@runFilesParallel }
+            }
+        }
+        for (i in fileTasks.indices) {
+            errors[i]?.let { throw it }
+            files++; bytes += lengths[i]
+            if (i % 150 == 0) onProgress("$mount: ${fileTasks[i].first.substringAfterLast('/')}", -1f)
         }
         if (mount == "system") gotSystem = true
         log("EROFS $mount: $n objects")
@@ -3435,17 +3800,29 @@ class Importer(
             }
         }
         var made = 0
-        for ((target, link) in symlinks) {
-            val rel = link.trimStart('/')
+        var looped = 0
+        // a link listed twice (two images, an updater-script and the archive) is made once: the last one wins, as it did
+        val wanted = LinkedHashMap<String, String>()
+        for ((target, link) in symlinks) wanted[link.trimStart('/')] = target
+        for ((rel, target) in wanted) {
+            val link = "/$rel"
             val f = FirmwareContainers.destination(root, rel)
             FirmwareContainers.checkLink(rel, target)
             f.parentFile?.mkdirs()
             val t = relTarget(link, target)
-            runCatching {
-                if (f.exists() || isLink(f)) { if (f.isDirectory && !isLink(f)) return@runCatching; f.delete() }
-                Os.symlink(t, f.absolutePath); made++
-            }
+            val ok = runCatching {
+                if (f.exists() || isLink(f)) { if (f.isDirectory && !isLink(f)) return@runCatching false; f.delete() }
+                Os.symlink(t, f.absolutePath)
+                true
+            }.getOrDefault(false)
+            if (!ok) continue
+            // Android has plenty of links and no limit is wanted on them, but two images can each hold one half of a pair that
+            // points at each other (/odm -> /vendor/odm here, /vendor/odm -> /odm there). Making the pair is harmless; only
+            // the link that closes the loop is useless, and every later look at the tree through it would fail with ELOOP.
+            if (closesLoop(f)) { runCatching { f.delete() }; looped++; log("symlink $rel -> $target skipped: it would point back at itself") }
+            else made++
         }
+        if (looped > 0) log("symlinks skipped because they would loop: $looped")
         for ((p, mode, rec) in perms) {
             val f = FirmwareContainers.destination(root, p.trimStart('/'))
             if (rec) f.walkTopDown().filter { it.isFile }.forEach { applyMode(it, mode) } else if (f.isFile) applyMode(f, mode)
@@ -3469,6 +3846,20 @@ class Importer(
         runCatching { File(root, "system/etc/mtab").let { if (!it.exists() && !isLink(it)) Os.symlink("../../proc/mounts", it.absolutePath) } }
         log("symlinks created: $made")
     }
+
+    /** True if following the link [f] (created just now) ends in a loop, which the system reports as ELOOP; a dangling link is fine. */
+    private fun closesLoop(f: File): Boolean = try {
+        Os.stat(f.absolutePath); false
+    } catch (e: android.system.ErrnoException) {
+        e.errno == android.system.OsConstants.ELOOP
+    }
+
+    /** [f] lies inside [dir] by name; only its folder is resolved, so a link at [f] (even a looping one) is never followed. */
+    private fun insideTree(f: File, dir: File): Boolean = runCatching {
+        val base = dir.canonicalPath
+        val parent = f.parentFile?.canonicalPath ?: return@runCatching false
+        parent == base || parent.startsWith(base + File.separator)
+    }.getOrDefault(false)
 
     private fun isLink(f: File) = runCatching { android.system.OsConstants.S_ISLNK(Os.lstat(f.absolutePath).st_mode) }.getOrDefault(false)
 

@@ -11,6 +11,12 @@
  * their calls are passed straight through. Which side a context goes to is decided when it is created (policy()).
  * Each thread has a table of entry points: SwiftShader's GLES 2 or GLES 1 library, or the encoders.
  *
+ * Without a SwiftShader (the x86 firmwares: "solo") every context is the host's. The host has GLES 3 contexts only, so a GLES 1
+ * context (the boot animation, old games and wallpapers) gets the fixed-function pipeline from gles1.h, which writes matrices, lighting,
+ * fog, texture environments, glDrawTex* and the rest in GLSL over the same encoders. What the host can do beyond protocol 1 (a frame
+ * converted into the window buffer's layout, window buffers as textures) it announces after OP_HELLO (AEMU_CAP_*); against a host that
+ * does not, the guest does that work itself, as it did before.
+ *
  * Built for every bionic from 5.0 on: libc, libdl and liblog only; libnativewindow is looked up at run time.
  */
 #include <dlfcn.h>
@@ -26,6 +32,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include "common.h"
 #include "../grallocwrap/note.h"
 
@@ -73,6 +80,7 @@ struct ectx;
 struct esurf;
 struct ts {
     int fd, dead;
+    uint32_t caps;          /* AEMU_CAP_* of the host (asked once after OP_HELLO) */
     uint8_t *buf;
     uint32_t n, cap;
     struct ectx *ctx;
@@ -126,12 +134,14 @@ static void get(struct ts *T, void *p, uint32_t n) {
 static inline uint32_t get32v(struct ts *T) { uint32_t v = 0; rd_all(T, &v, 4); return v; }
 static inline uint64_t get64v(struct ts *T) { uint64_t v = 0; rd_all(T, &v, 8); return v; }
 
+struct g1;                  /* the fixed-function state of a GLES 1 context (gles1.h) */
 struct ectx {
     int bridged, version, current;
     void *ss;               /* SwiftShader's context */
     uint32_t host;          /* the host's context */
     void *dpy, *cfg;
     struct gstate g;
+    struct g1 *g1;          /* GLES 1 contexts only: made when first used */
 };
 static struct gstate *G(void) { return &t_ts->ctx->g; }
 #define aemu_get_count(pname) (G()->count)
@@ -144,7 +154,7 @@ static struct gstate *G(void) { return &t_ts->ctx->g; }
  * particles: a stall per draw, 4 frames a second), so the indices written while a buffer is bound as
  * GL_ELEMENT_ARRAY_BUFFER are kept here as well. A copy is dropped as soon as the buffer may change some other way
  * (a write through a target whose buffer is not known here, copies, transform feedback, compute). */
-struct shadow { uint32_t root; unsigned name; long size; uint8_t *data; };
+struct shadow { uint32_t root; unsigned name; long size; uint8_t *data; long m_off, m_max; int m_count; uint32_t m_isz; };   /* m_*: the last answer of sh_max */
 static struct shadow g_sh[64];
 static pthread_mutex_t g_sh_lock = PTHREAD_MUTEX_INITIALIZER;
 #define SHADOW_MAX (4L << 20)
@@ -185,11 +195,11 @@ static void sh_write(GLenum target, long offset, const void *p, long size, int w
             for (int i = 0; i < 64 && !x; i++) if (!g_sh[i].data) x = &g_sh[i];
             if (!x) { x = &g_sh[(name * 7u) & 63]; free(x->data); }
             x->data = p ? malloc((size_t)size) : calloc(1, (size_t)size);
-            if (x->data) { if (p) memcpy(x->data, p, (size_t)size); x->root = g->root; x->name = name; x->size = size; }
+            if (x->data) { if (p) memcpy(x->data, p, (size_t)size); x->root = g->root; x->name = name; x->size = size; x->m_count = 0; }
             else memset(x, 0, sizeof(*x));
         }
     } else if (x) {
-        if (p && offset >= 0 && size >= 0 && offset + size <= x->size) memcpy(x->data + offset, p, (size_t)size);
+        if (p && offset >= 0 && size >= 0 && offset + size <= x->size) { memcpy(x->data + offset, p, (size_t)size); x->m_count = 0; }
         else { free(x->data); memset(x, 0, sizeof(*x)); }
     }
     pthread_mutex_unlock(&g_sh_lock);
@@ -200,13 +210,17 @@ static long sh_max(struct gstate *g, long offset, int count, uint32_t isz) {
     pthread_mutex_lock(&g_sh_lock);
     struct shadow *x = sh_find(g->root, g->elem);
     if (x && offset >= 0 && offset + (long)count * isz <= x->size) {
-        const uint8_t *ix = x->data + offset;
-        uint32_t max = 0;
-        for (int i = 0; i < count; i++) {
-            uint32_t v = isz == 1 ? ix[i] : isz == 2 ? ((const uint16_t *)ix)[i] : ((const uint32_t *)ix)[i];
-            if (v > max) max = v;
+        if (x->m_count == count && x->m_off == offset && x->m_isz == isz) r = x->m_max;      /* (the same quads again and again: text, Skia) */
+        else {
+            const uint8_t *ix = x->data + offset;
+            uint32_t max = 0;
+            for (int i = 0; i < count; i++) {
+                uint32_t v = isz == 1 ? ix[i] : isz == 2 ? ((const uint16_t *)ix)[i] : ((const uint32_t *)ix)[i];
+                if (v > max) max = v;
+            }
+            r = max;
+            x->m_count = count; x->m_off = offset; x->m_isz = isz; x->m_max = r;
         }
-        r = max;
     }
     pthread_mutex_unlock(&g_sh_lock);
     return r;
@@ -371,6 +385,13 @@ static int type_size(int type) {
     }
     return 4;
 }
+/* Hashing an array to find out whether the host still has it costs more than sending it when the guest's CPU is a translator (x86 firmware
+ * runs in one: ~2 emulated instructions a byte against a copy the kernel makes at full speed), so there the arrays always go. */
+#if defined(__i386__) || defined(__x86_64__)
+#define ARRAY_DEDUP 0
+#else
+#define ARRAY_DEDUP 1
+#endif
 static uint64_t sum_of(const void *p, uint32_t n) {
     const uint8_t *c = p;
     uint64_t h = 0x9e3779b97f4a7c15ull ^ n, w;
@@ -429,8 +450,8 @@ static void e_draw(GLenum mode, GLint first, GLsizei count, GLenum type, const v
         len[i] = (uint32_t)((n - 1) * st + esz);
         /* the same bytes as the last time (a mesh drawn again and again): the host still has them */
         const void *from = (const char *)a->ptr + (a->div ? 0 : (long)vfirst * st);
-        sum[i] = sum_of(from, len[i]);
-        same[i] = a->sent == from && a->sent_n == len[i] && a->sent_sum == sum[i];
+        sum[i] = ARRAY_DEDUP ? sum_of(from, len[i]) : 0;
+        same[i] = ARRAY_DEDUP && a->sent == from && a->sent_n == len[i] && a->sent_sum == sum[i];
         a->sent = from; a->sent_n = len[i]; a->sent_sum = sum[i];
         total += 28 + (same[i] ? 0 : BLOB(len[i]));
         nattr++;
@@ -554,11 +575,40 @@ static char *host_string(struct ts *T, GLenum name, uint32_t index) {
     get(T, s, BLOB(n)); s[n] = 0;
     return s;
 }
+/* What a program that asks for the strings before (or without) a working context gets, instead of a NULL it then hands to strncmp:
+ * SPen (S Note, Quick Memo, Flash Annotate) compares GL_RENDERER with a name right after a failed eglCreateContext /
+ * eglMakeCurrent and died in libc. Nothing is made up here: the strings are the ones the host answers (the VM's GPU identity
+ * from the SoC / GPU spoofer when it names one, the phone's own otherwise; the host answers them without a context too), and
+ * the last of those is kept for a host that cannot be asked at the moment. With neither, an empty string, which a comparison
+ * survives. */
+static char *g_seen[5];
+static struct ts *ts_get(void);
+static int str_index(GLenum name) { return name >= 0x1F00 && name <= 0x1F03 ? (int)name - 0x1F00 : name == 0x8B8C ? 4 : -1; }
+static void str_seen(int i, const char *s) {
+    if (i < 0 || i > 4 || !s || g_seen[i]) return;
+    size_t n = strlen(s);
+    char *c = malloc(n + 1);
+    if (!c) return;
+    memcpy(c, s, n + 1);
+    if (!__sync_bool_compare_and_swap(&g_seen[i], (char *)0, c)) free(c);
+}
+static const GLubyte *str_fallback(GLenum name) {
+    int i = str_index(name);
+    if (i < 0) return 0;
+    if (!g_seen[i]) {
+        struct ts *T = ts_get();
+        char *s = T ? host_string(T, name, NIL) : 0;
+        if (s) { str_seen(i, s); free(s); }
+    }
+    return (const GLubyte *)(g_seen[i] ? g_seen[i] : "");
+}
 static const GLubyte *e_glGetString(GLenum name) {
     struct gstate *g = G();
-    int i = name >= 0x1F00 && name <= 0x1F03 ? (int)name - 0x1F00 : name == 0x8B8C ? 4 : -1;
+    int i = str_index(name);
     if (i < 0) return 0;
     if (!g->str[i]) g->str[i] = host_string(TS(), name, NIL);
+    if (!g->str[i]) return str_fallback(name);
+    str_seen(i, g->str[i]);
     return (const GLubyte *)g->str[i];
 }
 static const GLubyte *e_glGetStringi(GLenum name, GLuint index) {
@@ -759,6 +809,9 @@ static void e_glGetnUniformfvKHR(GLuint program, GLint location, GLsizei n, GLfl
 static void e_glGetnUniformivKHR(GLuint program, GLint location, GLsizei n, GLint *params) { (void)n; get_uniform(1, program, location, params); }
 static void e_glGetUniformuiv(GLuint program, GLint location, GLuint *params) { get_uniform(2, program, location, params); }
 
+/* ---- GLES 1 on the host's GLES 3 contexts: the fixed-function pipeline, written over the encoders above ---- */
+#include "gles1.h"
+
 /* ---- the window system's types, as libnativewindow lays them out ---- */
 struct native_base { int magic, version; void *reserved[4]; void (*incRef)(struct native_base *); void (*decRef)(struct native_base *); };
 struct ANativeWindowBuffer {
@@ -838,7 +891,11 @@ static void buf_unlock(struct ANativeWindowBuffer *b) { if (g_gr) g_gr->unlock(g
 #else
 #define LIBDIR "lib"
 #endif
-static struct { void *egl, *v2, *v1; void *t2[N_FUNCS], *t1[N_FUNCS], *enc[N_FUNCS]; volatile int up; } SS;
+static struct { void *egl, *v2, *v1; void *t2[N_FUNCS], *t1[N_FUNCS], *enc[N_FUNCS], *enc1[N_FUNCS]; volatile int up; } SS;
+/* glGetString through the table of "no bridged context is current": the software side answers NULL without a context of its own */
+static const GLubyte *(*ss_gs2)(GLenum), *(*ss_gs1)(GLenum);
+static const GLubyte *ss_glGetString2(GLenum name) { const GLubyte *r = ss_gs2 ? ss_gs2(name) : 0; return r ? r : str_fallback(name); }
+static const GLubyte *ss_glGetString1(GLenum name) { const GLubyte *r = ss_gs1 ? ss_gs1(name) : 0; return r ? r : str_fallback(name); }
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static long nothing(void) { return 0; }
 static long not_carried(void) {
@@ -877,6 +934,18 @@ static void ss_load(void) {
             SS.t1[i] = f ? f : (void *)nothing;
             SS.enc[i] = kEnc[i] ? kEnc[i] : (void *)not_carried;
         }
+        /* Calls that only inform tools (the guest's libEGL offers GL_EXT_debug_marker itself and programs use it) have no effect on
+         * the picture: taken and dropped, not reported as missing. */
+        static const int kNop[] = { IDX_glInsertEventMarkerEXT, IDX_glPushGroupMarkerEXT, IDX_glPopGroupMarkerEXT, IDX_glLabelObjectEXT,
+                                    IDX_glGetObjectLabelEXT, IDX_glStartTilingQCOM, IDX_glEndTilingQCOM };
+        for (unsigned i = 0; i < sizeof kNop / sizeof kNop[0]; i++) SS.enc[kNop[i]] = (void *)nothing;
+        if (SS.t2[IDX_glGetString] != (void *)nothing) ss_gs2 = (const GLubyte *(*)(GLenum))SS.t2[IDX_glGetString];
+        if (SS.t1[IDX_glGetString] != (void *)nothing) ss_gs1 = (const GLubyte *(*)(GLenum))SS.t1[IDX_glGetString];
+        SS.t2[IDX_glGetString] = (void *)ss_glGetString2;
+        SS.t1[IDX_glGetString] = (void *)ss_glGetString1;
+        /* a GLES 1 context: the same encoders, the fixed-function entries (gles1.h) over them */
+        memcpy(SS.enc1, SS.enc, sizeof(SS.enc1));
+        g1_install(SS.enc1);
         SS.up = 1;
     }
     pthread_mutex_unlock(&g_lock);
@@ -1110,6 +1179,14 @@ struct esurf {
     uint8_t *tmp; uint32_t tmp_n;
 };
 static volatile uint32_t g_keys;
+/* (gles1.h: the viewport before the program sets one is the whole surface) */
+static void g1_surface_size(int *w, int *h) {
+    struct esurf *s = t_ts && t_ts->ctx ? t_ts->draw : 0;
+    *w = *h = 0;
+    if (!s) return;
+    *w = s->w; *h = s->h;
+    if (s->kind == S_WINDOW && !s->buf && s->win && s->win->query) { int v = 0; s->win->query(s->win, 0, &v); *w = v; v = 0; s->win->query(s->win, 1, &v); *h = v; }
+}
 
 /* (bionic has getprogname from 5.0; before it: the translator shows the guest's own argv in /proc/self/cmdline) */
 extern const char *getprogname(void) __attribute__((weak));
@@ -1178,6 +1255,10 @@ static struct ts *ts_get(void) {
     begin(T, OP_HELLO, 4, 4); put32(T, AEMU_GL_PROTOCOL);
     rsync(T);
     if (get32v(T) != AEMU_GL_PROTOCOL) { LOG("the host renderer speaks another protocol"); close(T->fd); free(T->buf); free(T); return 0; }
+    /* what else the host does: a host that knows the probe answers 1 | caps << 1, an older one just 1 */
+    begin(T, OP_PING, 4, 4); put32(T, AEMU_CAPS_PROBE);
+    rsync(T);
+    { uint32_t r = get32v(T); T->caps = (r & 1) && r > 1 ? r >> 1 : 0; }
     pthread_once(&g_key_once, key_make);
     pthread_setspecific(g_key, T);
     t_ts = T;
@@ -1300,6 +1381,16 @@ EXPORT EGLContext eglCreateContext(EGLDisplay d, EGLConfig cfg, EGLContext share
             rsync(T);
             c->host = get32v(T);
             c->g.root = sh ? sh->g.root : c->host;
+            if (!c->host && sh) {
+                /* The phone's driver refused a context that shares with another. SPen (S Note, Quick Memo, Flash Annotate) answers
+                 * a refused window context with an eglMakeCurrent on nothing and then reads GL_RENDERER from no context: the program
+                 * dies. A context of its own draws (its objects are its own, not the group's) and the program lives. */
+                LOG("the host refused a GLES %d context sharing with %u: a context of its own", c->version, sh->host);
+                begin(T, OP_CTX_CREATE, 8, 8); put32(T, 0); put32(T, (uint32_t)c->version);
+                rsync(T);
+                c->host = get32v(T);
+                c->g.root = c->host;
+            }
         }
         if (c->host) {
             char name[17] = "";
@@ -1331,6 +1422,7 @@ static void ctx_free(struct ectx *c) {
         for (int i = 0; i < c->g.next; i++) free(c->g.ext[i]);
         free(c->g.ext);
         for (int i = 0; i < 8; i++) free(c->g.maps[i].ptr);
+        free(c->g1);
     } else { SSF(EGLBoolean, DestroyContext, (EGLDisplay, EGLContext)); if (DestroyContext) DestroyContext(c->dpy, c->ss); }
     free(c);
 }
@@ -1411,7 +1503,7 @@ EXPORT EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read,
             surf_unref(od); if (orr != od) surf_unref(orr);
             if (--old->current == 0x10000) ctx_free(old);
         }
-        t_tbl = SS.enc;
+        t_tbl = c->version == 1 ? SS.enc1 : SS.enc;
         return 1;
     }
     bridge_release();
@@ -1458,8 +1550,75 @@ EXPORT EGLBoolean eglWaitGL(void) {
 }
 EXPORT EGLBoolean eglWaitClient(void) { return eglWaitGL(); }
 
-/* The frame of a bridged context: the host reads it back, bottom row first, and it is copied into the window's
- * buffer the other way up. */
+/* ---- the layout of the framebuffer's own memory ----
+ * A window buffer with GRALLOC_USAGE_HW_FB (0x1000) lives in fb0's memory and has fb0's pixel layout, whatever format the window asked for
+ * (the fbdev gralloc of an x86 firmware). Read once from fb0 (FBIOGET_VSCREENINFO): bits per pixel and where each channel sits. */
+struct fbfmt { int ok, bpp, ro, rl, go, gl, bo, bl, ao, al; };
+static struct fbfmt g_fb;
+static const struct fbfmt *fb_layout(void) {
+    static volatile int tried;
+    if (!tried) {
+        tried = 1;
+        uint32_t v[40];
+        static const char *const dev[] = { "/dev/graphics/fb0", "/dev/fb0" };
+        for (unsigned i = 0; i < 2 && !g_fb.ok; i++) {
+            int fd = open(dev[i], O_RDONLY | O_CLOEXEC);
+            if (fd < 0) continue;
+            memset(v, 0, sizeof(v));
+            if (ioctl(fd, 0x4600 /* FBIOGET_VSCREENINFO */, v) == 0 && (v[6] == 16 || v[6] == 24 || v[6] == 32)) {
+                g_fb.bpp = (int)v[6];
+                g_fb.ro = (int)v[8]; g_fb.rl = (int)v[9]; g_fb.go = (int)v[11]; g_fb.gl = (int)v[12];
+                g_fb.bo = (int)v[14]; g_fb.bl = (int)v[15]; g_fb.ao = (int)v[17]; g_fb.al = (int)v[18];
+                /* a driver that left the channels empty: the usual layouts */
+                if (!g_fb.rl || !g_fb.gl || !g_fb.bl) {
+                    if (g_fb.bpp == 16) { g_fb.ro = 11; g_fb.rl = 5; g_fb.go = 5; g_fb.gl = 6; g_fb.bo = 0; g_fb.bl = 5; g_fb.ao = g_fb.al = 0; }
+                    else { g_fb.ro = 0; g_fb.rl = 8; g_fb.go = 8; g_fb.gl = 8; g_fb.bo = 16; g_fb.bl = 8; g_fb.ao = 24; g_fb.al = g_fb.bpp == 32 ? 8 : 0; }
+                }
+                g_fb.ok = 1;
+                LOG("fb0: %d bpp, r %d:%d g %d:%d b %d:%d a %d:%d", g_fb.bpp, g_fb.ro, g_fb.rl, g_fb.go, g_fb.gl, g_fb.bo, g_fb.bl, g_fb.ao, g_fb.al);
+            }
+            close(fd);
+        }
+        if (!g_fb.ok) LOG("fb0: layout not readable, a framebuffer window buffer is taken as RGB_565");
+    }
+    return g_fb.ok ? &g_fb : 0;
+}
+/* one row of RGBA (the host's readback) into the memory of a buffer of this layout */
+static void fb_row(uint8_t *dst, const uint8_t *src, uint32_t w, const struct fbfmt *f) {
+    for (uint32_t x = 0; x < w; x++, src += 4) {
+        uint32_t v = (uint32_t)(src[0] >> (8 - f->rl)) << f->ro | (uint32_t)(src[1] >> (8 - f->gl)) << f->go | (uint32_t)(src[2] >> (8 - f->bl)) << f->bo;
+        if (f->al) v |= (uint32_t)(src[3] >> (8 - f->al)) << f->ao;
+        if (f->bpp == 16) ((uint16_t *)dst)[x] = (uint16_t)v;
+        else if (f->bpp == 24) { dst[x * 3] = (uint8_t)v; dst[x * 3 + 1] = (uint8_t)(v >> 8); dst[x * 3 + 2] = (uint8_t)(v >> 16); }
+        else ((uint32_t *)dst)[x] = v;
+    }
+}
+
+/* What a window buffer's memory looks like: a framebuffer buffer has fb0's layout (see fb_layout), any other the layout its HAL
+ * format names. 0: a format the bridge does not know. */
+static const struct fbfmt *buf_layout(const struct ANativeWindowBuffer *b, struct fbfmt *own, int *hw_fb) {
+    const struct fbfmt *lay = 0;
+    *own = (struct fbfmt){ 1, 32, 0, 8, 8, 8, 16, 8, 24, 8 };       /* RGBA_8888 */
+    *hw_fb = (b->usage_deprecated & 0x1000) != 0;
+    if (*hw_fb) lay = fb_layout();
+    if (!lay) {
+        switch (b->format) {
+        case 1: lay = own; break;                                                                       /* RGBA_8888 */
+        case 2: own->al = 0; lay = own; break;                                                          /* RGBX_8888 */
+        case 5: own->ro = 16; own->bo = 0; lay = own; break;                                            /* BGRA_8888 */
+        case 3: own->bpp = 24; own->al = 0; lay = own; break;                                           /* RGB_888 */
+        case 4: *own = (struct fbfmt){ 1, 16, 11, 5, 5, 6, 0, 5, 0, 0 }; lay = own; break;             /* RGB_565 */
+        default:
+            if (*hw_fb) { *own = (struct fbfmt){ 1, 16, 11, 5, 5, 6, 0, 5, 0, 0 }; lay = own; }         /* (fb0 unreadable: 16 bit, as before) */
+        }
+    }
+    return lay;
+}
+
+/* The frame of a bridged context goes into the window's buffer. A buffer of the engine's gralloc stays on the host (the frame is
+ * copied into the host's buffer of the same number); any other is filled from a read-back: by the host in the buffer's own layout, top
+ * row first, straight into the memory (the host's CPU does what a translated guest's would take milliseconds for), or - a host
+ * that does not offer that - from RGBA, bottom row first, converted here. */
 static EGLBoolean bridge_swap(struct ts *T, struct esurf *s) {
     if (s->kind != S_WINDOW) return 1;
     win_dequeue(s);
@@ -1481,21 +1640,37 @@ static EGLBoolean bridge_swap(struct ts *T, struct esurf *s) {
         if (s->buf && ((uint32_t)s->w != w || (uint32_t)s->h != h)) { begin(T, OP_SURF_SIZE, 8, 8); put32(T, (uint32_t)s->w); put32(T, (uint32_t)s->h); }
         return 1;
     }
-    if (s->tmp_n < need) { free(s->tmp); s->tmp = malloc(need); s->tmp_n = s->tmp ? need : 0; }
-    begin(T, OP_SWAP, 8, 8); put32(T, w); put32(T, h);
-    rsync(T);
-    get(T, s->tmp, need);
-    uint8_t *va = s->tmp ? buf_lock(b, 1) : 0;
-    if (va) {
-        if (b->format == 4) {       /* RGB_565 */
-            for (uint32_t y = 0; y < h; y++) {
-                const uint8_t *src = s->tmp + (size_t)(h - 1 - y) * w * 4;
-                uint16_t *dst = (uint16_t *)(va + (size_t)y * (uint32_t)b->stride * 2);
-                for (uint32_t x = 0; x < w; x++, src += 4) dst[x] = (uint16_t)((src[0] >> 3) << 11 | (src[1] >> 2) << 5 | src[2] >> 3);
-            }
-        } else for (uint32_t y = 0; y < h; y++)
-            memcpy(va + (size_t)y * (uint32_t)b->stride * 4, s->tmp + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
-        buf_unlock(b);
+    struct fbfmt own;
+    int hw_fb = 0;
+    const struct fbfmt *lay = buf_layout(b, &own, &hw_fb);
+    {   static int said;
+        if (said < 3) { said++; LOG("window buffer %dx%d stride %d format %d usage 0x%x -> %d bpp%s%s", b->width, b->height, b->stride, b->format, b->usage_deprecated, lay ? lay->bpp : 0, hw_fb ? " (framebuffer)" : "", (T->caps & AEMU_CAP_SWAP_FMT) ? ", converted by the host" : ""); }
+    }
+    if (!lay) { static int said; if (said++ < 5) LOG("a frame is dropped: window buffer format %d has no layout the bridge knows", b->format); }
+    if (lay && (T->caps & AEMU_CAP_SWAP_FMT)) {
+        uint32_t px = lay->bpp / 8, stride = b->stride >= (int)w ? (uint32_t)b->stride : w, pitch = stride * px;
+        uint32_t total = pitch * (h - 1) + w * px;
+        uint8_t *va = buf_lock(b, 1);
+        if (!va) { static int said; if (said++ < 5) LOG("a frame is dropped: the gralloc would not lock the window buffer (usage 0x%x)", b->usage_deprecated); }
+        begin(T, OP_SWAP_FMT, 48, 48);
+        put32(T, w); put32(T, h); put32(T, (uint32_t)lay->bpp); put32(T, pitch);
+        put32(T, (uint32_t)lay->ro); put32(T, (uint32_t)lay->rl); put32(T, (uint32_t)lay->go); put32(T, (uint32_t)lay->gl);
+        put32(T, (uint32_t)lay->bo); put32(T, (uint32_t)lay->bl); put32(T, (uint32_t)lay->ao); put32(T, (uint32_t)lay->al);
+        rsync(T);
+        if (va) { rd_all(T, va, total); buf_unlock(b); }
+        else get(T, 0, total);                     /* (the frame has to be taken off the socket either way) */
+    } else {
+        if (s->tmp_n < need) { free(s->tmp); s->tmp = malloc(need); s->tmp_n = s->tmp ? need : 0; }
+        begin(T, OP_SWAP, 8, 8); put32(T, w); put32(T, h);
+        rsync(T);
+        get(T, s->tmp, need);
+        uint8_t *va = s->tmp ? buf_lock(b, 1) : 0;
+        if (!va && lay) { static int said; if (said++ < 5) LOG("a frame is dropped: the gralloc would not lock the window buffer (usage 0x%x)", b->usage_deprecated); }
+        if (va) {
+            if (lay) for (uint32_t y = 0; y < h; y++)
+                fb_row(va + (size_t)y * (uint32_t)b->stride * (uint32_t)(lay->bpp / 8), s->tmp + (size_t)(h - 1 - y) * w * 4, w, lay);
+            buf_unlock(b);
+        }
     }
     s->buf = 0;
     s->win->queueBuffer(s->win, b, -1);
@@ -1719,6 +1894,15 @@ static void e_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image) {
     if (!bpp) { not_carried(); return; }
     uint8_t *va = buf_lock(b, 0), *tight = 0;
     if (!va) return;
+    if ((T->caps & AEMU_CAP_IMAGE_TEX2) && b->format >= 1 && b->format <= 4 && b->stride >= (int)w) {
+        /* the rows as the buffer holds them (the pitch, the format): the host's GPU takes any of them, the guest repacks nothing */
+        uint32_t n = ((uint32_t)(b->stride) * (h - 1) + w) * (uint32_t)bpp;
+        begin(T, OP_IMAGE_TEX2, 24, 24 + BLOB(n));
+        put32(T, target); put32(T, w); put32(T, h); put32(T, (uint32_t)b->stride); put32(T, (uint32_t)b->format);
+        putblob(T, va, n);
+        buf_unlock(b);
+        return;
+    }
     if (bpp != 4) {     /* RGB_565 / RGB_888 (a camera preview's window, say): widened to RGBA */
         if (!(tight = malloc((size_t)w * h * 4))) { buf_unlock(b); return; }
         for (uint32_t y = 0; y < h; y++) {

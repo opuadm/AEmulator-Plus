@@ -88,6 +88,17 @@ object EngineAssets {
     const val X86_64_GPU_BRIDGE = "engines/common-x86_64/system#lib64#egl#libGLES_aemu.so"
 
     /**
+     * Added for AEmulator Plus (2026-11-20): the i386 build of the same bridge (native/glbridge/build32-x86.sh, "solo" mode: no software
+     * renderer behind it). The KK engine's own guest-side GL library (engines/kk/libGLES.so) is an ARM-only prebuilt without source, so an
+     * x86-32 firmware on the KK engine (Android 1-7) uses this open bridge, served by GlHost, instead of looking for engines/kk-x86/libGLES.so.
+     */
+    const val X86_I386_GPU_BRIDGE = "engines/common-x86_64/system#lib#egl#libGLES_aemu.so"
+
+    /** the x86-32 firmware on the KK engine draws through the open i386 bridge (GlHost) rather than the ARM-only glserverd client */
+    fun kkX86OpenBridge(ctx: Context, engine: Engine, arch: GuestArch): Boolean =
+        engine == Engine.KK && arch == GuestArch.X86 && exists(ctx, X86_I386_GPU_BRIDGE)
+
+    /**
      * The engine's own x86-64 builds, split like the native engine's layers (modified for AEmulator Plus, 2026-11-14; they
      * all used to sit in engines/n64-x86_64): engines/common-x86_64 holds what does not depend on the Android release, and
      * engines/n64-<api>/x86_64 what is built for one release only (n64-30/x86_64: the audio HAL stack of android11-release),

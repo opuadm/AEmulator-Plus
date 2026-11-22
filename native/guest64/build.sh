@@ -49,9 +49,11 @@ fi
 if [ -f gralloc_exynos.c ]; then
   A="../../../app/src/main/assets/engines/n64-$TAG"
   F="-Os -fPIC -shared -nostdlib -ffreestanding -fno-builtin -fvisibility=hidden -fno-stack-protector -Wl,--build-id=none -Wl,--no-undefined -Wl,-soname,gralloc.default.so"
-  "$BIN/clang" --target=aarch64-linux-android21 $F -o "$A/system#lib64#libgralloc_exynos.so" gralloc_exynos.c -ldl -lc || exit 1
-  "$BIN/clang" --target=armv7a-linux-androideabi21 -mthumb $F -Wl,--hash-style=both -o "$A/system#lib#libgralloc_exynos.so" gralloc_exynos.c -ldl -lc || exit 1
-  "$BIN/llvm-strip" "$A/system#lib64#libgralloc_exynos.so" "$A/system#lib#libgralloc_exynos.so" 2>/dev/null || true
+  # (a Treble kernel's gralloc is on the vendor side: the source names the module it wraps there)
+  P=system; grep -q '"/vendor/lib64/libgralloc_rom.so"' gralloc_exynos.c && P=vendor
+  "$BIN/clang" --target=aarch64-linux-android21 $F -o "$A/$P#lib64#libgralloc_exynos.so" gralloc_exynos.c -ldl -lc || exit 1
+  "$BIN/clang" --target=armv7a-linux-androideabi21 -mthumb $F -Wl,--hash-style=both -o "$A/$P#lib#libgralloc_exynos.so" gralloc_exynos.c -ldl -lc || exit 1
+  "$BIN/llvm-strip" "$A/$P#lib64#libgralloc_exynos.so" "$A/$P#lib#libgralloc_exynos.so" 2>/dev/null || true
 fi
 # a kernel with a gralloc that gives out handles laid out as Qualcomm's SurfaceFlinger reads them (7.0: MIUI 8); both
 # word sizes, kept outside hw/ - the tree fixer puts it in place where the firmware needs it

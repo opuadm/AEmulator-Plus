@@ -34,6 +34,10 @@
     <string name="vi_mouse_keyboard_sub">Registers a touchpad and a keyboard in the guest and removes its touch screen. The screen becomes a touchpad (tap to click, two fingers to scroll) and a keyboard button appears in the navigation bar. Needs the QEMU engine (not the native 64-bit one) and a full VM restart.</string>
     <string name="vi_keypad">Input: keypad</string>
     <string name="vi_keypad_sub">Adds a keypad button to the navigation bar: arrow keys, OK, soft keys, Call/End and 0–9 * # like a feature phone. Touch keeps working and it can be combined with mouse and keyboard.</string>
+    <string name="vi_spen">Input: S-Pen</string>
+    <string name="vi_spen_sub">Registers an S-Pen digitizer (sec_e-pen) in the guest alongside its touch screen and adds two buttons to the navigation bar. S-Pen mode: while it is lit, every touch on the screen reaches the guest as the S-Pen (stylus tool type, pressure, hover just before and after contact; one contact at a time, no multi-touch), and a host stylus also hovers and its side button works. S-Pen button: a tap presses and releases the pen\'s side button while it hovers, which opens Air Command on a Samsung firmware that has it. Needs Android 4.0 or newer and a full VM restart.</string>
+    <string name="vi_spen_toggle">S-Pen mode</string>
+    <string name="vi_spen_button">S-Pen button (Air Command)</string>
     <string name="vi_keyboard">Keyboard</string>
     <string name="vi_keypad_title">Keypad</string>
     <string name="vi_close">Close</string>

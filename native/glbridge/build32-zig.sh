@@ -15,9 +15,10 @@ S(__cxa_finalize) S(__cxa_atexit) S(strlen) S(malloc) S(calloc) S(realloc) S(fre
 S(strcmp) S(memcmp) S(memset) S(memcpy) S(send) S(__system_property_get) S(getprogname) S(open) S(read) S(close) S(prctl)
 S(socket) S(connect) S(setsockopt) S(poll) S(abort) S(pthread_once) S(pthread_setspecific) S(pthread_getspecific)
 S(pthread_key_create) S(pthread_key_delete) S(pthread_mutex_lock) S(pthread_mutex_unlock)
+S(strncmp) S(memmove) S(getauxval) S(dladdr) S(memfd_create) S(ioctl)
 int *__errno(void) { return 0; }
 EOT
-echo 'LIBC { global: __cxa_finalize; __cxa_atexit; strlen; malloc; calloc; realloc; free; strstr; strcmp; memcmp; memset; memcpy; send; __system_property_get; getprogname; open; read; close; prctl; socket; connect; setsockopt; poll; abort; pthread_once; pthread_setspecific; pthread_getspecific; pthread_key_create; pthread_key_delete; pthread_mutex_lock; pthread_mutex_unlock; __errno; };' > "$STUB/libc.map"
+echo 'LIBC { global: __cxa_finalize; __cxa_atexit; strlen; malloc; calloc; realloc; free; strstr; strcmp; memcmp; memset; memcpy; send; __system_property_get; getprogname; open; read; close; prctl; socket; connect; setsockopt; poll; abort; pthread_once; pthread_setspecific; pthread_getspecific; pthread_key_create; pthread_key_delete; pthread_mutex_lock; pthread_mutex_unlock; strncmp; memmove; getauxval; dladdr; memfd_create; ioctl; __errno; };' > "$STUB/libc.map"
 echo 'void dlopen(void) {} void dlsym(void) {} void dlerror(void) {}' > "$STUB/dl.c"
 echo 'LIBC { global: dlopen; dlsym; dlerror; };' > "$STUB/dl.map"
 echo 'int __android_log_print(int p, const char *t, const char *f, ...) { return 0; }' > "$STUB/log.c"

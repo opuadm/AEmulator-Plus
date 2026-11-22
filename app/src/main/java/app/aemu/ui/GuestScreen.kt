@@ -26,6 +26,10 @@ class GuestScreen(ctx: Context, val w: Int, val h: Int) : View(ctx) {
     var fb: File? = null
     @Volatile var passthrough = false
         set(v) { field = v; postInvalidate() }
+    /** Added for AEmulator Plus (2026-11-19): the screen was set up for the in-app GPU bridge (KK engine, API < 21). The bridge is only
+     *  really there when GuestVm.glUp started it; when the standalone glserverd serves the guest instead (a VM that reports a GPU,
+     *  Mali) nothing draws into the SurfaceView, so this view has to show fb0 itself (see VmActivity, the passthrough sync). */
+    @Volatile var bridgeMode = false
     @Volatile var fps = 0f
         private set
     /** frames this screen has shown since the view started, by either path (the testers compare it with the guest's count) */
@@ -284,6 +288,29 @@ class GuestScreen(ctx: Context, val w: Int, val h: Int) : View(ctx) {
         poke()
         if (width <= 0 || height <= 0) return false
         val act = e.actionMasked
+        if (inp.spenRouting) {
+            // S-Pen mode: these touches are the pen's (one contact, with pressure and hover); the guest's touch screen stays quiet
+            val liftedIndex = if (act == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
+            val over = act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL
+            val button = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+            // hi < 0: the event's current position, otherwise the hi-th batched sample (a pen strokes faster than the frame rate)
+            fun sample(hi: Int): List<app.aemu.core.SPenProtocol.Contact> {
+                val out = ArrayList<app.aemu.core.SPenProtocol.Contact>(e.pointerCount)
+                for (i in 0 until e.pointerCount) {
+                    if (over || i == liftedIndex) continue
+                    val x = if (hi < 0) e.getX(i) else e.getHistoricalX(i, hi)
+                    val y = if (hi < 0) e.getY(i) else e.getHistoricalY(i, hi)
+                    val pr = if (hi < 0) e.getPressure(i) else e.getHistoricalPressure(i, hi)
+                    out.add(app.aemu.core.SPenProtocol.Contact(e.getPointerId(i),
+                        app.aemu.core.SPenProtocol.axis(x, width), app.aemu.core.SPenProtocol.axis(y, height),
+                        app.aemu.core.SPenProtocol.pressureOf(pr, e.getToolType(i) == MotionEvent.TOOL_TYPE_STYLUS)))
+                }
+                return out
+            }
+            if (act == MotionEvent.ACTION_MOVE) for (hi in 0 until e.historySize) inp.penTouch(sample(hi), button)
+            inp.penTouch(sample(-1), button)
+            return true
+        }
         if (inp.mouseKeyboardEnabled) {
             // mouse and keyboard: the guest has no touch screen, this view is its touchpad
             val liftedIndex = if (act == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
@@ -319,6 +346,30 @@ class GuestScreen(ctx: Context, val w: Int, val h: Int) : View(ctx) {
             pts.add(InputService.P(e.getPointerId(i), gx(e.getX(i)), gy(e.getY(i))))
         }
         inp.touch(pts, act != MotionEvent.ACTION_MOVE)
+        return true
+    }
+
+    // A host stylus hovering over the screen: in S-Pen mode the guest's pen comes into range and follows it, and the stylus's
+    // own side button reaches the guest as the pen's button (press and release it without touching: Air Command opens).
+    override fun onHoverEvent(e: MotionEvent): Boolean = stylusHover(e) || super.onHoverEvent(e)
+
+    // the host reports the side button going down and up as ACTION_BUTTON_PRESS / ACTION_BUTTON_RELEASE, which are not hover events
+    override fun onGenericMotionEvent(e: MotionEvent): Boolean = stylusHover(e) || super.onGenericMotionEvent(e)
+
+    private fun stylusHover(e: MotionEvent): Boolean {
+        val inp = input ?: return false
+        if (!inp.spenRouting || width <= 0 || height <= 0 || e.pointerCount < 1) return false
+        if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return false
+        when (e.actionMasked) {
+            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE,
+            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> {
+                poke()
+                inp.penHover(app.aemu.core.SPenProtocol.axis(e.x, width), app.aemu.core.SPenProtocol.axis(e.y, height),
+                    (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0)
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> inp.penHoverEnd()
+            else -> return false
+        }
         return true
     }
 

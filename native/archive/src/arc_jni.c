@@ -96,6 +96,7 @@ typedef struct {
     jobject src;
     jmethodID mid;
     arc7z *a;
+    arcrar *r;         /* set instead of [a] when the handle is a RAR reader */
     uint8_t *tmp; size_t tmp_cap;
 } szh;
 
@@ -144,7 +145,8 @@ static void n_sz_close(JNIEnv *env, jclass k, jlong hh) {
     szh *h = (szh *)(intptr_t)hh;
     (void)k;
     if (!h) return;
-    arc7z_close(h->a);
+    if (h->a) arc7z_close(h->a);
+    if (h->r) arcrar_close(h->r);
     (*env)->DeleteGlobalRef(env, h->src);
     free(h->tmp); free(h);
 }
@@ -195,6 +197,80 @@ static jint n_sz_read(JNIEnv *env, jclass k, jlong hh, jbyteArray b, jint off, j
     return (jint)n;
 }
 
+/* ---- RAR (same handle type as 7z; read callback shared) --------------------------------------------------------------- */
+
+static jlong n_rar_open(JNIEnv *env, jclass k, jobject src, jlong size, jlong mem_cap) {
+    (void)k;
+    szh *h = (szh *)calloc(1, sizeof *h);
+    arc_src as;
+    int rc = ARC_OK;
+    jclass sc;
+    if (!h) { throw_arc(env, ARC_E_MEM); return 0; }
+    h->env = env;
+    h->src = (*env)->NewGlobalRef(env, src);
+    sc = (*env)->GetObjectClass(env, src);
+    h->mid = (*env)->GetMethodID(env, sc, "readAt", "(JLjava/nio/ByteBuffer;)I");
+    (*env)->DeleteLocalRef(env, sc);
+    if (!h->mid || !h->src) { (*env)->DeleteGlobalRef(env, h->src); free(h); return 0; }
+    as.read_at = sz_read_at; as.ctx = h; as.size = (uint64_t)size;
+    h->r = arcrar_open(&as, mem_cap > 0 ? (uint64_t)mem_cap : 0, &rc);
+    if (!h->r) {
+        (*env)->DeleteGlobalRef(env, h->src);
+        free(h);
+        throw_arc(env, rc);
+        return 0;
+    }
+    return (jlong)(intptr_t)h;
+}
+static jint n_rar_count(JNIEnv *env, jclass k, jlong hh) { (void)env; (void)k; return (jint)arcrar_count(((szh *)(intptr_t)hh)->r); }
+static jstring n_rar_name(JNIEnv *env, jclass k, jlong hh, jint i) {
+    szh *h = (szh *)(intptr_t)hh;
+    size_t n = arcrar_name16(h->r, (uint32_t)i, NULL);
+    uint16_t *b = (uint16_t *)malloc((n + 1) * sizeof(uint16_t));
+    jstring s;
+    (void)k;
+    if (!b) { throw_arc(env, ARC_E_MEM); return NULL; }
+    arcrar_name16(h->r, (uint32_t)i, b);
+    s = (*env)->NewString(env, (const jchar *)b, (jsize)n);
+    free(b);
+    return s;
+}
+static void n_rar_info(JNIEnv *env, jclass k, jlong hh, jint i, jlongArray out) {
+    szh *h = (szh *)(intptr_t)hh;
+    uint64_t size = 0;
+    int dir = 0;
+    jlong v[2];
+    (void)k;
+    if (arcrar_info(h->r, (uint32_t)i, &size, &dir) != ARC_OK) { throw_arc(env, ARC_E_ARG); return; }
+    v[0] = (jlong)size; v[1] = dir;
+    (*env)->SetLongArrayRegion(env, out, 0, 2, v);
+}
+static void n_rar_select(JNIEnv *env, jclass k, jlong hh, jint i) {
+    szh *h = (szh *)(intptr_t)hh;
+    int rc;
+    (void)k;
+    h->env = env;
+    rc = arcrar_select(h->r, (uint32_t)i);
+    if (rc != ARC_OK) throw_arc(env, rc);
+}
+static jint n_rar_read(JNIEnv *env, jclass k, jlong hh, jbyteArray b, jint off, jint len) {
+    szh *h = (szh *)(intptr_t)hh;
+    size_t want = (size_t)len > (1u << 20) ? (1u << 20) : (size_t)len;
+    int64_t n;
+    (void)k;
+    h->env = env;
+    if (h->tmp_cap < want) {
+        uint8_t *t = (uint8_t *)realloc(h->tmp, want);
+        if (!t) { throw_arc(env, ARC_E_MEM); return -1; }
+        h->tmp = t; h->tmp_cap = want;
+    }
+    n = arcrar_read(h->r, h->tmp, want);
+    if (n < 0) { throw_arc(env, (int)n); return -1; }
+    if (n == 0) return -1;
+    (*env)->SetByteArrayRegion(env, b, off, (jsize)n, (const jbyte *)h->tmp);
+    return (jint)n;
+}
+
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     static const JNINativeMethod m[] = {
         { "nativeVersion", "()Ljava/lang/String;", (void *)n_version },
@@ -210,6 +286,13 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
         { "szInfo", "(JI[J)V", (void *)n_sz_info },
         { "szSelect", "(JI)V", (void *)n_sz_select },
         { "szRead", "(J[BII)I", (void *)n_sz_read },
+        { "rarOpen", "(Ljava/lang/Object;JJ)J", (void *)n_rar_open },
+        { "rarClose", "(J)V", (void *)n_sz_close },
+        { "rarCount", "(J)I", (void *)n_rar_count },
+        { "rarName", "(JI)Ljava/lang/String;", (void *)n_rar_name },
+        { "rarInfo", "(JI[J)V", (void *)n_rar_info },
+        { "rarSelect", "(JI)V", (void *)n_rar_select },
+        { "rarRead", "(J[BII)I", (void *)n_rar_read },
     };
     JNIEnv *env;
     jclass c;

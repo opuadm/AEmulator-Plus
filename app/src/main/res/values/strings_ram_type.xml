@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Added for AEmulator Plus (2026-11-21). Other languages fall back to these. -->
+<resources>
+    <string name="vs_ram_type">RAM type</string>
+    <string name="vs_ram_type_auto">Default</string>
+    <string name="vs_ram_type_sub">Memory type the guest reports (LPDDR2 to LPDDR5X). Only the name changes; the amount is the Guest RAM setting. Takes effect after a full VM restart.</string>
+</resources>

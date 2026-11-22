@@ -724,6 +724,55 @@ object ElfPatch {
         return n
     }
 
+    /** IPCThreadState::attemptIncStrongHandle(int32_t): the only place libbinder sends BC_ATTEMPT_ACQUIRE */
+    const val ATTEMPT_ACQUIRE_FN = "_ZN7android14IPCThreadState22attemptIncStrongHandleEi"
+    private const val BC_ATTEMPT_ACQUIRE = 0x4008630a               // _IOW('c', 10, struct {int, int}) of the 32-bit protocol
+    private const val ARM_MVN_R0_37 = 0xE3E00025.toInt()             // mvn r0, #37  (r0 = -38 = INVALID_OPERATION)
+    private const val THUMB_MOVS_R0_37 = 0x2025                      // movs r0, #37
+    private const val THUMB_MVNS_R0_R0 = 0x43C0                      // mvns r0, r0
+    private const val THUMB_BX_LR = 0x4770                           // bx lr
+    private const val ATTEMPT_ACQUIRE_WINDOW = 0x300                 // the literal that holds the command sits behind the code (Thumb pools can be far)
+
+    /** The bytes [attemptAcquireFails] writes at the entry of the function: `mvn r0,#37 ; bx lr` (8) or the Thumb form (6). */
+    fun attemptAcquireBytes(thumb: Boolean): ByteArray {
+        val b = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+        if (thumb) b.putShort(THUMB_MOVS_R0_37.toShort()).putShort(THUMB_MVNS_R0_R0.toShort()).putShort(THUMB_BX_LR.toShort())
+        else b.putInt(ARM_MVN_R0_37).putInt(ARM_BX_LR)
+        return b.array().copyOf(if (thumb) 6 else 8)
+    }
+
+    /**
+     * Added for AEmulator Plus, 2026-11-20. Android 1.x..4.x libbinder (inside libutils.so before Android 2.0/2.2) asks the driver for BC_ATTEMPT_ACQUIRE whenever a
+     * weak reference to a REMOTE object is promoted (IPCThreadState::attemptIncStrongHandle, from BpBinder::onIncStrongAttempted),
+     * and then waits for BR_ACQUIRE_RESULT. A kernel driver never supported the command (\"BC_ATTEMPT_ACQUIRE not supported\",
+     * the ioctl fails with EINVAL) and AOSP later compiled the call out (HAS_BC_ATTEMPT_ACQUIRE 0, INVALID_OPERATION). The
+     * stand's translator parses the write buffer, does not know the command, reports \"command buffer not parsed to the end ...
+     * first word 0x4008630a\", throws the rest of the buffer away and goes on to read: the answer never comes and the calling
+     * thread waits for it for ever (Samsung GT-I7500, Android 1.5: AudioFlinger's thread; setRouting from AudioService.<init>
+     * then waits behind it and system_server's ServerThread never gets past it).
+     *
+     * The function now returns INVALID_OPERATION at its entry: the promotion fails, as it does on a device. Only a function
+     * that really holds the command's constant is touched (a libbinder that already compiled the call out is left as it is),
+     * and a function that is already patched is not written again. Returns the number of functions changed (0 or 1).
+     */
+    fun attemptAcquireFails(f: File): Int {
+        val d = runCatching { f.readBytes() }.getOrNull() ?: return 0
+        val sym = symbolsIn(d, setOf(ATTEMPT_ACQUIRE_FN))?.get(ATTEMPT_ACQUIRE_FN) ?: return 0
+        val thumb = (sym shr 40) and 1L == 1L
+        val off = (sym and 0xffffffffffL).toInt()
+        val want = attemptAcquireBytes(thumb)
+        if (off < 0 || off + want.size > d.size) return 0
+        if (d.copyOfRange(off, off + want.size).contentEquals(want)) return 0
+        val end = minOf(off + ATTEMPT_ACQUIRE_WINDOW, d.size - 4)
+        val b = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN)
+        var holds = false
+        var p = off
+        while (p <= end) { if (b.getInt(p) == BC_ATTEMPT_ACQUIRE) { holds = true; break }; p += 2 }
+        if (!holds) return 0
+        RandomAccessFile(f, "rw").use { raf -> raf.seek(off.toLong()); raf.write(want) }
+        return 1
+    }
+
     /**
      * Added for AEmulator Plus, 2026-10-27. [returnZero] for the functions in [names] of an ELF32 file of either machine: ARM code
      * for an ARM file, `xor eax,eax ; ret` for an x86-32 file, 0 for anything else. Used for the glibc of a Google TV firmware

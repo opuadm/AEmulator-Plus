@@ -1,4 +1,5 @@
-/* Emulator-owned evdev touchpad and keyboard for the "mouse and keyboard" input method.
+/* Emulator-owned evdev touchpad and keyboard for the "mouse and keyboard" input method, and the emulated S-Pen digitizer
+ * ("sec_e-pen", input method "S-Pen" in VM settings; see SPenProtocol in the app).
  * Same technique as trackball.h: the guest's EventHub finds an empty node in /dev/input (made by the app), open()
  * returns a socket to the app and the EVIOC* questions are answered here, so no guest binary or file is patched.
  * Self-contained: needs only sys3() and fail() from the including shim. Used by the ARM shim (aemushim.c) and the x86-32 shim
@@ -10,10 +11,18 @@
 #define VI_PAD_SOCKET "/dev/aemu_touchpad"
 #define VI_KBD_NODE "/dev/input/aemu-keyboard"
 #define VI_KBD_SOCKET "/dev/aemu_keyboard"
+#define VI_SPEN_NODE "/dev/input/aemu-spen"
+#define VI_SPEN_SOCKET "/dev/aemu_spen"
 #define VI_NONE 0
 #define VI_PAD 1
 #define VI_KBD 2
+#define VI_SPEN 3
 #define VI_PAD_MAX 4095
+/* The pen digitizer: single-touch "Wacom" protocol. Keep in step with SPenProtocol (VirtualInput.kt). */
+#define VI_SPEN_XY_MAX 16383
+#define VI_SPEN_PRESSURE_MAX 4095
+#define VI_SPEN_DISTANCE_MAX 255
+#define VI_SPEN_TILT_MAX 63
 
 struct vi_sockaddr { unsigned short family; char path[108]; };
 
@@ -44,6 +53,7 @@ static long vi_getpeername(long fd, void *addr, unsigned *len) { return sys3(287
 static const char *vi_socket_of(const char *path) {
     if (vi_equal(path, VI_PAD_NODE)) return VI_PAD_SOCKET;
     if (vi_equal(path, VI_KBD_NODE)) return VI_KBD_SOCKET;
+    if (vi_equal(path, VI_SPEN_NODE)) return VI_SPEN_SOCKET;
     return 0;
 }
 
@@ -73,8 +83,8 @@ static int vinput_fd(int fd) {
     if (vi_getpeername(fd, &addr, &len) < 0 || addr.family != 1) return VI_NONE;
     unsigned n = 0;
     while (n < sizeof(addr.path) && addr.path[n]) n++;
-    for (int kind = VI_PAD; kind <= VI_KBD; kind++) {
-        const char *suffix = kind == VI_PAD ? VI_PAD_SOCKET : VI_KBD_SOCKET;
+    for (int kind = VI_PAD; kind <= VI_SPEN; kind++) {
+        const char *suffix = kind == VI_PAD ? VI_PAD_SOCKET : kind == VI_KBD ? VI_KBD_SOCKET : VI_SPEN_SOCKET;
         unsigned sl = 0;
         while (suffix[sl]) sl++;
         if (n < sl) continue;
@@ -98,12 +108,15 @@ static int vinput_ioctl(int kind, unsigned req, void *arg) {
     if (nr == 1 /* EVIOCGVERSION */ && len == 4) { *(unsigned *)b = 0x10001; return 0; }
     if (nr == 2 /* EVIOCGID */ && len == 8) {
         unsigned short *id = arg;
-        id[0] = 6 /* BUS_VIRTUAL */; id[1] = 0; id[2] = (unsigned short)(kind == VI_PAD ? 2 : 3); id[3] = 1;
+        id[0] = 6 /* BUS_VIRTUAL */; id[1] = 0; id[2] = (unsigned short)(kind == VI_PAD ? 2 : kind == VI_KBD ? 3 : 4); id[3] = 1;
         return 0;
     }
     if (nr >= 6 && nr <= 8) { /* name, physical path, unique ID */
+        /* The pen carries the name Samsung's input stack looks for (isSpenDevice / hover handling), so a TouchWiz or One UI
+         * firmware treats it as its own S-Pen; AOSP ignores the name and goes by the BTN_TOOL_PEN tool type. */
         const char *s = kind == VI_PAD ? (nr == 6 ? "AEmulator Touchpad" : nr == 7 ? "aemu/touchpad" : "aemu-touchpad")
-                                       : (nr == 6 ? "AEmulator Keyboard" : nr == 7 ? "aemu/keyboard" : "aemu-keyboard");
+                      : kind == VI_SPEN ? (nr == 6 ? "sec_e-pen" : nr == 7 ? "sec_e-pen/input1" : "aemu-spen")
+                                        : (nr == 6 ? "AEmulator Keyboard" : nr == 7 ? "aemu/keyboard" : "aemu-keyboard");
         unsigned i = 0;
         if (!len) return 0;
         while (i + 1 < len && s[i]) { b[i] = s[i]; i++; }
@@ -114,18 +127,35 @@ static int vinput_ioctl(int kind, unsigned req, void *arg) {
         (nr >= 0x20 && nr <= 0x3f)) {
         for (unsigned i = 0; i < len; i++) b[i] = 0;
         if (nr == 9 && kind == VI_PAD) vi_bit(b, len, 0 /* INPUT_PROP_POINTER */);
+        if (nr == 9 && kind == VI_SPEN) vi_bit(b, len, 1 /* INPUT_PROP_DIRECT: the pen draws on the screen itself */);
         if (nr == 0x20) { /* EV bits */
             vi_bit(b, len, 0 /* EV_SYN */); vi_bit(b, len, 1 /* EV_KEY */);
-            if (kind == VI_PAD) vi_bit(b, len, 3 /* EV_ABS */);
+            if (kind != VI_KBD) vi_bit(b, len, 3 /* EV_ABS */);
         }
         if (nr == 0x21) { /* KEY bits */
             if (kind == VI_KBD) { for (unsigned k = 1; k < 249; k++) vi_bit(b, len, k); }
+            else if (kind == VI_SPEN) { vi_bit(b, len, 320 /* BTN_TOOL_PEN */); vi_bit(b, len, 330 /* BTN_TOUCH */); vi_bit(b, len, 331 /* BTN_STYLUS */); }
             else { vi_bit(b, len, 272 /* BTN_LEFT */); vi_bit(b, len, 273 /* BTN_RIGHT */); vi_bit(b, len, 330 /* BTN_TOUCH */); }
         }
         if (nr == 0x23 && kind == VI_PAD) { /* ABS bits: protocol A multi-touch */
             vi_bit(b, len, 48); vi_bit(b, len, 53); vi_bit(b, len, 54); vi_bit(b, len, 57); vi_bit(b, len, 58);
         }
+        if (nr == 0x23 && kind == VI_SPEN) { /* ABS bits: X, Y, PRESSURE, DISTANCE, TILT_X, TILT_Y */
+            vi_bit(b, len, 0); vi_bit(b, len, 1); vi_bit(b, len, 24); vi_bit(b, len, 25); vi_bit(b, len, 26); vi_bit(b, len, 27);
+        }
         return (int)len;
+    }
+    if (nr >= 0x40 && nr < 0x80 && kind == VI_SPEN) { /* EVIOCGABS(axis) of the pen */
+        int *a = arg;
+        unsigned axis = nr - 0x40, words = len / 4;
+        for (unsigned i = 0; i < words && i < 6; i++) a[i] = 0;
+        if (words < 3) return fail(-22 /* EINVAL */);
+        if (axis == 0 || axis == 1) a[2] = VI_SPEN_XY_MAX;
+        else if (axis == 24) a[2] = VI_SPEN_PRESSURE_MAX;
+        else if (axis == 25) a[2] = VI_SPEN_DISTANCE_MAX;
+        else if (axis == 26 || axis == 27) { a[1] = -VI_SPEN_TILT_MAX; a[2] = VI_SPEN_TILT_MAX; }
+        else return fail(-22 /* EINVAL */);
+        return 0;
     }
     if (nr >= 0x40 && nr < 0x80 && kind == VI_PAD) { /* EVIOCGABS(axis): value, min, max, fuzz, flat[, resolution] */
         int *a = arg;

@@ -13,6 +13,7 @@ typedef struct arc_ops {
 extern const arc_ops arc_ops_zlib;   /* ARC_GZIP, ARC_ZLIB, ARC_DEFLATE */
 extern const arc_ops arc_ops_bz2;    /* ARC_BZIP2 */
 extern const arc_ops arc_ops_lz4f;   /* ARC_LZ4F */
+extern const arc_ops arc_ops_lz4l;   /* ARC_LZ4L */
 extern const arc_ops arc_ops_zstd;   /* ARC_ZSTD */
 extern const arc_ops arc_ops_brotli; /* ARC_BROTLI */
 extern const arc_ops arc_ops_lzma;   /* ARC_XZ, ARC_LZMA (7-Zip LZMA SDK) */

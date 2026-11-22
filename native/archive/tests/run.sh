@@ -9,5 +9,7 @@ for v in plain asan; do
   X=""; [ $v = asan ] && X="-fsanitize=address -fno-omit-frame-pointer -g"
   EXTRA_CFLAGS="$X" sh "$HERE/build.sh" host "$D/libaemuarc.so" >/dev/null
   ${CC:-cc} -O1 -g -Wall -Wextra $X -I"$HERE/include" -o "$D/test_arc" "$HERE/tests/test_arc.c" -L"$D" -laemuarc -Wl,-rpath,"$D"
+  ${CC:-cc} -O1 -g -Wall -Wextra $X -I"$HERE/include" -o "$D/rar_dump" "$HERE/tests/rar_dump.c" -L"$D" -laemuarc -Wl,-rpath,"$D"
   echo "== $v"; python3 "$HERE/tests/run_tests.py" "$D" "$Z7"
+  echo "== $v (rar)"; python3 "$HERE/tests/run_rar_tests.py" "$D"
 done

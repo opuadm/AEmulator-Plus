@@ -1,7 +1,7 @@
 # Source lists shared by build.sh and tests/run.sh (sourced, POSIX sh).
 TP=$ARC_DIR/third_party
 
-ARC_CORE="src/arc_codec.c src/c_zlib.c src/c_bz2.c src/c_lz4f.c src/c_zstd.c src/c_brotli.c src/c_lzma.c src/arc_7z.c"
+ARC_CORE="src/arc_codec.c src/c_zlib.c src/c_bz2.c src/c_lz4f.c src/c_lz4l.c src/c_zstd.c src/c_brotli.c src/c_lzma.c src/arc_7z.c src/arc_rar.c"
 ARC_JNI="src/arc_jni.c"
 
 # vendored libraries: "<group> <files...>"; every group is compiled with its own include path and defines
@@ -13,4 +13,4 @@ decompress/huf_decompress.c decompress/zstd_ddict.c decompress/zstd_decompress.c
 SRC_BROTLI="common/constants.c common/context.c common/dictionary.c common/platform.c common/shared_dictionary.c common/transform.c \
 dec/bit_reader.c dec/decode.c dec/huffman.c dec/state.c"
 SRC_SDK="7zAlloc.c 7zArcIn.c 7zBuf.c 7zCrc.c 7zCrcOpt.c 7zDec.c 7zStream.c Alloc.c Bcj2.c Bra.c Bra86.c BraIA64.c CpuArch.c \
-Delta.c LzmaDec.c Lzma2Dec.c Ppmd7.c Ppmd7Dec.c Sha256.c Sha256Opt.c Xz.c XzCrc64.c XzCrc64Opt.c XzDec.c"
+Delta.c LzmaDec.c Lzma2Dec.c Ppmd7.c Ppmd7Dec.c Ppmd7aDec.c Sha256.c Sha256Opt.c Xz.c XzCrc64.c XzCrc64Opt.c XzDec.c"

@@ -19,15 +19,23 @@ int *__errno(void) { static int e; return &e; }
 void *fdopen(int fd, const char *mode) { (void)fd; (void)mode; return 0; }
 C
 echo 'LIBC { global: __errno; environ; fdopen; };' > "$STUB/libc.map"
+# libdl.so stub: dlopen / dlsym, which the storage statfs hooks use to reach the guest's own libc functions
+cat > "$STUB/libdl.c" <<'C'
+void *dlopen(const char *f, int fl) { (void)f; (void)fl; return 0; }
+void *dlsym(void *h, const char *n) { (void)h; (void)n; return 0; }
+C
+echo 'LIBC { global: dlopen; dlsym; };' > "$STUB/libdl.map"
 
 T="--target=thumb-linux-musleabi -mcpu=cortex_a8 -mfloat-abi=softfp"
 $ZIG cc $T -fPIC -shared -nostdlib -ffreestanding -fno-builtin -Os \
     -Wl,--version-script,"$STUB/libc.map" -Wl,-soname,libc.so -o "$STUB/libc_stub.so" "$STUB/libc.c"
+$ZIG cc $T -fPIC -shared -nostdlib -ffreestanding -fno-builtin -Os \
+    -Wl,--version-script,"$STUB/libdl.map" -Wl,-soname,libdl.so -o "$STUB/libdl_stub.so" "$STUB/libdl.c"
 
 NOE="-fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables"
 F="-I../bcmgpu $T -Os -fPIC -shared -nostdlib -ffreestanding -fno-builtin -fvisibility=hidden -fno-stack-protector $NOE
    -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,--no-undefined -Wl,-z,max-page-size=4096 -Wl,-s -L$STUB"
-$ZIG cc $F -Wl,-soname,libaemushim.so -o "$OUT" aemushim.c crash.c -lc_stub
+$ZIG cc $F -Wl,-soname,libaemushim.so -o "$OUT" aemushim.c crash.c -lc_stub -ldl_stub
 $ZIG cc $F -Wl,-soname,librecshim.so -o "$DIR/librecshim.so" recshim.c -lc_stub
 # an empty program in place of iptables/ip6tables
 $ZIG cc --target=thumb-linux-musleabi -mcpu=cortex_a8 -nostdlib -static -Wl,--build-id=none -Wl,-s -o "$DIR/aemu_true.so" true.S

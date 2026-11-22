@@ -7,6 +7,7 @@ import java.nio.ByteOrder
  * Pure logic of the two optional input methods (VM settings › Controls):
  *  - "Mouse and keyboard": an emulated touchpad + keyboard replace the touch screen ([TouchpadProtocol], [KeyboardLatch]);
  *  - "Keypad": feature-phone keys sent through the ordinary key device ([Keypad]); never disables touch.
+ *  - "S-Pen": an extra pen digitizer ([SPenProtocol]); a toggle decides whether touches go to it or to the touch screen.
  */
 object VirtualKeys {
     const val ESC = 1; const val BACKSPACE = 14; const val TAB = 15; const val ENTER = 28
@@ -154,6 +155,155 @@ class TouchpadProtocol {
     }
 }
 
+/**
+ * The emulated S-Pen digitizer (input method "S-Pen"): what the guest's EventHub reads from the evdev node named sec_e-pen.
+ * Single-touch "Wacom" protocol, the one Samsung's Note digitizers speak: ABS_X/ABS_Y, ABS_PRESSURE, ABS_DISTANCE, BTN_TOUCH,
+ * BTN_TOOL_PEN (pen in range) and BTN_STYLUS (side button). A pen is one contact: of several fingers down the first one is
+ * the pen, and when it lifts the others are ignored until every finger is up, so the pen never jumps to another finger.
+ * Like a real pen it hovers before it touches and after it lifts: tool in range, then contact; contact ends, then the tool
+ * leaves. [hover] reports the pen in range without contact, and the side button can be pressed while it hovers: that is what
+ * opens Samsung's Air Command (the guest's SpenGestureManagerService watches for a stylus hover whose side button goes down
+ * and up again within 800 ms without a touch in between). Keep the axis ranges in step with native/guestshim/vinput.h and
+ * the runner's spen_ioctl().
+ */
+class SPenProtocol {
+    /** [x] and [y] are 0..[XY_MAX], [pressure] 1..[PRESSURE_MAX] (see [axis] and [pressureOf]). */
+    data class Contact(val id: Int, val x: Int, val y: Int, val pressure: Int)
+
+    private var trackId = -1
+    private var armed = true          // may a new pen contact start? false from the moment the pen lifts until every finger is up
+    private var inRange = false       // BTN_TOOL_PEN
+    private var touching = false      // BTN_TOUCH
+    private var side = false          // BTN_STYLUS
+    private var lastX = -1
+    private var lastY = -1
+    private var lastPressure = -1
+
+    /** Events for the new set of host contacts, or an empty array when nothing changed. */
+    fun frame(now: List<Contact>, button: Boolean, nanos: Long): ByteArray {
+        if (now.isEmpty()) armed = true
+        val pen: Contact? = when {
+            trackId >= 0 -> now.firstOrNull { it.id == trackId }.also { if (it == null) { trackId = -1; armed = now.isEmpty() } }
+            armed && now.isNotEmpty() -> now[0].also { trackId = it.id; armed = false }
+            else -> null
+        }
+        val b = ByteBuffer.allocate(24 * EV).order(ByteOrder.LITTLE_ENDIAN)
+        fun put(type: Int, code: Int, value: Int) {
+            b.putInt((nanos / 1_000_000_000).toInt()).putInt(((nanos % 1_000_000_000) / 1000).toInt())
+            b.putShort(type.toShort()).putShort(code.toShort()).putInt(value)
+        }
+        if (pen == null) {
+            if (!inRange) return ByteArray(0)
+            // contact ends first (still hovering), then the pen leaves the digitizer's range
+            if (touching) {
+                if (side) { put(EV_KEY, BTN_STYLUS, 0); side = false }
+                put(EV_ABS, ABS_PRESSURE, 0); put(EV_ABS, ABS_DISTANCE, HOVER_DISTANCE); put(EV_KEY, BTN_TOUCH, 0); put(EV_SYN, SYN_REPORT, 0)
+                touching = false
+            }
+            if (side) { put(EV_KEY, BTN_STYLUS, 0); side = false }
+            put(EV_ABS, ABS_DISTANCE, 0); put(EV_KEY, BTN_TOOL_PEN, 0); put(EV_SYN, SYN_REPORT, 0)
+            inRange = false; lastX = -1; lastY = -1; lastPressure = -1
+            return b.array().copyOf(b.position())
+        }
+        val x = pen.x.coerceIn(0, XY_MAX); val y = pen.y.coerceIn(0, XY_MAX)
+        val p = pen.pressure.coerceIn(1, PRESSURE_MAX)
+        if (!inRange) {
+            put(EV_ABS, ABS_X, x); put(EV_ABS, ABS_Y, y); put(EV_ABS, ABS_PRESSURE, 0); put(EV_ABS, ABS_DISTANCE, HOVER_DISTANCE)
+            put(EV_KEY, BTN_TOOL_PEN, 1); put(EV_SYN, SYN_REPORT, 0)
+            inRange = true; lastX = x; lastY = y; lastPressure = 0
+        }
+        if (!touching) {
+            // the pen may have been hovering somewhere else (see hover) and may already hold its button
+            if (x != lastX) put(EV_ABS, ABS_X, x)
+            if (y != lastY) put(EV_ABS, ABS_Y, y)
+            put(EV_ABS, ABS_PRESSURE, p); put(EV_ABS, ABS_DISTANCE, 0); put(EV_KEY, BTN_TOUCH, 1)
+            if (button != side) put(EV_KEY, BTN_STYLUS, if (button) 1 else 0)
+            put(EV_SYN, SYN_REPORT, 0)
+            touching = true; side = button; lastPressure = p
+        } else {
+            val moved = x != lastX || y != lastY
+            if (!moved && p == lastPressure && button == side) return ByteArray(0)
+            if (x != lastX) put(EV_ABS, ABS_X, x)
+            if (y != lastY) put(EV_ABS, ABS_Y, y)
+            if (p != lastPressure) put(EV_ABS, ABS_PRESSURE, p)
+            if (button != side) { put(EV_KEY, BTN_STYLUS, if (button) 1 else 0); side = button }
+            put(EV_SYN, SYN_REPORT, 0)
+            lastPressure = p
+        }
+        lastX = x; lastY = y
+        return b.array().copyOf(b.position())
+    }
+
+    /** Is the pen currently touching the screen (a contact started by [frame])? */
+    val isTouching: Boolean get() = touching
+
+    /**
+     * The pen in range but not touching, at ([x], [y]) on the digitizer's axes, with its side [button] up or down. The first
+     * call brings the tool into range; later calls send only what changed (position, button). Nothing while a contact is in
+     * progress: the contact owns the pen. End the hover with `frame(emptyList(), false, ...)`, which takes the tool out of range.
+     */
+    fun hover(x0: Int, y0: Int, button: Boolean, nanos: Long): ByteArray {
+        if (touching) return ByteArray(0)
+        val x = x0.coerceIn(0, XY_MAX); val y = y0.coerceIn(0, XY_MAX)
+        val first = !inRange
+        if (!first && x == lastX && y == lastY && button == side) return ByteArray(0)
+        val b = ByteBuffer.allocate(8 * EV).order(ByteOrder.LITTLE_ENDIAN)
+        fun put(type: Int, code: Int, value: Int) {
+            b.putInt((nanos / 1_000_000_000).toInt()).putInt(((nanos % 1_000_000_000) / 1000).toInt())
+            b.putShort(type.toShort()).putShort(code.toShort()).putInt(value)
+        }
+        if (first) {
+            put(EV_ABS, ABS_X, x); put(EV_ABS, ABS_Y, y); put(EV_ABS, ABS_PRESSURE, 0); put(EV_ABS, ABS_DISTANCE, HOVER_DISTANCE)
+            put(EV_KEY, BTN_TOOL_PEN, 1)
+            if (button) put(EV_KEY, BTN_STYLUS, 1)
+            inRange = true; lastPressure = 0
+        } else {
+            if (x != lastX) put(EV_ABS, ABS_X, x)
+            if (y != lastY) put(EV_ABS, ABS_Y, y)
+            if (button != side) put(EV_KEY, BTN_STYLUS, if (button) 1 else 0)
+        }
+        put(EV_SYN, SYN_REPORT, 0)
+        side = button; lastX = x; lastY = y
+        return b.array().copyOf(b.position())
+    }
+
+    companion object {
+        const val XY_MAX = 16383
+        const val PRESSURE_MAX = 4095
+        const val DISTANCE_MAX = 255
+        const val TILT_MAX = 63
+        /** ABS_DISTANCE reported while the pen only hovers (just before touching and just after lifting). */
+        const val HOVER_DISTANCE = 24
+        const val NODE_NAME = "sec_e-pen"
+        /**
+         * One click of the pen's side button as a series of hover frames: [CLICK_STEPS] holds the button down for
+         * (steps * [CLICK_STEP_MS]) ms, which is inside the 0..800 ms window the guest accepts and long enough for the guest
+         * to see a hover move that carries the button. Used by [InputService.penButtonClick].
+         */
+        const val CLICK_STEP_MS = 45L
+        const val CLICK_STEPS = 4
+        private const val EV = 16
+        private const val EV_SYN = 0; private const val EV_KEY = 1; private const val EV_ABS = 3
+        private const val SYN_REPORT = 0
+        private const val ABS_X = 0; private const val ABS_Y = 1; private const val ABS_PRESSURE = 24; private const val ABS_DISTANCE = 25
+        private const val BTN_TOOL_PEN = 320; private const val BTN_TOUCH = 330; private const val BTN_STYLUS = 331
+
+        /** A position inside a view [size] pixels across (0 at the first pixel, [size] at the far edge) on the digitizer's axis. */
+        fun axis(v: Float, size: Int): Int = if (size <= 0) 0 else Math.round(v / size * XY_MAX).coerceIn(0, XY_MAX)
+
+        /**
+         * Host pressure (0..1) on the digitizer's 0..4095 scale. A finger on most phones reports a constant 1.0 or nothing useful,
+         * which would draw every stroke with the heaviest line a pen can make: a finger is mapped into the middle of the range
+         * (0.15..0.75), a real stylus on the host keeps its whole range.
+         */
+        fun pressureOf(host: Float, stylus: Boolean): Int {
+            val h = if (host.isNaN()) 1f else host.coerceIn(0f, 1f)
+            val level = if (stylus) h else 0.15f + 0.6f * h
+            return Math.round(level * PRESSURE_MAX).coerceIn(1, PRESSURE_MAX)
+        }
+    }
+}
+
 /** What the guest must provide for [VmSettings.mouseKeyboard]; the keypad needs nothing but the ordinary key device. */
 object VirtualInputPolicy {
     /**
@@ -165,4 +315,11 @@ object VirtualInputPolicy {
     @Suppress("UNUSED_PARAMETER")
     fun mouseKeyboardSupported(engine: Engine, arch: GuestArch, recovery: Boolean, nativeUi: Boolean, preRelease: Boolean = false): Boolean =
         !recovery && !nativeUi && !preRelease   // a pre-1.0 build has neither the guest shim's nodes nor a pad-aware input stack
+
+    /**
+     * The S-Pen digitizer ([SPenProtocol]) needs the same nodes as the mouse and keyboard, plus a guest that knows stylus
+     * tools: Android 4.0 (API 14) added TOOL_TYPE_STYLUS and BTN_TOOL_PEN handling. Older builds would see a second touch screen.
+     */
+    fun spenSupported(recovery: Boolean, nativeUi: Boolean, preRelease: Boolean, api: Int): Boolean =
+        !recovery && !nativeUi && !preRelease && api >= 14
 }

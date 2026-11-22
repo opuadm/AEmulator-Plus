@@ -82,6 +82,8 @@ static u64 g_rootlen;
 static char g_self[512];        // this program
 static char g_props[512];       // host file behind /dev/__properties__
 static char g_exe[PATH_MAX];    // guest view of the running program
+static char **g_argvp;          // our own exec's argv (argv[0] is the guest's argv[0] string, rewritten in place by setArgV0)
+static long g_argc0;
 static int g_uid, g_gid;        // the ids the guest believes it has
 static u32 g_real_uid;
 static char g_qemu[512];        // translator for the firmware's 32-bit programs (AEMU64_QEMU): qemu-arm, or qemu-i386 for an x86 firmware
@@ -184,11 +186,17 @@ static void bootstrap_lib(char *buf, char *n) {
     if (S4(NR_faccessat, AT_FDCWD, buf, 0, 0) != 0) memcpy(n, orig, len + 1);   // no such bootstrap copy: leave the request alone
 }
 
-static const char *xl(const char *p, char *buf, int *err) {
+// Added for AEmulator Plus (2026-11-21): mounts and device nodes, see vmount.h. rw = 0 translates without the mount table.
+static int g_vm;                                            // <root>/dev/.aemu-vmount exists: this VM has real mounts
+static void vm_rewrite(char *n, u64 cap);
+static const char *xl_x(const char *p, char *buf, int *err, int rw);
+static const char *xl(const char *p, char *buf, int *err) { return xl_x(p, buf, err, 1); }
+static const char *xl_x(const char *p, char *buf, int *err, int rw) {
     if (!p) return p;
     if (p[0] != '/') return p;
     char *n = buf + g_rootlen;              // normalised straight into its place after the root
     if ((*err = norm(p, n, PATH_MAX - g_rootlen))) return 0;
+    if (rw && g_vm) vm_rewrite(n, PATH_MAX - g_rootlen);       // what is mounted at this path (vmount.h)
     if ((pre(n, "/proc") && (n[5] == '/' || !n[5])) || (pre(n, "/sys") && (n[4] == '/' || !n[4]))) {
         // the image's own files win (fake sysfs, /proc/mounts); the rest is the phone's. No SELinux for the guest,
         // and none of the phone's suspend controls (reading its wakeup_count blocks the guest's power manager).
@@ -362,6 +370,171 @@ static long fake_memfile(const char *name, const char *content, u64 len) {
     S3(NR_write, fd, content, len);
     S3(NR_lseek, fd, 0, 0 /*SEEK_SET*/);
     return fd;
+}
+
+// /proc/self/cmdline as the phone would show it. An app cannot move the kernel's arg_start (setArgV0 needs
+// CAP_SYS_RESOURCE for PR_SET_MM), so the guest would read this runner's whole command line: the guest program's
+// path and the zygote's -Xzygote arguments stay visible in every forked process forever, and FunTouch 9's
+// android.util.VivoConfigStorePropertyHelper.isZygote() (cmdline.contains("app_process")) took system_server for
+// the zygote, sending FtFeature queries down the zygote path until the Watchdog killed the boot. Before setArgV0
+// the answer is the guest's own command line; after it, the name alone.
+static long cmdline_open(void) {
+    if (!g_argvp || g_argc0 < 2 || g_is32) return -1;
+    char out[4096];
+    u64 o = 0;
+    if (g_argvp[0] && g_argvp[0][0] == '/') {
+        // the guest's argv[0] through its last argument (our own exec's argv[2], the guest program path, is
+        // not one of the guest's arguments)
+        for (long i = 1; i < g_argc0; i++) {
+            if (i == 2 || !g_argvp[i]) continue;
+            u64 l = slen(g_argvp[i]);
+            if (o + l + 1 > sizeof out) break;
+            memcpy(out + o, g_argvp[i], l + 1); o += l + 1;
+        }
+    } else {
+        // setArgV0() rewrote argv[0]: the command line is that name alone (that is how the kernel reads it
+        // once arg_start has moved onto the new string)
+        u64 l = slen(g_argvp[0]);
+        if (l >= sizeof out) l = sizeof out - 1;
+        memcpy(out, g_argvp[0], l + 1); o = l + 1;
+    }
+    return o ? fake_memfile("aemu-cmdline", out, o) : -1;
+}
+
+// ---------------------------------------------------------------------------------------------------- ids of others
+// Ported from the 33/34 engines (2026-11-19, FunTouch OS 9.2): a process here is the host app, so /proc/<pid>/status
+// shows the host's uid for every guest process. Android reads it back through Process.getUidForPid() - and vivo's
+// VivoConfigStoreHelper.hasVivoFeature() branches on exactly that: uid 1000 (system_server) must ask the configstore
+// HIDL service (absent here - the query throws, is caught and answers false), while any other uid is sent over binder
+// to VivoCommonService, whose isFeatureSupport() forwards straight back into FtFeature - an endless recursion on the
+// main thread that VivoWatchdogImpl killed the boot over ("Blocked in handler on main thread"). With the ids shown
+// the way the phone shows them, system_server takes the terminating HIDL branch like it does on the real device.
+// Each process leaves the ids the guest gave it in <root>/dev/.aemu-ids/<pid>, and that file is what a status read
+// is rewritten with.
+static int ids_path(char *p, long pid) {
+    if (g_rootlen > 400) return 0;
+    char d[24]; char *n = utoa((u64)pid, d + sizeof d);
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-ids/", 15); memcpy(p + g_rootlen + 15, n, slen(n) + 1);
+    return 1;
+}
+
+static void ids_put(void) {
+    char p[512], t[48], d[24];
+    if (!ids_path(p, 0)) return;
+    p[g_rootlen + 14] = 0; S3(NR_mkdirat, AT_FDCWD, p, 0700);
+    ids_path(p, S0(NR_getpid));
+    long fd = S4(NR_openat, AT_FDCWD, p, 01101 /*O_WRONLY|O_CREAT|O_TRUNC*/ | 02000000, 0600);
+    if (fd < 0) return;
+    char *n = utoa((u64)(u32)g_uid, d + sizeof d); u64 o = slen(n); memcpy(t, n, o); t[o++] = ' ';
+    n = utoa((u64)(u32)g_gid, d + sizeof d); memcpy(t + o, n, slen(n)); o += slen(n);
+    S3(NR_write, fd, t, o); S1(NR_close, fd);
+}
+
+// in and out: PATH_MAX each
+static long status_open(const char *path, char *in, char *out) {
+    char p[512], t[48];
+    long pid = path[6] >= '0' && path[6] <= '9' ? (long)atou(path + 6) : S0(NR_getpid);
+    if (!ids_path(p, pid)) return -1;
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return -1;
+    long n = S3(NR_read, fd, t, sizeof t - 1); S1(NR_close, fd);
+    if (n <= 0) return -1;
+    t[n] = 0;
+    u64 id[2] = { atou(t), 0 }; char *g = t; while (*g && *g != ' ') g++; if (*g) id[1] = atou(g + 1);
+    fd = S4(NR_openat, AT_FDCWD, path, 02000000, 0);
+    if (fd < 0) return fd;
+    n = S3(NR_read, fd, in, PATH_MAX - 1); S1(NR_close, fd);
+    if (n <= 0) return -1;
+    in[n] = 0;
+    int self = g_is32 && pid == (long)S0(NR_getpid);
+    u64 o = 0;
+    for (char *l = in; *l && o < PATH_MAX - 128; ) {
+        char *e = l; while (*e && *e != 10) e++;
+        int k = pre(l, "Uid:") ? 0 : pre(l, "Gid:") ? 1 : -1;
+        if (k < 0) {
+            // the 32-bit translator keeps a helper thread of its own; zygote checks the count before a fork
+            if (self && pre(l, "Threads:")) {
+                char *v = l + 8; while (v < e && (*v < '0' || *v > '9')) v++;
+                char *x = v; while (x < e && *x >= '0' && *x <= '9') x++;
+                if (x == e && x - v == 1 && *v > '1') (*v)--;
+            }
+            memcpy(out + o, l, (u64)(e - l)); o += (u64)(e - l);
+        }
+        else {
+            char d[24]; char *v = utoa(id[k], d + sizeof d);
+            memcpy(out + o, l, 4); o += 4;
+            for (int i = 0; i < 4; i++) { out[o++] = 9; memcpy(out + o, v, slen(v)); o += slen(v); }
+        }
+        if (*e) { out[o++] = 10; e++; }
+        l = e;
+    }
+    return fake_memfile("aemu-status", out, o);
+}
+
+// ---------------------------------------------------------------------------------------------------- memory budget
+// /proc/meminfo scaled to the RAM the image is given (<root>/dev/.aemu-ram, in kB): the guest would otherwise see all
+// of the phone's memory and size its background by it (ColorOS 14 on a 12 GB phone: 128 cached processes, 150 in
+// all, 11 GB resident and the phone in swap).
+static long meminfo_open(void) {
+    static char in[8192], out[10240];
+    char p[512], d[24];
+    if (g_rootlen > 400) return -1;
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-ram", 15);
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return -1;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    if (n <= 0) return -1;
+    d[n] = 0;
+    u64 ram = atou(d), total = 0;
+    fd = S4(NR_openat, AT_FDCWD, "/proc/meminfo", 02000000, 0);
+    if (fd < 0) return -1;
+    n = S3(NR_read, fd, in, sizeof in - 1); S1(NR_close, fd);
+    if (n <= 0 || !ram) return -1;
+    in[n] = 0;
+    if (pre(in, "MemTotal:")) { const char *q = in + 9; while (*q == ' ') q++; total = atou(q); }
+    if (total <= ram) return -1;
+    u64 o = 0;
+    for (const char *l = in; *l && o < sizeof out - 96; ) {
+        const char *e = l; while (*e && *e != '\n') e++;
+        const char *c = l; while (c < e && *c != ':') c++;
+        const char *v = c < e ? c + 1 : e; while (v < e && *v == ' ') v++;
+        const char *u = v; while (u < e && *u >= '0' && *u <= '9') u++;
+        if (u > v && u + 3 <= e && u[1] == 'k' && u[2] == 'B') {            // "Name:   <n> kB": the share of the budget
+            memcpy(out + o, l, (u64)(v - l)); o += (u64)(v - l);
+            char *t = utoa(atou(v) * ram / total, d + sizeof d);
+            memcpy(out + o, t, slen(t)); o += slen(t);
+            memcpy(out + o, u, (u64)(e - u)); o += (u64)(e - u);
+        } else { memcpy(out + o, l, (u64)(e - l)); o += (u64)(e - l); }
+        out[o++] = '\n';
+        l = *e ? e + 1 : e;
+    }
+    return fake_memfile("aemu-meminfo", out, o);
+}
+
+// Added for AEmulator Plus (2026-11-21): sysinfo(2) scaled to the same budget as /proc/meminfo. Android's Process.getTotalMemory()
+// (Settings > About phone, ActivityManager.MemoryInfo.totalMem, many apps) and sysconf(_SC_PHYS_PAGES) read this call, not the file, so a
+// 2 GB guest still reported all of the phone's memory (16 GB) after only /proc/meminfo had been scaled. arm64 struct sysinfo:
+// uptime@0, loads@8, totalram@32, freeram@40, sharedram@48, bufferram@56, totalswap@64, freeswap@72, procs@80, mem_unit@104.
+#define NR_sysinfo_ 179
+static long sysinfo_fake(void *si) {
+    char p[512], d[24];
+    long r = S1(NR_sysinfo_, si);
+    if (r < 0 || g_rootlen > 400) return r;
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-ram", 15);
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return r;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    if (n <= 0) return r;
+    d[n] = 0;
+    u64 ram = atou(d);                                          // budget in kB
+    u64 *w = (u64 *)si;
+    u32 unit = *(u32 *)((char *)si + 104);
+    if (!unit) unit = 1;
+    u64 total = w[4] * unit / 1024;                             // the phone's total in kB
+    if (!ram || total <= ram) return r;
+    for (int i = 4; i <= 9; i++) w[i] = (w[i] * unit / 1024) * ram / total * 1024;   // total, free, shared, buffer, swap total, swap free
+    *(u32 *)((char *)si + 104) = 1;
+    return r;
 }
 
 // ---------------------------------------------------------------------------------------------------- netlink emulation
@@ -584,13 +757,14 @@ static char g_input[108];
 // The input method "mouse and keyboard" (VM settings > Controls): an emulated touchpad and keyboard of their own take the
 // place of the touch screen. The app leaves two empty nodes in /dev/input (aemu-touchpad, aemu-keyboard) and serves one
 // socket for each (AEMU64_PAD, AEMU64_KBD); both stay empty when the method is off.
-static char g_pad[108], g_kbd[108];
+static char g_pad[108], g_kbd[108], g_spen[108];   // g_spen: the S-Pen digitizer (input method "S-Pen"), AEMU64_SPEN
 #define IN_TOUCH 0
 #define IN_PAD 1
 #define IN_KBD 2
+#define IN_SPEN 3
 #define IN_SLOTS 16
 static int g_infds[IN_SLOTS];                   // descriptors + 1
-static unsigned char g_inkind[IN_SLOTS];        // what each one is: IN_TOUCH, IN_PAD or IN_KBD
+static unsigned char g_inkind[IN_SLOTS];        // what each one is: IN_TOUCH, IN_PAD, IN_KBD or IN_SPEN
 static int g_innext;                            // where the next one goes when the table is full
 
 static int input_kind(int fd) { for (int i = 0; i < IN_SLOTS; i++) if (g_infds[i] == fd + 1) return g_inkind[i] + 1; return 0; }
@@ -690,8 +864,49 @@ static long vinput_ioctl(int kind, u32 cmd, u64 arg) {
     return -25; /* ENOTTY */
 }
 
+// The evdev questions of the emulated S-Pen digitizer ("sec_e-pen", input method "S-Pen"): a direct single-touch pen
+// (ABS_X/Y, PRESSURE, DISTANCE, TILT, BTN_TOUCH, BTN_TOOL_PEN, BTN_STYLUS). Same answers as native/guestshim/vinput.h.
+#define SPEN_XY_MAX 16383
+static long spen_ioctl(u32 cmd, u64 arg) {
+    u32 nr = cmd & 0xff, len = (cmd >> 16) & 0x3fff;
+    u8 *out = (u8 *)arg;
+    if (nr == 0x90 || nr == 0xa0 || nr == 0x03) return 0;                        // grab, clock id, repeat
+    if (!arg) return -EFAULT;
+    if (!(cmd & 0x80000000u)) return -25;                                        // ENOTTY: only reads are answered
+    if (nr == 0x01 && len == 4) { *(int *)arg = 0x010001; return 0; }            // EVIOCGVERSION
+    if (nr == 0x02 && len == 8) { u16 *id = (u16 *)arg; id[0] = 6 /* BUS_VIRTUAL */; id[1] = 0; id[2] = 4; id[3] = 1; return 0; }
+    if (nr >= 0x06 && nr <= 0x08) {                                              // name, physical path, unique ID
+        const char *s = nr == 6 ? "sec_e-pen" : nr == 7 ? "sec_e-pen/input1" : "aemu-spen";
+        u32 i = 0;
+        if (!len) return 0;
+        while (i + 1 < len && s[i]) { out[i] = (u8)s[i]; i++; }
+        out[i++] = 0;
+        return (long)i;
+    }
+    if (nr == 0x09 || nr == 0x18 || nr == 0x19 || nr == 0x1a || nr == 0x1b || (nr >= 0x20 && nr <= 0x3f)) {
+        memset(out, 0, len);
+        if (nr == 0x09) setbit(out, len, 1);                                     // INPUT_PROP_DIRECT
+        if (nr == 0x20) { setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 3); }   // SYN, KEY, ABS
+        if (nr == 0x21) { setbit(out, len, 320); setbit(out, len, 330); setbit(out, len, 331); }   // BTN_TOOL_PEN, BTN_TOUCH, BTN_STYLUS
+        if (nr == 0x23) { setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 24); setbit(out, len, 25); setbit(out, len, 26); setbit(out, len, 27); }
+        return (long)len;
+    }
+    if (nr >= 0x40 && nr < 0x80) {                                               // EVIOCGABS(axis)
+        int *a = (int *)arg; u32 ax = nr - 0x40, words = len / 4;
+        for (u32 i = 0; i < words && i < 6; i++) a[i] = 0;
+        if (words < 3) return -EINVAL;
+        if (ax == 0 || ax == 1) a[2] = SPEN_XY_MAX;
+        else if (ax == 24) a[2] = 4095;                                          // pressure
+        else if (ax == 25) a[2] = 255;                                           // distance (hover height)
+        else if (ax == 26 || ax == 27) { a[1] = -63; a[2] = 63; }                // tilt
+        else return -EINVAL;
+        return 0;
+    }
+    return -25; /* ENOTTY */
+}
+
 static long input_ioctl(int kind, u32 cmd, u64 arg) {
-    return kind == IN_TOUCH ? touch_ioctl(cmd, arg) : vinput_ioctl(kind, cmd, arg);
+    return kind == IN_TOUCH ? touch_ioctl(cmd, arg) : kind == IN_SPEN ? spen_ioctl(cmd, arg) : vinput_ioctl(kind, cmd, arg);
 }
 
 // ---------------------------------------------------------------------------------------------------- exec
@@ -734,9 +949,10 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     if (g_crash) *a++ = "AEMU64_CRASH=1";
     static char e_input[130];
     if (g_input[0]) { memcpy(e_input, "AEMU64_INPUT=", 13); memcpy(e_input + 13, g_input, slen(g_input) + 1); *a++ = e_input; }
-    static char e_pad[135], e_kbd[135];
+    static char e_pad[135], e_kbd[135], e_spen[135];
     if (g_pad[0]) { memcpy(e_pad, "AEMU64_PAD=", 11); memcpy(e_pad + 11, g_pad, slen(g_pad) + 1); *a++ = e_pad; }
     if (g_kbd[0]) { memcpy(e_kbd, "AEMU64_KBD=", 11); memcpy(e_kbd + 11, g_kbd, slen(g_kbd) + 1); *a++ = e_kbd; }
+    if (g_spen[0]) { memcpy(e_spen, "AEMU64_SPEN=", 12); memcpy(e_spen + 12, g_spen, slen(g_spen) + 1); *a++ = e_spen; }
     static char e_nd[32], e_ns[32];
     if (nh_port) { memcpy(e_nd, "AEMU64_NETDBG=", 14); char t2[24], *s2 = utoa((u64)nh_port, t2 + sizeof t2); memcpy(e_nd + 14, s2, slen(s2) + 1); *a++ = e_nd; }
     if (nh_dns) { memcpy(e_ns, "AEMU64_NETDNS=", 14); char t2[24], *s2 = utoa((u64)nh_dns, t2 + sizeof t2); memcpy(e_ns + 14, s2, slen(s2) + 1); *a++ = e_ns; }
@@ -799,6 +1015,28 @@ static void own_put(long nr, long where, long uid, long gid) {        // nr: NR_
 }
 
 #define P(i) ((const char *)a[i])
+
+// ---------------------------------------------------------------------------------------------------- storage size
+// The disk size the guest is told it has (<root>/dev/.aemu-storage, in bytes; absent = the phone's own). Read once.
+// Added for AEmulator Plus (2026-11-19): the free space stays the phone's real free space, see statfs below.
+static u64 g_stor;
+static int g_stor_read;
+static u64 storage_bytes(void) {
+    if (g_stor_read) return g_stor;
+    g_stor_read = 1;
+    char p[512], d[24];
+    if (g_rootlen > 400) return 0;
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-storage", 19);
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return 0;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    if (n > 0) { d[n] = 0; g_stor = atou(d); }
+    return g_stor;
+}
+// the guest's data disk and its sdcard views (not /system, /proc, /sys, /dev)
+static int storage_path(const char *s) {
+    return s && (pre(s, "/data") || pre(s, "/storage") || pre(s, "/sdcard") || pre(s, "/mnt/"));
+}
 #define X(i) xl(P(i), b##i, &err)
 #define NEEDX(i) const char *h##i = X(i); if (!h##i && P(i)) return err
 
@@ -923,13 +1161,18 @@ static long send_retry(long nr, const long *a0) {
     }
 }
 
-static long trap2(long nr, long *a, void *uc, char **pbp) {
+#include "../vmount.h"
+
+static long trap2_base(long nr, long *a, void *uc, char **pbp) {
     int err = 0;
     switch (nr) {
     case NR_openat: {
         char *b1 = PB(0);
         if (P(1)) {
             if (P(1)[0] == '/' && P(1)[1] == 'd') {
+                // Added for AEmulator Plus (2026-11-19): nodes only an emulator has are absent, as on a phone (never created either)
+                if (seq(P(1), "/dev/qemu_pipe") || seq(P(1), "/dev/goldfish_pipe") || seq(P(1), "/dev/socket/qemud") ||
+                    seq(P(1), "/dev/qemu_trace")) return -2;     // ENOENT
                 if (seq(P(1), "/dev/ashmem")) {
                     return S2(NR_memfd_create, "aemu-ashmem", ((a[2] & 02000000) ? 1 : 0) | 2 /*MFD_ALLOW_SEALING*/);
                 }
@@ -937,11 +1180,28 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder")) return binder_open(a[2], P(1));
                 if (seq(P(1), "/dev/input/aemu-touchpad")) return input_open_at(g_pad, IN_PAD, a[2]);
                 if (seq(P(1), "/dev/input/aemu-keyboard")) return input_open_at(g_kbd, IN_KBD, a[2]);
+                if (seq(P(1), "/dev/input/aemu-spen")) return input_open_at(g_spen, IN_SPEN, a[2]);
                 if (pre(P(1), "/dev/input/event")) return input_open(a[2]);
             }
+            if (seq(P(1), "/proc/meminfo")) { long r = meminfo_open(); if (r >= 0) return r; }
             u64 pl = slen(P(1));
             if (pre(P(1), "/proc/") && ((pl >= 13 && seq(P(1) + pl - 13, "/attr/current")) || (pl >= 10 && seq(P(1) + pl - 10, "/attr/exec")))) {
                 return fake_memfile("aemu-attr", "u:r:su:s0\n", 10);
+            }
+            if (seq(P(1), "/proc/self/cmdline") || seq(P(1), "proc/self/cmdline")) {
+                long r = cmdline_open();
+                if (r != -1) return r;
+            }
+            // the ids of a process as the phone would show them (ported from the 33/34 engines with the ids machinery
+            // above); without this every /proc/<pid>/status read reports the host app's uid and FunTouch 9's
+            // FtFeature queries never reached the branch that terminates them
+            if (pre(P(1), "/proc/") && P(1)[6] >= '1' && P(1)[6] <= '9' && pl >= 14 && seq(P(1) + pl - 7, "/status")) {
+                long r = status_open(P(1), PB(1), PB(2));
+                if (r != -1) return r;
+            }
+            if (seq(P(1), "/proc/self/status") || seq(P(1), "proc/self/status")) {
+                long r = status_open("/proc/self/status", PB(1), PB(2));
+                if (r != -1) return r;
             }
             // Zygote (7.0+) keeps the trace marker open and fstat()s every descriptor it takes into a fork; the phone lets
             // an app write there but not stat it, so system_server died with "Unable to stat 5" (ported from the 30+ engine).
@@ -1055,7 +1315,8 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     case NR_statx: {
         char *b1 = PB(0);
         NEEDX(1);
-        return S5(nr, a[0], h1, a[2], a[3], a[4]);
+        // Added for AEmulator Plus (2026-11-21): the emulated root keeps the owner bits (vmount.h, vm_mode_fix)
+        return S5(nr, a[0], h1, vm_mode_fix(nr, a[0], h1, a[2]), a[3], a[4]);
     }
     case NR_fchown: own_put(7 /*fsetxattr*/, a[0], a[1], a[2]); return 0;
     case NR_fchownat: {
@@ -1068,9 +1329,25 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_readlinkat: {
         if (P(1)) {
+            if (g_vm) {      // Added for AEmulator Plus (2026-11-21): /proc/<pid>/exe of another guest process, see vmount.h
+                char *ex = PB(1);
+                if (vm_proc_exe(P(1), ex)) { u64 n = slen(ex); if (n > (u64)a[3]) n = (u64)a[3]; memcpy((void *)a[2], ex, n); return (long)n; }
+            }
             if (seq(P(1), "/proc/self/exe") && g_exe[0]) {
                 u64 n = slen(g_exe); if (n > (u64)a[3]) n = (u64)a[3];
                 memcpy((void *)a[2], g_exe, n); return (long)n;
+            }
+        }
+        // The zygote's fd whitelist (Android 8-10: FileDescriptorInfo::CreateFromFd) stats and readlinks every
+        // descriptor it takes into a fork; our /dev/binder is a socket to binderd, and the raw "socket:[...]" answer
+        // ended zygote_secondary on its first fork ("Not whitelisted : socket:[...]"). Same answer as the 33/34
+        // engines have given since round 4: to the guest that descriptor is /dev/null.
+        if (P(1) && pre(P(1), "/proc/self/fd/")) {
+            int bfd = (int)atou(P(1) + 14);
+            if (is_binder_fd(bfd)) {
+                const char *dn = "/dev/null";
+                u64 n = slen(dn); if (n > (u64)a[3]) n = (u64)a[3];
+                memcpy((void *)a[2], dn, n); return (long)n;
             }
         }
         char *b1 = PB(0), *t = PB(1);
@@ -1117,6 +1394,14 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             // a nearly full phone reads as a nearly full guest disk (no dropbox, low-storage modes): the guest's disk
             // is what is still free plus as much again
             u64 *s = (u64 *)a[1];               /* type, bsize, blocks, bfree, bavail */
+            u64 want = storage_bytes();
+            if (want && s[1] && storage_path(P(0))) {
+                // a disk of the chosen size whose free space is the phone's own free space (never more than the disk):
+                // used = size - free, so the guest cannot be told it may store more than the phone holds
+                u64 fr = s[4] * s[1];
+                if (fr > want) fr = want;
+                s[2] = want / s[1]; s[3] = s[4] = fr / s[1];
+            } else
             if (s[4] && s[2] > 2 * s[4]) { s[2] = 2 * s[4]; if (s[3] > s[2]) s[3] = s[2]; }
         }
         return r;
@@ -1126,6 +1411,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         NEEDX(1);
         return S3(nr, a[0], h1, a[2]);
     }
+    case NR_sysinfo_: return sysinfo_fake((void *)a[0]);
     case NR_getcwd: {
         char *t = PB(0);
         long r = S2(nr, t, PATH_MAX);
@@ -1264,7 +1550,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             }
         }
         return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
-    case NR_mount: case NR_umount2: case NR_chroot: case NR_capset: case NR_setgroups: case NR_unshare: return 0;
+    case NR_mount: case NR_umount2: case NR_chroot: case NR_capset: case NR_setgroups: case NR_unshare: case 268 /* setns */: return 0;
     case NR_prctl: return 0;                    // only PR_CAPBSET_DROP gets here
     case 107: {                                 // timer_create: the *_ALARM clocks need CAP_WAKE_ALARM (the Bluetooth
         long clk = a[0] == 8 ? 0 : a[0] == 9 ? 7 : a[0];   // stack of 10 stops on a refusal); the plain ones tick the same
@@ -1290,9 +1576,10 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_getuid: case NR_geteuid: return g_uid;
     case NR_getgid: case NR_getegid: return g_gid;
-    case NR_setuid: g_uid = (int)a[0]; return 0;
+    // ids_put: /proc/<pid>/status shows the ids the guest set (see status_open) - zygote sets them per fork
+    case NR_setuid: g_uid = (int)a[0]; ids_put(); return 0;
     case NR_setgid: g_gid = (int)a[0]; return 0;
-    case NR_setreuid: case NR_setresuid: if ((int)a[1] != -1) g_uid = (int)a[1]; else if ((int)a[0] != -1) g_uid = (int)a[0]; return 0;
+    case NR_setreuid: case NR_setresuid: if ((int)a[1] != -1) g_uid = (int)a[1]; else if ((int)a[0] != -1) g_uid = (int)a[0]; ids_put(); return 0;
     case NR_setregid: case NR_setresgid: if ((int)a[1] != -1) g_gid = (int)a[1]; else if ((int)a[0] != -1) g_gid = (int)a[0]; return 0;
     case NR_setfsuid: return g_uid;
     case NR_setfsgid: return g_gid;
@@ -1338,6 +1625,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_getsockopt: {
         if (is_nl_fd((int)a[0])) return 0;
+        if (g_vm && a[1] == 1 && a[2] == 31 /* SO_PEERSEC */) return vm_peersec(a[0], (char *)a[3], (u32 *)a[4]);   // Added for AEmulator Plus (2026-11-21): Zygisk, see vmount.h
         long r = S5(nr, a[0], a[1], a[2], a[3], a[4]);
         // SO_MARK read: fwmarkd of 8+ reads the socket's mark before setting its own (the set is forgiven above) and
         // answers every bind-to-network with -errno when this fails, so NetworkMonitor's probes never get out
@@ -1554,7 +1842,7 @@ static const u8 trapped[] = {
     NR_fchownat, NR_fchown, NR_openat, NR_readlinkat, NR_newfstatat, NR_fstat, NR_utimensat, NR_capget, NR_capset,
     NR_rt_sigaction, NR_reboot, NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid,
     NR_setresgid, NR_getresgid, NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid,
-    NR_getgid, NR_getegid, NR_bind, NR_connect, NR_execve, NR_setsockopt, NR_unshare, NR_timerfd_create,
+    NR_getgid, NR_getegid, NR_bind, NR_connect, NR_execve, NR_setsockopt, NR_unshare, 268 /* setns */, NR_timerfd_create,
     NR_close, NR_getsockopt, NR_sendto, NR_sendmsg, NR_getsockname, NR_socket, NR_dup3, NR_writev, 92 /* personality */, 107 /* timer_create */, 119 /* sched_setscheduler */,
 };
 
@@ -1571,6 +1859,10 @@ static void install_filter(void) {
     for (u64 i = 0; i < sizeof trapped; i++) f[n++] = JEQ(trapped[i], L_TRAP, 0);
     f[n++] = JEQ(NR_renameat2, L_TRAP, 0);
     f[n++] = JEQ(NR_statx, L_TRAP, 0);
+    f[n++] = JEQ(179 /* sysinfo */, L_TRAP, 0);
+    f[n++] = JEQ(268 /* setns */, L_TRAP, 0);
+    // Added for AEmulator Plus (2026-11-21): directory reads, to show a device node (a whiteout) as one (vmount.h)
+    if (g_vm) f[n++] = JEQ(61 /* getdents64 */, L_TRAP, 0);
     // Added for AEmulator Plus (2026-11-14): memfd_create, to refuse ART's dual-view JIT code cache to an x86 guest (see trap2)
     f[n++] = JEQ(NR_memfd_create, L_TRAP, 0);
     // glibc 2.33+ (the static qemu-arm's) answers faccessat() with faccessat2 first and falls back to faccessat only on ENOSYS;
@@ -1599,6 +1891,7 @@ static void install_filter(void) {
     AT(L_TRAP); f[n++] = RET(TRAP);
     AT(L_ALLOW); f[n++] = RET(ALLOW);
 #undef AT
+    if (n >= (int)(sizeof f / sizeof f[0]) || n > 250) die("seccomp filter too long", "");     // (jump offsets are bytes)
     for (int i = 0; i < n; i++) {
         if ((f[i].code & 7) != 5) continue;                     // jumps only
         if (f[i].jt >= 240) f[i].jt = (u8)(pos[f[i].jt - 240] - i - 1);
@@ -1664,17 +1957,20 @@ static const char *env_get(char **envp, const char *k) {
 void aemu_main(u64 *sp) {
     long argc = (long)sp[0];
     char **argv = (char **)(sp + 1), **envp = argv + argc + 1;
+    g_argvp = argv; g_argc0 = argc;
     u64 *auxv; { char **e = envp; while (*e) e++; auxv = (u64 *)(e + 1); }
     if (argc < 3) die("usage: aemu64 <argv0> <guest program> [args…]", "");
 
     const char *r = env_get(envp, "AEMU64_ROOT");
     if (!r || !r[0] || slen(r) >= sizeof g_root) die("AEMU64_ROOT is not set", "");
     memcpy(g_root, r, slen(r) + 1); g_rootlen = slen(g_root);
+    vm_init();                                                   // (vmount.h)
     if ((r = env_get(envp, "AEMU64_PROPS")) && slen(r) < sizeof g_props) memcpy(g_props, r, slen(r) + 1);
     g_crash = env_get(envp, "AEMU64_CRASH") != 0;
     if ((r = env_get(envp, "AEMU64_INPUT")) && slen(r) < sizeof g_input) memcpy(g_input, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_PAD")) && slen(r) < sizeof g_pad) memcpy(g_pad, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_KBD")) && slen(r) < sizeof g_kbd) memcpy(g_kbd, r, slen(r) + 1);
+    if ((r = env_get(envp, "AEMU64_SPEN")) && slen(r) < sizeof g_spen) memcpy(g_spen, r, slen(r) + 1);
     nh_set_env(env_get(envp, "AEMU64_NETDBG"), env_get(envp, "AEMU64_NETDNS"));
     if ((r = env_get(envp, "AEMU64_SDCARD")) && slen(r) < sizeof g_sd) { g_sdlen = slen(r); memcpy(g_sd, r, g_sdlen + 1); }
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
@@ -1687,6 +1983,7 @@ void aemu_main(u64 *sp) {
     if (n <= 0) die("cannot find myself", "");
     g_self[n] = 0;
     g_real_uid = (u32)S0(NR_getuid);
+    if (g_root[0]) ids_put();
     // a service starts in "/": 8.1 looks for vendor/etc/media_profiles_V1_0.xml by a relative path. Our own exec of a
     // guest program keeps the directory the guest is in.
     { char cw[PATH_MAX]; long cn = S2(NR_getcwd, cw, sizeof cw);
@@ -1731,6 +2028,7 @@ void aemu_main(u64 *sp) {
         memcpy(g_exe, prog, l); g_exe[l] = 0; unxl(g_exe);
     }
 
+    vm_exe_put();    // Added for AEmulator Plus (2026-11-21): /proc/<pid>/exe of this process for the others (vmount.h)
     // sockets init would have made for the service: AEMU64_SOCK_<name>=<host path>,<octal mode>[,seqpacket|dgram]
     static char sockenv[12][80]; int nsock = 0;
     for (char **e = envp; *e; e++) {

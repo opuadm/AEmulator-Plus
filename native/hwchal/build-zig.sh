@@ -34,8 +34,12 @@ EOF
 T="--target=thumb-linux-musleabi -mcpu=cortex_a8 -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -ffreestanding -fno-builtin"
 $ZIG cc $T -Os -Wl,-soname,libhardware.so -o "$STUB/libhardware.so" "$STUB/hw.c"
 $ZIG cc $T -Os -Wl,--version-script,"$STUB/libc.map" -Wl,-soname,libc.so -o "$STUB/libc_stub.so" "$STUB/libc.c"
-$ZIG cc $T -O2 -fvisibility=hidden -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
-  -Wl,-z,norelro -Wl,--build-id=none -Wl,--hash-style=both -Wl,--no-undefined -Wl,-s -Wl,-soname,hwcomposer.default.so \
-  -L"$STUB" -o "$OUT" "$(dirname "$0")/hwc.c" -lhardware -lc_stub
+# zig/LLVM 22 cannot select 64-bit NEON vector ops for the soft-float-abi triple (backend error "Do not know how to split"),
+# so the object is compiled for the hard-float triple (hwc.c passes no float arguments, so both ABIs are the same for it)
+# and linked as before.
+$ZIG cc --target=thumb-linux-musleabihf -mcpu=cortex_a8 -mfpu=neon -fPIC -ffreestanding -fno-builtin -O2 -fvisibility=hidden -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
+  -c "$(dirname "$0")/hwc.c" -o "$STUB/hwc.o"
+$ZIG cc $T -rtlib=none -Wl,-z,norelro -Wl,--build-id=none -Wl,--hash-style=both -Wl,--no-undefined -Wl,-s -Wl,-soname,hwcomposer.default.so \
+  -L"$STUB" -o "$OUT" "$STUB/hwc.o" -lhardware -lc_stub
 if grep -q -E '__aeabi_(u?idiv|uldiv|ldiv)|__aeabi_unwind' "$OUT"; then echo "error: $OUT imports a libgcc helper the guest libc lacks" >&2; exit 1; fi
 ls -l "$OUT"

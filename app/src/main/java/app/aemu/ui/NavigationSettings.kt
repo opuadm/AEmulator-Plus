@@ -68,5 +68,6 @@ internal fun NavigationSettings(s: VmSettings, preRelease: Boolean = false, set:
     if (!preRelease) {
         Toggle(stringResource(R.string.vi_mouse_keyboard), stringResource(R.string.vi_mouse_keyboard_sub), s.mouseKeyboard) { set(s.copy(mouseKeyboard = it)) }
         Toggle(stringResource(R.string.vi_keypad), stringResource(R.string.vi_keypad_sub), s.keypad) { set(s.copy(keypad = it)) }
+        Toggle(stringResource(R.string.vi_spen), stringResource(R.string.vi_spen_sub), s.spen) { set(s.copy(spen = it)) }
     }
 }
