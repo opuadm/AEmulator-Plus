@@ -1,4 +1,5 @@
-/* Modified for AEmulator Sunset, 2026-10-03: source-backed host motion HAL.
+/* Modified for AEmulator Plus, 2026-11-25: Xperia Play gamepad scan codes in the emulated key layout.
+ * Modified for AEmulator Sunset, 2026-10-03: source-backed host motion HAL.
  * Modified for AEmulator Super Plus, 2026-10-11: camcorder profiles for video.
  * Modified for AEmulator Plus, 2026-10-28: optional system_server watchdog patch (Android 14+).
  * Modified for AEmulator Plus, 2026-11-22: Google ExtServices config overlay without a Google ExtServices module.
@@ -52,9 +53,16 @@ class TreeFixer(
      * served by vendor.google.iot.keymaster@3.1-service): the "android." prefix alone parked it as "not a default module",
      * keymaster-3-1 found no impl, keystore waited for IKeymasterDevice for ever (exit 255, restarting) and system_server
      * died on a null IKeystoreService (the "zygote crash": the system zygote exits with it).
+     *
+     * Modified for AEmulator Plus (2026-11-23): an OEM's own HAL package (<oem>.hardware.<x>@V-impl.so) counts too. Motorola's
+     * audio service (motorola.hardware.audio@2.0-service) registers android.hardware.audio@2.0 and then
+     * motorola.hardware.audio@2.0::IMotDevicesFactory, and the second is loaded from motorola.hardware.audio@2.0-impl.so. That
+     * file was parked as "not a default module" (and sanitize()'s restore of a 32-bit tree skipped it for the same reason):
+     * "Could not get passthrough implementation for motorola.hardware.audio@2.0::IMotDevicesFactory/default", "Error while
+     * registering IMotDevicesFactory service: 1", exit 134, restarted 12 times, audioserver never found its HAL.
      */
     private fun isHidlImpl(name: String) =
-        Regex("^(android\\.(hardware|hidl)|vendor\\.google)\\.[A-Za-z0-9_.]+@[0-9.]+-impl[A-Za-z0-9_.-]*\\.so$").matches(name)
+        Regex("^(android\\.(hardware|hidl)|vendor\\.google|[a-z][a-z0-9_]*\\.hardware)\\.[A-Za-z0-9_.]+@[0-9.]+-impl[A-Za-z0-9_.-]*\\.so$").matches(name)
 
     fun sanitize() {
         val parked = File(root, "system/.aemu-parked").apply { mkdirs() }
@@ -325,6 +333,7 @@ class TreeFixer(
         executableCodeCache()
         binderAttemptAcquire()
         mspaceHooks()
+        iwmmxtToNeon()
         glassGestureGuard()
         glassBluetoothPark()
         disableStallingPackages()
@@ -824,7 +833,9 @@ class TreeFixer(
             append("key ${InputService.KEY_POWER} POWER WAKE\n")
             append("key ${InputService.KEY_VOLUMEDOWN} VOLUME_DOWN WAKE\n")
             append("key ${InputService.KEY_VOLUMEUP} VOLUME_UP WAKE\n")
-            append("key 113 VOLUME_MUTE\n")
+            // VOLUME_MUTE is unknown to the 2.3 layout parser ("expected keycode, got 'VOLUME_MUTE'"): it rejects the whole file,
+            // so Home, Back, Menu, the D-pad and the Xperia Play gamepad keys were all dropped. Offered from 3.0 only.
+            if (img.api >= 11) append("key 113 VOLUME_MUTE\n")
             append("key 212 CAMERA\n")
             append("key 103 DPAD_UP\nkey 108 DPAD_DOWN\nkey 105 DPAD_LEFT\nkey 106 DPAD_RIGHT\nkey 232 DPAD_CENTER\n")
             // Keypad input method (VM settings): digits, * #, Call and End of a feature phone. Labels known since 1.0.
@@ -836,6 +847,8 @@ class TreeFixer(
                 append("key 254 APP_SWITCH\n")
                 append("key 187 APP_SWITCH\n")
             }
+            // Xperia Play input method (VM settings of an R800): the gamepad's scan codes. BUTTON_* labels exist from 2.3.
+            if (VirtualInputPolicy.isXperiaPlayModel(img.model) && img.api >= XperiaPlayPad.MIN_API) append(XperiaPlayPad.keyLayout())
         }.let {
             // 5.0 dropped the WAKE flags from the layout syntax: an unknown flag makes the guest reject the whole file
             if (img.api >= 21) it.replace(" WAKE_DROPPED", "").replace(" WAKE", "") else it
@@ -1438,7 +1451,10 @@ class TreeFixer(
         // Qualcomm's SurfaceFlinger reads its gralloc's flags out of every layer's handle: the same way, the kernel's
         // gralloc with Qualcomm's handle layout goes in front where the firmware's SurfaceFlinger is that one.
         val qcomSf = kernel.qcomHandles && runCatching {
-            String(File(root, "system/lib64/libsurfaceflinger.so").readBytes(), Charsets.ISO_8859_1).contains("ExSurfaceFlinger")
+            // (a 32-bit-only firmware, e.g. a Moto E on 8.0, has only system/lib)
+            listOf("system/lib64/libsurfaceflinger.so", "system/lib/libsurfaceflinger.so").any { sf ->
+                File(root, sf).let { it.isFile && String(it.readBytes(), Charsets.ISO_8859_1).contains("ExSurfaceFlinger") }
+            }
         }.getOrDefault(false)
         for ((on, name) in listOf(kernel.exynosHandles to "exynos", kernel.qcomHandles to "qcom")) if (on) for (lib in listOf("lib64", "lib")) runCatching {
             // (a Treble release keeps its gralloc on the vendor side)
@@ -1533,7 +1549,7 @@ class TreeFixer(
         // Installed for 8 - 17 only; GuestVm starts it when the setting is on, and the jar of a guest that was switched off stays unused
         runCatching {
             val jar = File(root, WifiEmu.JAR_PATH)
-            if (img.api in WifiEmu.TREBLE_MIN_API..WifiEmu.TREBLE_MAX_API) {
+            if (img.api in WifiEmu.N64_MIN_API..WifiEmu.TREBLE_MAX_API) {
                 val bytes = eaOpen("engines/kk/${WifiEmu.JAR_NAME}").use { it.readBytes() }
                 if (!jar.isFile || !jar.readBytes().contentEquals(bytes)) {
                     jar.parentFile?.mkdirs()
@@ -1869,6 +1885,7 @@ class TreeFixer(
         disableTeeKeyMint()
         disableTeeOemLock()
         dropHalsWithoutService()
+        declareOemAudioHal()
         dropOppoHalsWithoutService()
         disableHardwareVibratorHalOfPure32()
         useSoftwareGrallocOnPure32()
@@ -4566,6 +4583,63 @@ class TreeFixer(
      */
     private val C2_HAL_PREFIXES = listOf("android.hardware.media.c2@", "vendor.qti.media.c2@")
 
+    private val oemAudioService = Regex("^([a-z][a-z0-9_]*)\\.hardware\\.audio@([0-9.]+)-service.*$")
+
+    /**
+     * Added for AEmulator Plus (2026-11-23). Motorola's audio HAL service (motorola.hardware.audio@2.0-service) registers
+     * android.hardware.audio@2.0::IDevicesFactory, the effects factory and motorola.hardware.audio@2.0::IMotDevicesFactory, and
+     * the firmware's audioserver asks for the last one. The device manifest the engine puts in /vendor/manifest.xml (the
+     * firmware's own, 19 KB, is set aside) declares none of them, so hwservicemanager answers every getTransport with the
+     * default transport ("Cannot find entry motorola.hardware.audio@2.0::IMotDevicesFactory in either framework or device
+     * manifest, using default transport") and audioserver's libhidl then never sends the get: strace shows exactly one hwbinder
+     * transaction (getTransport) before "DevicesFactoryHalHidl: Failed to obtain IDevicesFactory service, terminating process."
+     * and exit_group(1), while the HAL is registered and alive. The firmware's own declarations of these packages are put back
+     * (a default one if the original manifest is gone). Idempotent, runs on every start; before Android 10 only, because from
+     * 10 on the manifest fragments are read too and a duplicate would be a VINTF conflict.
+     */
+    private fun declareOemAudioHal() {
+        if (img.api >= 29) return
+        val present = listOf("vendor/bin/hw", "system/vendor/bin/hw", "system/bin/hw").flatMap { d -> File(root, d).list().orEmpty().toList() }
+        val oem = present.mapNotNull { oemAudioService.find(it) }.firstOrNull { it.groupValues[1] != "android" } ?: return
+        val oemPkg = "${oem.groupValues[1]}.hardware.audio"
+        val oemIface = if (oem.groupValues[1] == "motorola") "IMotDevicesFactory" else null
+        val halRe = Regex("[ \\t]*<hal\\b[^>]*>.*?</hal>[ \\t]*\\r?\\n?", RegexOption.DOT_MATCHES_ALL)
+        val nameRe = Regex("<name>\\s*([^<\\s]+)\\s*</name>")
+        fun hal(name: String, ver: String, iface: String) = "    <hal format=\"hidl\">\n        <name>$name</name>\n" +
+            "        <transport>hwbinder</transport>\n        <version>$ver</version>\n        <interface>\n" +
+            "            <name>$iface</name>\n            <instance>default</instance>\n        </interface>\n    </hal>\n"
+        val wanted = LinkedHashMap<String, String>()
+        wanted["android.hardware.audio"] = hal("android.hardware.audio", "2.0", "IDevicesFactory")
+        wanted["android.hardware.audio.effect"] = hal("android.hardware.audio.effect", "2.0", "IEffectsFactory")
+        if (oemIface != null) wanted[oemPkg] = hal(oemPkg, oem.groupValues[2], oemIface)
+        // the firmware's own declaration wins where its manifest is still around
+        for (rel in listOf("system/.aemu-parked/vendor#manifest.xml", "system/.aemu-vintf-orig/vendor#manifest.xml")) {
+            val orig = File(root, rel)
+            if (!orig.isFile) continue
+            runCatching {
+                for (m in halRe.findAll(orig.readText())) {
+                    val n = nameRe.find(m.value)?.groupValues?.get(1) ?: continue
+                    if (n in wanted && m.value.contains("hwbinder")) wanted[n] = if (m.value.endsWith("\n")) m.value else m.value + "\n"
+                }
+            }
+            break
+        }
+        val seen = HashSet<String>()
+        for (rel in listOf("vendor/manifest.xml", "system/vendor/manifest.xml", "vendor/etc/vintf/manifest.xml", "system/vendor/etc/vintf/manifest.xml", "odm/etc/vintf/manifest.xml")) {
+            val f = File(root, rel)
+            if (!f.isFile || !seen.add(runCatching { f.canonicalPath }.getOrDefault(f.path))) continue
+            runCatching {
+                val text = f.readText()
+                val have = halRe.findAll(text).mapNotNull { nameRe.find(it.value)?.groupValues?.get(1) }.toSet()
+                val add = wanted.filterKeys { it !in have }
+                val at = text.lastIndexOf("</manifest>")
+                if (add.isEmpty() || at < 0) return@runCatching
+                f.setWritable(true); f.writeText(text.substring(0, at) + add.values.joinToString("") + text.substring(at)); f.setReadable(true, false)
+                log("$rel: audio HAL declared again: ${add.keys.joinToString()}")
+            }.onFailure { log("$rel: audio HAL declarations not added: ${it.message}") }
+        }
+    }
+
     /**
      * A HAL the vendor manifest declares whose init service cannot start (its rc file names a /bin/hw/ program that
      * is not in the tree) never registers, and everything that asks for it waits for ever: cameraserver logs
@@ -4610,6 +4684,11 @@ class TreeFixer(
             runCatching { Regex("<hal\\b[^>]*>.*?</hal>", RegexOption.DOT_MATCHES_ALL).findAll(f.readText()) }
                 .getOrNull()?.forEach { m -> pkgName.find(m.value)?.groupValues?.get(1)?.let { served += it } }
         }
+        // Modified for AEmulator Plus (2026-11-23): Motorola's /vendor/bin/hw/motorola.hardware.audio@2.0-service is what registers
+        // android.hardware.audio@2.0::IDevicesFactory (and the effects factory) on this firmware, but the engine's own rc file
+        // (android.hardware.audio@2.0-service.rc) names a program the board does not have, so android.hardware.audio was judged
+        // "without a service" and dropped from the manifest ("HAL without a service dropped: ... android.hardware.audio ...").
+        if (present.any { oemAudioService.matches(it) }) served += setOf("android.hardware.audio", "android.hardware.audio.effect")
         val rcDirs = listOf("vendor/etc/init", "system/vendor/etc/init", "system/etc/init", "")
         // package (android.hardware.camera.provider) -> programs its rc services run that are not there
         val missing = HashMap<String, MutableSet<String>>()
@@ -4967,31 +5046,67 @@ class TreeFixer(
                 log("gralloc: firmware gralloc.default.so kept (Broadcom /dev/gememalloc, emulated by libaemushim)")
             if (n > 0 || usesGememalloc(runCatching { romGralloc.readBytes() }.getOrNull())) ensureGememallocPool()
         }
-        // Eclair (API 5..7): the Droid firmware gralloc.default blocks forever on its own module mutex (strace: FUTEX_WAIT on an address
-        // inside gralloc.default.so, right after mmap of fb0) once fb0 offers a single page, so SurfaceFlinger never finishes readyToRun and
-        // system_init never starts the Java services. The engine gralloc (AOSP) handles the single-page case with a plain ashmem buffer.
+        // Single-page fb0 (the qemu fb0 always is one): the firmware gralloc.default blocks forever on its own module mutex (strace: FUTEX_WAIT on an
+        // address inside gralloc.default.so, right after mmap of fb0), so SurfaceFlinger never finishes readyToRun and system_init never starts the
+        // Java services. The engine gralloc (AOSP) handles the single-page case with a plain ashmem buffer. Stock AOSP gralloc since Eclair has the
+        // bug (single-page branch asks for HW_2D, the pmem path then locks the mutex the caller holds), so it is not an Eclair-only problem: Froyo,
+        // Gingerbread and the vendor trees built from them have it, and others of the same releases do not (no pmem path in them).
+        // Modified for AEmulator Plus (2026-11-24): not decided by API level any more. The firmware's own gralloc is read (GrallocProbe.singlePageDeadlock:
+        // pmem path + module mutex + single-page branch all in the module) and replaced only when it has the bug. A gralloc that cannot be read
+        // (absent, not an ELF32 HAL module) keeps the earlier rule, API 5..7, so firmware that worked before is treated the same.
+        // The firmware's own copy is the one kept in system/.aemu-parked once there is one (the file in place is then the engine's), so the
+        // answer is the same on every boot.
         // Modified for AEmulator Plus (2026-11-17): x86 Eclair too. The Android-x86 / Atom Eclair firmware gralloc has the same single-page
         // fb0 deadlock, and engines/kk-x86/gralloc.default.so (AOSP gralloc, i386, single-page fb0 handled with a plain ashmem buffer) is
         // its replacement. Bionic firmware only: that build is linked against libcutils.so / liblog.so / libstdc++.so / libm.so / libdl.so /
         // libc.so (undefined __errno, __page_size, android_atomic_*), so a glibc firmware (Google TV, see GuestPreload.isGlibcFirmware) could not load it as it is: it gets the
         // patched build (engines/glibc-x86/gralloc.default.so + aegr.so) from glibcGralloc() instead, not from this block.
-        val x86EclairGralloc = img.api in 5..7 && img.arch == GuestArch.X86 && engine == Engine.KK &&
+        val parkedFirmwareGralloc = File(root, "system/.aemu-parked/system#lib#hw#gralloc.default.so.eclair")
+        val firmwareGrallocBytes: ByteArray? = (if (parkedFirmwareGralloc.isFile) parkedFirmwareGralloc else romGralloc.takeIf { it.isFile && !isLink(it) })
+            ?.let { runCatching { it.readBytes() }.getOrNull() }
+        val singlePage = firmwareGrallocBytes?.let { GrallocProbe.singlePageDeadlock(it) } ?: GrallocProbe.SinglePage.UNKNOWN
+        val legacyEclairRule = singlePage == GrallocProbe.SinglePage.UNKNOWN && img.api in 5..7
+        val singlePageDeadlock = singlePage == GrallocProbe.SinglePage.DEADLOCKS || legacyEclairRule
+        if (firmwareGrallocBytes != null || legacyEclairRule)
+            log("gralloc: single-page fb0 check of the firmware gralloc: " + when {
+                legacyEclairRule -> "not readable as a gralloc module, API ${img.api} rule (replaced)"
+                singlePage == GrallocProbe.SinglePage.DEADLOCKS -> "pmem path under the module mutex (blocks on a single page), replaced with engine gralloc"
+                singlePage == GrallocProbe.SinglePage.SAFE -> "no such path, firmware gralloc kept"
+                else -> "not readable as a gralloc module, firmware gralloc kept"
+            })
+        // Added for AEmulator Plus (2026-11-26): the libui of this firmware sizes its framebuffer FIFO from fb0's numFramebuffers (HTC Gingerbread),
+        // which the AOSP-layout gralloc never fills in: libaemushim's hw_get_module puts GrallocProbe.FB_BUFFERS there (GuestRunner sets AEMU_FB_BUFFERS)
+        if (img.arch == GuestArch.ARM && runCatching { GrallocProbe.libuiTakesFbCount(File(root, "system/lib/libui.so").readBytes()) }.getOrDefault(false))
+            log("gralloc: this libui takes its framebuffer count from fb0 (mNumBuffers), libaemushim supplies ${GrallocProbe.FB_BUFFERS} when the gralloc leaves it 0")
+        val x86SinglePageGralloc = singlePageDeadlock && img.arch == GuestArch.X86 && engine == Engine.KK &&
             !GuestPreload.isGlibcFirmware(root) && EngineAssets.exists(ctx, "engines/${Engine.KK.id}${img.arch.assetSuffix}/gralloc.default.so")
         // 2026-11-21: MediaTek Gingerbread (TCT / Alcatel ONE TOUCH 4007D, 2.3.6, mt6575) hangs the way Eclair does: logcat shows
         // "gralloc: page flipping not supported (yres_virtual=800, requested=1600)" and then nothing, the SurfaceFlinger thread sits in
         // futex_wait (the firmware gralloc.default.so, 14 KB, waits on its own module mutex once fb0 offers a single page), so
         // readyToRun never returns and system_init never starts the Java services (no ActivityManager, no PackageManager).
-        // Same cure as Eclair: the engine's gralloc, which serves a single-page fb0 with a plain ashmem buffer. Other Gingerbread
-        // firmwares keep their own gralloc; only an MTK one (a trace in build.prop or its daemons) is replaced.
-        val mtkGbGralloc = img.api in 8..10 && img.arch == GuestArch.ARM && engine == Engine.KK && romGralloc.isFile &&
+        // Same cure as Eclair: the engine's gralloc, which serves a single-page fb0 with a plain ashmem buffer. Kept as a rule of its own
+        // for the case that the probe above did not recognise that module (it was not tested on that binary): only an MTK one (a trace
+        // in build.prop or its daemons) is replaced on this rule.
+        val mtkGbGralloc = !singlePageDeadlock && img.api in 8..10 && img.arch == GuestArch.ARM && engine == Engine.KK && romGralloc.isFile &&
             (isMtkPlatform(root) || listOf("system/lib/hw", "vendor/lib/hw", "system/.aemu-parked").any { d ->
                 File(root, d).list().orEmpty().any { Regex("""\.mt6\d+\.so$""").containsMatchIn(it) } })
-        val eclairGralloc = (img.api in 5..7 && (img.arch == GuestArch.ARM || x86EclairGralloc)) || mtkGbGralloc
+        val eclairGralloc = (singlePageDeadlock && (img.arch == GuestArch.ARM || x86SinglePageGralloc)) || mtkGbGralloc
+        // a tree an earlier build prepared on the API rule: the firmware's gralloc was set aside and the engine's put in its place, but the
+        // firmware's own gralloc is not the one that blocks: put it back
+        if (!eclairGralloc && parkedFirmwareGralloc.isFile && singlePage == GrallocProbe.SinglePage.SAFE) {
+            runCatching {
+                if (isLink(romGralloc)) Os.remove(romGralloc.absolutePath)
+                parkedFirmwareGralloc.copyTo(romGralloc, overwrite = true)
+                romGralloc.setReadable(true, false); romGralloc.setExecutable(true, false)
+                parkedFirmwareGralloc.delete()
+            }.onSuccess { log("gralloc: firmware gralloc put back (it has no single-page deadlock)") }
+                .onFailure { log("gralloc: firmware gralloc not put back: ${it.message}") }
+        }
         if (eclairGralloc && romGralloc.isFile) {
             val parked = File(root, "system/.aemu-parked/system#lib#hw#gralloc.default.so.eclair")
             if (!parked.exists()) {
                 parked.parentFile?.mkdirs()
-                if (runCatching { romGralloc.copyTo(parked) }.isSuccess) log(if (mtkGbGralloc) "MTK Gingerbread: firmware gralloc replaced with engine gralloc (single-page fb0 deadlock)" else "Eclair: firmware gralloc replaced with engine gralloc")
+                if (runCatching { romGralloc.copyTo(parked) }.isSuccess) log(if (mtkGbGralloc) "MTK Gingerbread: firmware gralloc replaced with engine gralloc (single-page fb0 deadlock)" else "gralloc: firmware gralloc replaced with engine gralloc (single-page fb0 deadlock)")
             }
         }
         // The firmware gralloc that the engine's replaces (kept in the parking dir, so the answer is the same on every boot), and
@@ -5151,7 +5266,7 @@ class TreeFixer(
                 copied++
                 if (name == "audio.primary.directtrack.so") log("audio: verified CAF direct-track stream ABI selected")
                 if (name == GtiGralloc.ASSET) log("gralloc: Eclair-behaviour variant installed (same-process buffers are not re-mapped or unmapped)")
-                if (from == "gralloc.default.so" && x86EclairGralloc) log("gralloc: x86 Eclair engine gralloc installed (a single-page fb0 no longer blocks on the module mutex)")
+                if (from == "gralloc.default.so" && x86SinglePageGralloc) log("gralloc: x86 engine gralloc installed (a single-page fb0 no longer blocks on the module mutex)")
             }.onFailure { log("${from.removePrefix("@")} missing from engine set: ${it.message}") }
         }
         if (skippedForArch > 0)
@@ -5286,6 +5401,20 @@ class TreeFixer(
 
     /** Направляет загрузчик EGL прошивки на GL-мост (или на программный растеризатор). */
     private fun eglConfig(gpu: Boolean) {
+        // Added for AEmulator Plus (2026-11-25): Android 1.0 - 1.6 have no egl.cfg; their libEGL loads libagl.so, which the open bridge replaces
+        if (img.api < OpenGl.EGL_CFG_API && img.arch == GuestArch.ARM) {
+            val agl = File(root, OpenGl.driverPath(img.api))
+            val kept = File(agl.parentFile, OpenGl.AGL_KEPT)
+            if (gpu && OpenGl.arm(ctx, img, paths.dir)) {
+                runCatching {
+                    if (!kept.isFile && agl.isFile) agl.renameTo(kept)       // (the guest's own software renderer, back when the bridge is off)
+                    installAsset(OpenGl.ARM32, agl)
+                    log("GL: open bridge installed as libagl.so for the 1.x guest (host renderer)")
+                }.onFailure { log("GL: open bridge failed to install: ${it.message}") }
+                return
+            }
+            if (kept.isFile) { agl.delete(); kept.renameTo(agl); log("GL: libagl.so restored") }
+        }
         // x86 Lollipop/Marshmallow firmware without the AOSP software renderer (also covers images imported by older builds)
         X86SoftwareGles.ensure(ctx, root, img.api, log)
         val dir = File(root, "system/lib/egl").apply { mkdirs() }
@@ -5297,7 +5426,18 @@ class TreeFixer(
         if (!cfgRom.isFile && cfg.isFile) cfg.copyTo(cfgRom, overwrite = true)
         when (engine) {
             Engine.N64 -> {}
-            Engine.GB -> cfg.writeText(if (gpu) "0 0 dhd\n" else "0 0 android\n")
+            Engine.GB -> {
+                val bridgeFile = File(dir, "libGLES_aemu.so")
+                if (gpu && OpenGl.arm(ctx, img, paths.dir)) {
+                    // Added for AEmulator Plus (2026-11-25): the open bridge is the 2.x guest's whole EGL (libGLES_dhd.so stays unused in its directory)
+                    runCatching { installAsset(OpenGl.ARM32, bridgeFile) }.onFailure { log("GL: open bridge failed to install: ${it.message}") }
+                    cfg.writeText(OpenGl.eglCfg(img.api))
+                    log("GL: open bridge installed for the 2.x guest (host renderer)")
+                } else {
+                    bridgeFile.delete()
+                    cfg.writeText(if (gpu) "0 0 dhd\n" else "0 0 android\n")
+                }
+            }
             Engine.KK -> {
                 // сам мост лежит как libGLES_bridge.so; все имена, которые ищут загрузчики EGL (libGLES.so у 4.4,
                 // libGLES_<тег>.so по egl.cfg, раздельные libEGL_/libGLESv*_), занимает переходник libGLES_split:
@@ -5309,20 +5449,27 @@ class TreeFixer(
                 // Added for AEmulator Plus (2026-11-20): x86-32 firmware. The engine's guest GL library is ARM only, so the open i386 bridge
                 // (solo mode: it is the whole EGL, no software renderer behind it) goes under every name libEGL looks for, except
                 // libGLES_android.so: that is the firmware's / X86SoftwareGles' own software renderer and stays for the GPU-off case.
-                if (EngineAssets.kkX86OpenBridge(ctx, engine, img.arch)) {
+                // Modified for AEmulator Plus (2026-11-25): an ARM guest (2.0+) gets the same open bridge, in its armv7 build (see OpenGl)
+                val openArm = OpenGl.arm(ctx, img, paths.dir)
+                if (EngineAssets.kkX86OpenBridge(ctx, engine, img.arch) || openArm) {
                     val x86Names = names.filter { it != "libGLES_android.so" } + (if (img.api >= 24) listOf("libGLES_emulation.so") else emptyList())
+                    val bridgeAsset = if (openArm) OpenGl.ARM32 else EngineAssets.X86_I386_GPU_BRIDGE
+                    // (a run on the engine's driver put its shim over the firmware's software renderer and set that aside: give it back)
+                    if (swOff.isFile) { sw.delete(); swOff.renameTo(sw) }
                     if (gpu) {
                         runCatching {
-                            for (n in x86Names) installAsset(EngineAssets.X86_I386_GPU_BRIDGE, File(dir, n))
+                            for (n in x86Names) installAsset(bridgeAsset, File(dir, n))
                             File(dir, "libGLES_bridge.so").delete(); File(dir, "libGLES_split.so").delete()
-                        }.onFailure { log("GL: x86 bridge failed to install: ${it.message}") }
-                        // (4.x loaders take the last line, the others the one with impl=1)
-                        cfg.writeText("0 0 android\n0 1 aemu\n")
-                        log("GL: open i386 bridge installed for the x86 guest (host renderer)")
+                        }.onFailure { log("GL: open bridge failed to install: ${it.message}") }
+                        // (up to 4.0.4 the bridge is the only impl, later loaders take the last line, the others the one with impl=1; x86 firmware
+                        // has the same two-impl EGL, so it gets the same lines: before 2026-11-25 it kept libagl's configs next to ours from 2.0 on)
+                        cfg.writeText(OpenGl.eglCfg(img.api))
+                        log(if (openArm) "GL: open bridge installed for the ARM guest (host renderer)" else "GL: open i386 bridge installed for the x86 guest (host renderer)")
                     } else {
                         // software rendering: none of our names may stay, libEGL would find the bridge by scanning egl/
-                        val keepPlain = img.api in 20..23
+                        val keepPlain = img.arch != GuestArch.ARM && img.api in 20..23
                         for (n in x86Names) if (!(keepPlain && n == "libGLES.so")) File(dir, n).delete()
+                        File(dir, "libGLES_bridge.so").delete(); File(dir, "libGLES_split.so").delete()
                         cfg.writeText("0 0 android\n")
                     }
                     return
@@ -6046,6 +6193,51 @@ class TreeFixer(
     }.onFailure { log("libpixelflinger: patch failed: ${it.message}") }
 
     /**
+     * Added for AEmulator Plus (2026-11-25). Marvell (PXA/Armada) firmware has its Skia blitters in hand-written Wireless MMX
+     * assembly (libskia.so: *_MRVL, 59 functions, 10k instructions); no emulated CPU has iWMMXt together with VFP/NEON, so the
+     * first blit in system_server dies with SIGILL (0xee377007) and zygote restarts forever. The instructions are rewritten as
+     * ARMv7 NEON before the guest starts (see [Iwmmxt]); the firmware's own library is kept in system/.aemu-parked as *.iwmmxt
+     * and the file in place is rewritten, so its owner and mode stay. A library with nothing left to translate (the one already
+     * done, or a Wireless MMX build without reachable iWMMXt code) is left alone, so this is idempotent and cheap on every start.
+     */
+    private fun iwmmxtToNeon() = runCatching {
+        if (img.arch != GuestArch.ARM) return@runCatching
+        for (dir in listOf("system/lib", "system/vendor/lib", "vendor/lib")) {
+            for (lib in File(root, dir).listFiles().orEmpty()) {
+                if (!lib.isFile || isLink(lib) || !lib.name.endsWith(".so") || !Iwmmxt.hasWmmx(lib)) continue
+                val keep = File(root, "system/.aemu-parked/${dir.replace('/', '#')}#${lib.name}.iwmmxt")
+                runCatching {
+                    val cur = lib.readBytes()
+                    val done = runCatching { Iwmmxt.translate(cur) }
+                    val result: Iwmmxt.Result?
+                    if (done.isSuccess) {
+                        val fresh = done.getOrNull()
+                        if (fresh != null) {
+                            result = fresh
+                            keep.parentFile?.mkdirs()
+                            lib.copyTo(keep, overwrite = true)                    // the firmware's own file, as it came
+                        } else {
+                            // nothing (left) to translate, unless an earlier build wrote the library without the prelink tag
+                            // ("PRE " at the end of the file): the 2.x linker then relocates it a second time and zygote dies in
+                            // the constructors of libskia. The firmware's own file is translated again.
+                            val orig = if (keep.isFile) keep.readBytes() else return@runCatching
+                            if (!Iwmmxt.prelinkTagLost(orig, cur) && !Iwmmxt.hasEmptyLoad(cur)) return@runCatching
+                            result = Iwmmxt.translate(orig)
+                            log("iwmmxt: $dir/${lib.name}: prelink tag restored")
+                        }
+                    } else if (keep.isFile) {
+                        result = Iwmmxt.translate(keep.readBytes())               // a half-written library from an interrupted start
+                    } else throw done.exceptionOrNull() ?: IwmmxtUnsupported("unreadable")
+                    if (result != null) {
+                        lib.writeBytes(result.data)
+                        log("iwmmxt: $dir/${lib.name}: ${result.summary()}")
+                    }
+                }.onFailure { log("iwmmxt: $dir/${lib.name} left as it is: ${it.message}") }
+            }
+        }
+    }.onFailure { log("iwmmxt: ${it.message}") }
+
+    /**
      * A failed Surface.unlockCanvasAndPost() throws IllegalArgumentException; on a system_server thread nothing
      * catches it, system_server kills itself and zygote exits (see ElfPatch.unlockAndPostNeverFails).
      */
@@ -6190,7 +6382,9 @@ class TreeFixer(
         NativeWindowProbe.windowShift(File(root, "system/lib/libui.so").readBytes())
     }.getOrNull() ?: 0
     private fun installAsset(a: String, f: File) {
-        if (f.isFile && !isLink(f) && f.length() == assetSize(a)) return
+        // Modified for AEmulator Plus (2026-11-26): a rebuilt library can keep its exact size (the GLES bridge's i386 build did), so a
+        // matching size alone left the old file in place: the content has to match as well
+        if (f.isFile && !isLink(f) && f.length() == assetSize(a) && sameContent(a, f)) return
         f.delete()
         eaOpen(a).use { i -> f.outputStream().use { o -> i.copyTo(o) } }
         f.setReadable(true, false); f.setExecutable(true, false)

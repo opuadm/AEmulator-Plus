@@ -1,12 +1,16 @@
-/* Modified for AEmulator Plus, 2026-11-09: two machines on one tab (split screen).
+/* Modified for AEmulator Plus, 2026-11-25: Xperia Play slider button and gamepad window.
+ * Modified for AEmulator Plus, 2026-11-09: two machines on one tab (split screen).
  * Modified for AEmulator Plus, 2026-11-09: several machines at once (one process slot each), one window with a tab bar.
  * Modified for AEmulator Sunset through 2026-10-03: natural-edge controls, cutout and
  * compatibility and camera integration.
  * Modified for AEmulator Plus, 2026-10-12: VM screen themes, device skins (merged from Super Plus).
+ * Modified for AEmulator Plus, 2026-11-24: system updates the guest asks its recovery to install are applied by the app (OtaRecovery).
  * Modified for AEmulator Plus, 2026-10-25: emulated wireless emergency alerts. GPL-3.0; see LICENSE and NOTICE.md. */
 package app.aemu.ui
 
 import app.aemu.R
+import android.util.Log
+import app.aemu.core.userMessage
 import java.io.File
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.semantics.role
@@ -43,6 +47,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.rounded.BatteryStd
 import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.VerticalAlignBottom
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Thermostat
@@ -249,6 +257,9 @@ open class VmActivity : ComponentActivity() {
     /** VM screen theme (core/VmTheme.kt): navigation bar look, frame behind the guest, screen corners */
     private var vmTheme by mutableStateOf(app.aemu.core.VmThemes.BUILT_IN[1])
     private var frameView: android.widget.ImageView? = null
+    /** camera cutout / picture laid over the guest screen of a device skin (see [app.aemu.core.SkinCutoutView]) */
+    private var cutoutView: app.aemu.core.SkinCutoutView? = null
+    private var cutoutWanted = false
     private var vmRoot: FrameLayout? = null
     /** the tab bar above the guest (the same bar is in the library and in every machine's window) */
     private var tabStripView: ComposeView? = null
@@ -299,6 +310,7 @@ open class VmActivity : ComponentActivity() {
 
     private fun bootIfStopped() {
         if (vm.state == GuestVm.State.STOPPED || vm.state == GuestVm.State.FAILED) {
+            if (vm.recoveryMode) app.aemu.core.OtaRecovery.pending(vm.paths)?.let { installPendingOta(it); return }
             thread(name = "vm-boot") { vm.boot() }
         }
     }
@@ -353,13 +365,21 @@ open class VmActivity : ComponentActivity() {
             return
         }
         val resolved = if (img.settings.hostResolution && img.engine != Engine.GB) {
-            val (width, height) = natural
-            img.copy(settings = img.settings.copy(width = width and -2, height = height and -2,
+            val (width, height) = app.aemu.core.DisplayGeometry.hostGuestSize(natural.first, natural.second)
+            img.copy(settings = img.settings.copy(width = width, height = height,
                 density = resources.displayMetrics.densityDpi))
+        } else if (img.settings.skinResolution && img.engine != Engine.GB) {
+            // the guest screen is the size of the phone or tablet the machine's skin shows
+            img.copy(settings = app.aemu.core.VmThemes.withSkinResolution(this, img.settings,
+                app.aemu.core.ResolutionPreset.buildPropDensity(app.aemu.core.VmPaths(this, img.id).root)))
         } else img
         vm = if (cur != null && cur.img.id == img.id) cur
             else GuestVm(applicationContext, resolved, intent.getBooleanExtra(EXTRA_LOW_POWER, false)).also { it.recoveryMode = intent.getBooleanExtra(EXTRA_RECOVERY, false); VmHost.vm = it }
-        vm.onPower = { reboot, reason -> runOnUiThread { if (reboot) rebootVm(reason == "recovery") else stopVm() } }
+        vm.onPower = { reboot, reason -> runOnUiThread {
+            // an update the guest downloaded asks for a reboot to recovery: the app installs it itself instead of running a recovery
+            val update = if (reboot && reason == "recovery" && !vm.recoveryMode) app.aemu.core.OtaRecovery.pending(vm.paths) else null
+            if (update != null) installPendingOta(update) else if (reboot) rebootVm(reason == "recovery") else stopVm()
+        } }
         // this window is a tab; the slot file says which machine this process runs
         VmSlots.adopt(applicationContext, vm.img.id)
         TabRegistry.open(applicationContext, vm.img.id)
@@ -369,6 +389,7 @@ open class VmActivity : ComponentActivity() {
         registerTabCloseReceiver()
         val s = vm.settings
         userFrac = loadScreenFrac(vm.img.id)
+        loadNavFloat(vm.img.id)
         showLed = s.showLed
         if (s.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -425,6 +446,8 @@ open class VmActivity : ComponentActivity() {
         frameView = android.widget.ImageView(this).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP }
         root.addView(frameView, FrameLayout.LayoutParams(-1, -1))
         root.addView(box, FrameLayout.LayoutParams(0, 0))
+        cutoutView = app.aemu.core.SkinCutoutView(this).apply { visibility = View.GONE }
+        root.addView(cutoutView, FrameLayout.LayoutParams(0, 0))
         applyVmTheme()
         val overlay = ComposeView(this).apply { setContent { AemuTheme(forceDark = true) { Overlay() } } }
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
@@ -488,11 +511,13 @@ open class VmActivity : ComponentActivity() {
                 box.rotation = 0f
                 place(fv, l.image)
                 place(box, l.guest)
+                cutoutView?.let { place(it, l.guest); it.visibility = if (cutoutWanted) View.VISIBLE else View.GONE }
                 if (guestTopPx != l.guest.top) guestTopPx = l.guest.top
                 if (skinLayout != l) skinLayout = l
                 return@layout
             }
             if (skinLayout != null) skinLayout = null
+            cutoutView?.visibility = View.GONE          // the cutout belongs to the skin picture: without the skin there is nothing to match
             fv?.let { v ->
                 val p = v.layoutParams as FrameLayout.LayoutParams
                 if (p.width != -1 || p.height != -1 || p.leftMargin != 0 || p.topMargin != 0) {
@@ -670,7 +695,7 @@ open class VmActivity : ComponentActivity() {
                     java.io.File(vm.paths.bin, name).writeText("shown=${guest.shown} direct=${guest.passthrough} ms=${android.os.SystemClock.uptimeMillis()}\n")
                     return
                 }
-                if (i.hasExtra("adb")) { if (i.getBooleanExtra("adb", false)) vm.adb.start() else vm.adb.stop(); return }
+                if (i.hasExtra("adb")) { vm.adb.setEnabled(i.getBooleanExtra("adb", false)); return }
                 val cmd = i.getStringExtra("cmd") ?: return
                 // своё имя файла на каждую команду: медленная предыдущая команда не затрёт ответ
                 val name = i.getStringExtra("out")?.takeIf { it.matches(Regex("[A-Za-z0-9_.-]+")) } ?: "shell.out"
@@ -868,6 +893,35 @@ open class VmActivity : ComponentActivity() {
     /** Puts the button back in its corner; done every time the emulator is started or opened again. */
     private fun resetMenuOffset() { menuOffset = Offset.Zero }
 
+    // Mini floating button bar (hold the bar, move it away; dock it again from the menu). Kept per machine, as fractions of
+    // the area it may travel in, so it comes back where it was left and never ends up off screen.
+    private var navFloating by mutableStateOf(false)
+    private var navFloatFrac by mutableStateOf(Offset(0.5f, 0.85f))
+    private var navFloatArea by mutableStateOf(androidx.compose.ui.unit.IntSize.Zero)
+    private var navFloatAreaRoot by mutableStateOf(Offset.Zero)
+    private var navFloatSize by mutableStateOf(androidx.compose.ui.unit.IntSize.Zero)
+    private var navTrackballBounds: androidx.compose.ui.geometry.Rect? = null
+    private fun loadNavFloat(id: String) {
+        val v = app.aemu.core.FloatingNavPolicy.decode(getSharedPreferences("vm_nav_float", MODE_PRIVATE).getString(id, null)) ?: return
+        navFloating = v.first; navFloatFrac = Offset(v.second, v.third)
+    }
+    private fun saveNavFloat(id: String) {
+        getSharedPreferences("vm_nav_float", MODE_PRIVATE).edit()
+            .putString(id, app.aemu.core.FloatingNavPolicy.encode(navFloating, navFloatFrac.x, navFloatFrac.y)).apply()
+    }
+    /** The finger (in root pixels) carries the pill's centre: pulled inside the area by the pill's measured size. */
+    private fun moveNavFloatTo(rootX: Float, rootY: Float) {
+        val (fx, fy) = app.aemu.core.FloatingNavPolicy.fractionOf(rootX - navFloatAreaRoot.x, rootY - navFloatAreaRoot.y, navFloatArea.width, navFloatArea.height)
+        val (cx, cy) = app.aemu.core.FloatingNavPolicy.clampFraction(fx, fy, navFloatArea.width, navFloatArea.height, navFloatSize.width, navFloatSize.height)
+        navFloatFrac = Offset(cx, cy)
+    }
+    private fun dragNavFloat(d: Offset) {
+        val w = navFloatArea.width.toFloat().coerceAtLeast(1f); val h = navFloatArea.height.toFloat().coerceAtLeast(1f)
+        val (cx, cy) = app.aemu.core.FloatingNavPolicy.clampFraction(navFloatFrac.x + d.x / w, navFloatFrac.y + d.y / h,
+            navFloatArea.width, navFloatArea.height, navFloatSize.width, navFloatSize.height)
+        navFloatFrac = Offset(cx, cy)
+    }
+
     private var navCollapsed by mutableStateOf(false)
     private var navHandleEdge by mutableStateOf(0)
     private var navHandleOffset by mutableStateOf(Offset.Zero)
@@ -967,9 +1021,28 @@ open class VmActivity : ComponentActivity() {
         }
     }
 
+    /** Modified for AEmulator Plus: the same zip as [saveLogs], written to the file the save picker returned. */
+    private fun saveLogsTo(uri: android.net.Uri) {
+        toast(getString(R.string.m_save_logs_start))
+        thread {
+            val r = runCatching {
+                val out = contentResolver.openOutputStream(uri, "wt") ?: error("cannot open the file")
+                app.aemu.core.DiagExport.exportTo(applicationContext, vm, out)
+                uri.path ?: uri.toString()
+            }
+            runOnUiThread {
+                Toast.makeText(this, r.fold({ getString(R.string.m_save_logs_ok, it) }, { getString(R.string.m_save_logs_fail, it.toString().take(160)) }), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     /** Reads the selected VM theme: the bar follows [vmTheme]; the frame (colour or picture) and screen corners are set here. */
     private fun applyVmTheme() {
-        val t = runCatching { app.aemu.core.VmThemes.selected(this) }.getOrDefault(app.aemu.core.VmThemes.BUILT_IN[1])
+        // the machine's own skin, else the one chosen in the app settings; read from the store so a choice made while it runs is seen on resume
+        val themeId = if (::vm.isInitialized) vm.img.id else intent.getStringExtra(EXTRA_ID) ?: VmHost.vm?.img?.id
+        val themeSettings = runCatching { themeId?.let { ImageStore.get(this, it)?.settings } }.getOrNull()
+            ?: if (::vm.isInitialized) vm.settings else VmHost.vm?.img?.settings
+        val t = runCatching { app.aemu.core.VmThemes.forVm(this, themeSettings) }.getOrDefault(app.aemu.core.VmThemes.BUILT_IN[1])
         vmTheme = t
         val root = vmRoot ?: return
         root.setBackgroundColor(t.frameColor)
@@ -990,6 +1063,21 @@ open class VmActivity : ComponentActivity() {
             fv.scaleType = if (t.isSkin) android.widget.ImageView.ScaleType.FIT_XY else android.widget.ImageView.ScaleType.CENTER_CROP
             skinSize = if (t.isSkin && bmp != null) bmp.width to bmp.height else null
             root.post { updateGuestLayout?.invoke() }
+        }
+        cutoutView?.let { cv ->
+            cv.cutout = if (t.isSkin) t.skinCutout else app.aemu.core.SkinCutout.NONE
+            val pic = if (!t.isSkin) null else app.aemu.core.VmThemes.overlayFile(this, t)?.let { f ->
+                runCatching {
+                    val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeFile(f.path, o)
+                    var sample = 1
+                    while (o.outWidth / (sample * 2) >= 2048) sample *= 2
+                    android.graphics.BitmapFactory.decodeFile(f.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+                }.getOrNull()
+            }
+            cv.picture = pic
+            cutoutWanted = t.isSkin && (t.skinCutout != app.aemu.core.SkinCutout.NONE || pic != null)
+            if (!cutoutWanted) cv.visibility = View.GONE
         }
         if (::box.isInitialized) {
             val r = t.screenCorner * resources.displayMetrics.density
@@ -1151,17 +1239,17 @@ open class VmActivity : ComponentActivity() {
     }
 
     // APK picked on the host: copied into the shared card folder, then installed by the guest's package manager
-    private val pickApk = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@registerForActivityResult
+    // (Modified for AEmulator Plus: the file comes from the built-in file browser, see rememberFilePicker in the overlay)
+    private fun installApk(uri: android.net.Uri) {
         val dir = app.aemu.core.Sdcard.hostDir(vm.paths)
-        if (dir == null) { toast(getString(R.string.m_failed)); return@registerForActivityResult }
+        if (dir == null) { toast(getString(R.string.m_failed)); return }
         toast(getString(R.string.m_install_apk_start))
         thread {
             val ok = runCatching {
                 contentResolver.openInputStream(uri)!!.use { i -> java.io.File(dir, "aemu-install.apk").outputStream().use { o -> i.copyTo(o) } }
             }.isSuccess
             if (!ok) { toast(getString(R.string.m_failed)); return@thread }
-            val out = runCatching { vm.guestShell("pm install -r " + vm.img.sdcardPath.trimEnd('/') + "/aemu-install.apk", 300_000) }.getOrElse { it.toString() }
+            val out = runCatching { vm.guestShell("pm install " + vm.pmInstallFlags + " " + vm.img.sdcardPath.trimEnd('/') + "/aemu-install.apk", 300_000) }.getOrElse { it.toString() }
             runCatching { app.aemu.core.TreeFixer(this@VmActivity, vm.paths, vm.img, vm::log).seedOwners() }
             toast(out.trim().lines().lastOrNull { it.isNotBlank() }?.take(200) ?: getString(R.string.m_failed))
         }
@@ -1318,7 +1406,7 @@ open class VmActivity : ComponentActivity() {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(stringResource(R.string.m_adb_enable), Modifier.weight(1f))
-                        Switch(on, { v -> if (v) vm.adb.start() else vm.adb.stop(); on = vm.adb.running })
+                        Switch(on, { v -> vm.adb.setEnabled(v); on = vm.adb.running })
                     }
                     if (on) {
                         val ips = app.aemu.core.AdbServer.addresses()
@@ -1442,6 +1530,81 @@ open class VmActivity : ComponentActivity() {
         }
     }
 
+    /** What the update dialog shows: the step in progress, or why the update could not be installed. */
+    private sealed interface OtaUi {
+        data class Working(val text: String) : OtaUi
+        data class Failed(val message: String, val update: app.aemu.core.OtaRecovery.Pending) : OtaUi
+    }
+    private var otaUi by mutableStateOf<OtaUi?>(null)
+
+    /**
+     * The guest asked its recovery to install a downloaded update (see [app.aemu.core.OtaRecovery]). The machine is stopped, the
+     * package is checked against this VM's build and applied by [app.aemu.core.DeltaOta], the leftovers of the request are
+     * cleared, and the system starts again by itself. A package that cannot be applied leaves the system as it was: the person
+     * then starts it as it is, or opens the recovery.
+     */
+    private fun installPendingOta(update: app.aemu.core.OtaRecovery.Pending) {
+        if (!endingVm.compareAndSet(false, true)) return
+        heldNavKeys.releaseAll()
+        val id = vm.img.id
+        val ctx = applicationContext
+        otaUi = OtaUi.Working(getString(R.string.ota_auto_preparing))
+        thread(name = "ota-install") {
+            vm.log("update: installing ${update.zip.name} (asked for by the guest's recovery command)")
+            runCatching { vm.stop() }
+            VmHost.vm = null
+            // this process still holds its slot's storage lease; the installer takes every slot's, and a lock this process
+            // already holds would make it fail with OverlappingFileLockException. The process restarts after the install.
+            runCatching { app.aemu.core.VmStorageLease.releaseVm() }
+            val result = runCatching {
+                app.aemu.core.DeltaOta.prepare(ctx, id, android.net.Uri.fromFile(update.zip)).use { prepared ->
+                    app.aemu.core.DeltaOta.install(ctx, id, prepared) { stage ->
+                        otaUi = OtaUi.Working(ctx.getString(R.string.ota_auto_working, stage.text(ctx)))
+                    }
+                }
+            }
+            result.onSuccess {
+                Log.i("OtaRecovery", "installed ${it.fromBuild} -> ${it.toBuild}")
+                app.aemu.core.OtaRecovery.finish(app.aemu.core.VmPaths(ctx, id), update)
+                runOnUiThread { otaUi = null; restartProcess(id, false) }
+            }.onFailure {
+                Log.w("OtaRecovery", "update failed", it)
+                runOnUiThread { otaUi = OtaUi.Failed(it.userMessage(ctx), update) }
+            }
+        }
+    }
+
+    @Composable
+    private fun OtaInstallDialog() {
+        val ui = otaUi ?: return
+        val id = vm.img.id
+        when (ui) {
+            is OtaUi.Working -> AlertDialog(
+                onDismissRequest = {},
+                title = { Text(stringResource(R.string.ota_auto_title)) },
+                text = {
+                    Column {
+                        Text(ui.text)
+                        Spacer(Modifier.height(16.dp))
+                        androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                    }
+                },
+                confirmButton = {},
+            )
+            is OtaUi.Failed -> AlertDialog(
+                onDismissRequest = {},
+                title = { Text(stringResource(R.string.ota_auto_failed_title)) },
+                text = { Text(stringResource(R.string.ota_auto_failed, ui.message)) },
+                // nothing was changed: start the system as it is (the request is dropped, or it would be tried again at every start)...
+                confirmButton = { TextButton(onClick = {
+                    app.aemu.core.OtaRecovery.dismiss(ui.update); otaUi = null; restartProcess(id, false)
+                }) { Text(stringResource(R.string.ota_auto_boot)) } },
+                // ...or leave the request where it is for the recovery to read
+                dismissButton = { TextButton(onClick = { otaUi = null; restartProcess(id, true) }) { Text(stringResource(R.string.ota_auto_recovery)) } },
+            )
+        }
+    }
+
     private fun restartProcess(id: String, recovery: Boolean = false, lowPower: Boolean = false) {
         // Hand off while still foreground, then wait for Binder death in the main process.
         // Removing the whole task here could also remove the new restart activity.
@@ -1457,6 +1620,7 @@ open class VmActivity : ComponentActivity() {
     private fun Overlay() {
         var menu by ::menuOpen
         var dialog by remember { mutableStateOf(Dlg.NONE) }
+        val apkPicker = rememberSingleFilePicker { uri -> if (uri != null) installApk(uri) }
         // recovery is "running" too, but has no Android behind am/pm/settings
         val running = state == GuestVm.State.RUNNING && !vm.recoveryMode
         // shell and adb only need the guest's adbd, which is up long before the boot is over
@@ -1515,7 +1679,8 @@ open class VmActivity : ComponentActivity() {
         // S-Pen (VM settings > Controls): a button that switches S-Pen mode, the guest's pen digitizer is there from boot
         // (the button needs the digitizer registered at this boot: switching the setting on in a running VM waits for the next boot)
         val extraSpen = vm.spenActive && vm.input.spenEnabled && !vm.recoveryMode
-        val showStrip = showButtons || stockRecovery || extraKeyboard || extraKeypad || extraSpen
+        val extraPlay = vm.xperiaPlayActive && vm.input.xperiaPlayEnabled && !vm.recoveryMode
+        val showStrip = showButtons || stockRecovery || extraKeyboard || extraKeypad || extraSpen || extraPlay
         Box(Modifier.fillMaxSize()) {
             if (bootCard) Box(Modifier.fillMaxSize().pointerInput(state) {
                 detectTapGestures {
@@ -1597,6 +1762,11 @@ open class VmActivity : ComponentActivity() {
                         text = { Text(stringResource(if (navCollapsed) R.string.nav_show else R.string.nav_hide)) },
                         leadingIcon = { Icon(if (navCollapsed) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown, null) },
                         onClick = { menu = false; navCollapsed = !navCollapsed })
+                    // the mini floating bar goes back to the edge (it is made by holding the bar and moving it away)
+                    if (navFloating && showStrip && !showLog) DropdownMenuItem(
+                        text = { Text(stringResource(R.string.nav_dock)) },
+                        leadingIcon = { Icon(Icons.Rounded.VerticalAlignBottom, null) },
+                        onClick = { menu = false; navFloating = false; saveNavFloat(vm.img.id) })
                     // the tab closes, the machine keeps running (open it again from the library)
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_minimize)) }, leadingIcon = { Icon(Icons.Rounded.Close, null) },
                         onClick = { menu = false; minimizeTab() })
@@ -1638,7 +1808,7 @@ open class VmActivity : ComponentActivity() {
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_battery)) }, leadingIcon = { Icon(Icons.Rounded.BatteryStd, null) },
                         enabled = running, onClick = { menu = false; dialog = Dlg.BATTERY })   // all APIs: <17 uses the sysfs nodes + a uevent (2.3+), before 2.3 only at the next start
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_install_apk)) }, leadingIcon = { Icon(Icons.Rounded.InstallMobile, null) },
-                        enabled = running, onClick = { menu = false; pickApk.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream", "*/*")) })
+                        enabled = running, onClick = { menu = false; apkPicker.launch() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_device)) }, leadingIcon = { Icon(Icons.Rounded.Tune, null) },
                         enabled = running && vm.img.api >= 17, onClick = { menu = false; dialog = Dlg.DEVICE })
                     DropdownMenuItem(text = { Text(stringResource(R.string.thermal_menu)) }, leadingIcon = { Icon(Icons.Rounded.Thermostat, null) },
@@ -1688,6 +1858,8 @@ open class VmActivity : ComponentActivity() {
             }
             }
 
+            OtaInstallDialog()
+
             when (dialog) {
                 Dlg.SMS -> SmsDialog { dialog = Dlg.NONE }
                 Dlg.CALL -> CallDialog { dialog = Dlg.NONE }
@@ -1709,6 +1881,10 @@ open class VmActivity : ComponentActivity() {
             var spenOn by remember { mutableStateOf(vm.input.spenMode) }
             LaunchedEffect(extraSpen) { if (!extraSpen) spenOn = false }
             LaunchedEffect(spenOn, extraSpen) { vm.input.setSpenMode(spenOn && extraSpen) }
+            // Xperia Play: the slider is a switch the guest reads; the gamepad window shows while it is out
+            var sliderOut by remember { mutableStateOf(vm.input.sliderOpen) }
+            LaunchedEffect(extraPlay) { if (!extraPlay) sliderOut = false }
+            LaunchedEffect(sliderOut, extraPlay) { vm.input.setSlider(sliderOut && extraPlay) }
             val stripTurns = controlsTurns
             val sideways = stripTurns % 2 != 0
             val stripAlignment = when (DisplayGeometry.edge(stripTurns)) {
@@ -1717,7 +1893,7 @@ open class VmActivity : ComponentActivity() {
                 DisplayGeometry.Edge.TOP -> Alignment.TopCenter
                 DisplayGeometry.Edge.BOTTOM -> Alignment.BottomCenter
             }
-            DisposableEffect(showStrip, vm.settings.trackball, showLog, stripTurns, navCollapsed) {
+            DisposableEffect(showStrip, vm.settings.trackball, showLog, stripTurns, navCollapsed, navFloating) {
                 heldNavKeys.releaseAll()
                 box.post { updateGuestLayout?.invoke() }
                 if ((!showStrip && !vm.settings.trackball) || showLog || navCollapsed) {
@@ -1725,12 +1901,53 @@ open class VmActivity : ComponentActivity() {
                 }
                 onDispose { }
             }
+            // The keys of the bar: the docked strip draws them full size along its edge, the mini floating bar at 40dp in a row.
+            @Composable fun NavKeys(sideways: Boolean, reversed: Boolean, extrasFirst: Boolean, keyRotation: Float, compact: Float) {
+                @Composable fun ExtraButtons() {
+                    if (extraKeyboard) ExtraNavButton(KeyboardIcon, stringResource(R.string.vi_open_keyboard), keyboardOpen, vmTheme, keyRotation, compact) { keyboardOpen = !keyboardOpen }
+                    if (extraKeypad) ExtraNavButton(KeypadIcon, stringResource(R.string.vi_open_keypad), keypadOpen, vmTheme, keyRotation, compact) { keypadOpen = !keypadOpen }
+                    if (extraSpen) ExtraNavButton(SPenIcon, stringResource(R.string.vi_spen_toggle), spenOn, vmTheme, keyRotation, compact) { spenOn = !spenOn }
+                    if (extraPlay) ExtraNavButton(XperiaPlayIcon, stringResource(R.string.vi_xperia_play_toggle), sliderOut, vmTheme, keyRotation, compact) { sliderOut = !sliderOut }
+                    if (extraSpen) ExtraNavButton(SPenButtonIcon, stringResource(R.string.vi_spen_button), false, vmTheme, keyRotation, compact) { vm.input.penButtonClick() }
+                }
+                if (extrasFirst) ExtraButtons()
+                if (stockRecovery && reversed) GoToRecoveryButton(sideways, compact)
+                (if (!showButtons) emptyList() else if (reversed) buttons.asReversed() else buttons).forEach { button ->
+                    val code = when (button) {
+                        NavButton.HOME -> vm.input.homeCode
+                        NavButton.CENTER -> vm.input.centerCode
+                        else -> button.scanCode
+                    }
+                    key(button, code) {
+                        HoloNavButton(button, stringResource(button.labelRes()),
+                            onClick = { vm.input.press(code) },
+                            onDown = { heldNavKeys.down(code) }, onUp = { heldNavKeys.up(code) },
+                            iconRotation = keyRotation, theme = vmTheme, compact = compact)
+                    }
+                }
+                if (stockRecovery && !reversed) GoToRecoveryButton(sideways, compact)
+                if (!extrasFirst) ExtraButtons()
+            }
+            // Hold the bar for a moment and move it away: it comes loose and becomes the mini floating bar (see FloatingNavGesture)
+            val navCanFloat = showStrip && !showLog && !navCollapsed
             if ((showStrip || vm.settings.trackball) && !showLog && !navCollapsed) {
+                // This box stays while the bar floats (it is empty then, and zero size): it carries the gesture of the drag that
+                // pulled the bar loose, which must not be cut off when the docked bar leaves the tree.
                 Box(Modifier.align(stripAlignment).onSizeChanged { size ->
                     controlsHeightPx = if (sideways) size.width else size.height
                     box.post { updateGuestLayout?.invoke() }
-                }) {
-                Surface(
+                }.holdAndDrag(
+                    enabled = navCanFloat && !navFloating,
+                    excluded = { navTrackballBounds },
+                    onGrab = { finger ->
+                        heldNavKeys.releaseAll()
+                        navFloating = true
+                        moveNavFloatTo(finger.x, finger.y)
+                    },
+                    onDrag = { dragNavFloat(it) },
+                    onRelease = { saveNavFloat(vm.img.id) },
+                )) {
+                if (!navFloating || vm.settings.trackball) Surface(
                     color = vmTheme.barColor?.let { Color(it) } ?: MaterialTheme.colorScheme.secondaryContainer,
                     shape = if (vmTheme.roundedBar) androidx.compose.foundation.shape.RoundedCornerShape(28.dp) else androidx.compose.ui.graphics.RectangleShape,
                     modifier = (if (sideways) Modifier.fillMaxHeight() else Modifier.fillMaxWidth())
@@ -1746,7 +1963,8 @@ open class VmActivity : ComponentActivity() {
                             val description = stringResource(R.string.nav_trackball)
                             AndroidView(
                                 factory = { ctx -> TrackballView(ctx) },
-                                modifier = Modifier.padding(vertical = 8.dp).size(72.dp),
+                                modifier = Modifier.padding(vertical = 8.dp).size(72.dp)
+                                    .onGloballyPositioned { navTrackballBounds = it.boundsInRoot() },
                                 update = { view ->
                                     view.contentDescription = description
                                     view.motion = motion; view.dpad = dpad
@@ -1758,6 +1976,7 @@ open class VmActivity : ComponentActivity() {
                                     }
                                 },
                             )
+                            DisposableEffect(Unit) { onDispose { navTrackballBounds = null } }
                             var connected by remember { mutableStateOf(false) }
                             LaunchedEffect(Unit) { while (true) { connected = vm.input.trackballConnected > 0; delay(500) } }
                             if (!dpad && (!connected || vm.recoveryMode)) {
@@ -1766,39 +1985,45 @@ open class VmActivity : ComponentActivity() {
                             }
                         }
                     }, buttons = {
-                        if (showStrip) ControlButtons(sideways) {
-                            val extrasFirst = stripTurns == 1 || stripTurns == 2
-                            val extraRotation = app.aemu.core.HostDisplayPolicy.controlIconRotation(tablet,
-                                hostUi.tabletNavbarRotation, iconTurns, windowTurns)
-                            @Composable fun ExtraButtons() {
-                                if (extraKeyboard) ExtraNavButton(KeyboardIcon, stringResource(R.string.vi_open_keyboard), keyboardOpen, vmTheme, extraRotation) { keyboardOpen = !keyboardOpen }
-                                if (extraKeypad) ExtraNavButton(KeypadIcon, stringResource(R.string.vi_open_keypad), keypadOpen, vmTheme, extraRotation) { keypadOpen = !keypadOpen }
-                                if (extraSpen) ExtraNavButton(SPenIcon, stringResource(R.string.vi_spen_toggle), spenOn, vmTheme, extraRotation) { spenOn = !spenOn }
-                                if (extraSpen) ExtraNavButton(SPenButtonIcon, stringResource(R.string.vi_spen_button), false, vmTheme, extraRotation) { vm.input.penButtonClick() }
-                            }
-                            if (extrasFirst) ExtraButtons()
-                            if (stockRecovery && (stripTurns == 1 || stripTurns == 2)) GoToRecoveryButton(sideways)
-                            (if (!showButtons) emptyList() else if (stripTurns == 1 || stripTurns == 2) buttons.asReversed() else buttons).forEach { button ->
-                                val code = when (button) {
-                                    NavButton.HOME -> vm.input.homeCode
-                                    NavButton.CENTER -> vm.input.centerCode
-                                    else -> button.scanCode
-                                }
-                                key(button, code) {
-                                    HoloNavButton(button, stringResource(button.labelRes()),
-                                        onClick = { vm.input.press(code) },
-                                        onDown = { heldNavKeys.down(code) }, onUp = { heldNavKeys.up(code) },
-                                        iconRotation = app.aemu.core.HostDisplayPolicy.controlIconRotation(tablet,
-                                            hostUi.tabletNavbarRotation, iconTurns, windowTurns), theme = vmTheme)
-                                }
-                            }
-                            if (stockRecovery && !(stripTurns == 1 || stripTurns == 2)) GoToRecoveryButton(sideways)
-                            if (!extrasFirst) ExtraButtons()
+                        if (showStrip && !navFloating) ControlButtons(sideways) {
+                            NavKeys(sideways, reversed = stripTurns == 1 || stripTurns == 2, extrasFirst = stripTurns == 1 || stripTurns == 2,
+                                keyRotation = app.aemu.core.HostDisplayPolicy.controlIconRotation(tablet, hostUi.tabletNavbarRotation, iconTurns, windowTurns),
+                                compact = 1f)
                         }
-                        // Trackball-only layouts still keep it above a navbar-sized safety zone.
-                        if (!showStrip && vm.settings.trackball) Spacer(if (sideways) Modifier.width(52.dp) else Modifier.height(52.dp))
+                        // Trackball-only layouts (and a trackball whose keys float away) still keep it above a navbar-sized safety zone.
+                        if ((!showStrip || navFloating) && vm.settings.trackball) Spacer(if (sideways) Modifier.width(52.dp) else Modifier.height(52.dp))
                     })
                 }
+                }
+            }
+
+            // The mini floating button bar: the pill of the menu button, with as many keys as the bar has. Hold it and move it to
+            // drag it; "Dock the button bar" in the menu puts it back. The box is only the area it may travel in (no touches).
+            Box(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(8.dp)
+                .onSizeChanged { navFloatArea = it }
+                .onGloballyPositioned { navFloatAreaRoot = it.positionInRoot() }) {
+                if (navFloating && navCanFloat) {
+                    val (left, top) = app.aemu.core.FloatingNavPolicy.topLeft(navFloatFrac.x, navFloatFrac.y,
+                        navFloatArea.width, navFloatArea.height, navFloatSize.width, navFloatSize.height)
+                    Surface(
+                        color = vmTheme.barColor?.let { Color(it) } ?: MaterialTheme.colorScheme.secondaryContainer,
+                        shape = CircleShape,
+                        modifier = Modifier
+                            .offset { IntOffset(left.roundToInt(), top.roundToInt()) }
+                            .onSizeChanged { navFloatSize = it }
+                            .holdAndDrag(
+                                enabled = true,
+                                onGrab = { },
+                                onDrag = { dragNavFloat(it) },
+                                onRelease = { saveNavFloat(vm.img.id) },
+                            ),
+                    ) {
+                        Row(Modifier.padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                            NavKeys(sideways = true, reversed = false, extrasFirst = false,
+                                keyRotation = app.aemu.core.HostDisplayPolicy.floatingIconRotation(tablet, iconTurns, windowTurns),
+                                compact = 40f / 48f)
+                        }
+                    }
                 }
             }
 
@@ -1806,6 +2031,7 @@ open class VmActivity : ComponentActivity() {
             Box(Modifier.fillMaxSize()) {
                 if (keyboardOpen && extraKeyboard) VirtualKeyboardWindow({ code, down -> vm.input.key(code, down) }, if (preOne) LegacyKeys.rows else VirtualKeyboardLayout.rows) { keyboardOpen = false }
                 if (keypadOpen && extraKeypad) KeypadWindow({ code, down -> vm.input.key(code, down) }, vm.input.homeCode) { keypadOpen = false }
+                if (sliderOut && extraPlay) XperiaPlayWindow({ code, down -> vm.input.key(code, down) }) { sliderOut = false }
             }
 
             if (navCollapsed && (showStrip || vm.settings.trackball) && !showLog) Box(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(8.dp)
@@ -1865,9 +2091,9 @@ open class VmActivity : ComponentActivity() {
 
     /** Stock recovery "No command" screen: hold Power, tap Volume Up, release Power. */
     @Composable
-    private fun GoToRecoveryButton(sideways: Boolean) {
+    private fun GoToRecoveryButton(sideways: Boolean, compact: Float = 1f) {
         val label = stringResource(R.string.nav_go_to_recovery)
-        if (sideways) IconButton(onClick = { vm.input.enterStockRecoveryMenu() }, modifier = Modifier.size(48.dp)) {
+        if (sideways) IconButton(onClick = { vm.input.enterStockRecoveryMenu() }, modifier = Modifier.size(48.dp * compact)) {
             Icon(Icons.Rounded.RestartAlt, label, tint = Color.White)
         } else TextButton(onClick = { vm.input.enterStockRecoveryMenu() },
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp)) {
@@ -1978,6 +2204,8 @@ open class VmActivity : ComponentActivity() {
     @Composable
     private fun LogPanel(onClose: () -> Unit) {
         var guestTab by remember { mutableStateOf(false) }
+        // Modified for AEmulator Plus: the save button writes the full DiagExport zip to a place the person picks in the built-in browser
+        val saveZip = rememberSaveFilePicker("application/zip") { uri -> if (uri != null) saveLogsTo(uri) }
         val guestLines = remember { mutableStateListOf<String>() }
         LaunchedEffect(guestTab) {
             while (guestTab) {
@@ -1993,7 +2221,7 @@ open class VmActivity : ComponentActivity() {
                     Text(stringResource(R.string.log), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f),
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     IconButton(onClick = { copyLog(list.toList()) }) { Icon(Icons.Rounded.ContentCopy, stringResource(R.string.log_copy)) }
-                    IconButton(onClick = { pendingGuestExport = guestTab; exportLog.launch("aemu-${vm.img.id}-${if (guestTab) "logcat" else "host"}.log") }) {
+                    IconButton(onClick = { saveZip.launch(app.aemu.core.DiagExport.suggestedName(vm)) }) {
                         Icon(Icons.Rounded.Download, stringResource(R.string.log_export))
                     }
                     FilledTonalIconButton(onClick = onClose) { Icon(Icons.Rounded.Close, stringResource(R.string.close)) }
@@ -2016,25 +2244,6 @@ open class VmActivity : ComponentActivity() {
                     }
                 }
             }
-        }
-    }
-
-    private var pendingGuestExport = false
-    private val exportLog = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        if (uri == null) return@registerForActivityResult
-        val guest = pendingGuestExport
-        thread {
-            val ok = runCatching {
-                contentResolver.openOutputStream(uri)!!.bufferedWriter().use { w ->
-                    if (guest) GuestLog.writeExport(vm.paths.root, vm.paths.bin, w)
-                    else {
-                        val hostLog = File(vm.paths.bin, "aemu.log")
-                        if (hostLog.isFile) hostLog.bufferedReader().use { it.copyTo(w) }
-                        else vm.lines().forEach { w.write(it); w.write("\n") }
-                    }
-                }
-            }.isSuccess
-            runOnUiThread { Toast.makeText(this, if (ok) R.string.log_exported else R.string.log_export_failed, Toast.LENGTH_SHORT).show() }
         }
     }
 

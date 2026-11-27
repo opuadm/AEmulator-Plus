@@ -40,10 +40,54 @@ final class WifiNet extends NetworkAgent implements WifiLink {
     private static final int[] CAPABILITIES = { 12, 13, 14, 15, 11 };
 
     private final NetworkInfo info;
+    private final NetworkCapabilities caps;
 
     private WifiNet(Looper looper, Context ctx, NetworkInfo ni, NetworkCapabilities nc, LinkProperties lp, Identity id) {
         super(looper, ctx, id == Identity.WIFI ? "AEmuWifi" : "AEmuNet", ni, nc, lp, 60);
         info = ni;
+        caps = nc;
+    }
+
+    @Override
+    public android.net.Network network() {
+        return networkOf(this);
+    }
+
+    @Override
+    public void setBandwidth(int kbps) {
+        pushBandwidth(this, caps, kbps);
+    }
+
+    static void pushBandwidth(Object agent, NetworkCapabilities nc, int kbps) {
+        try {
+            Refl.call(nc, "setLinkUpstreamBandwidthKbps", Integer.valueOf(kbps));
+            Refl.call(nc, "setLinkDownstreamBandwidthKbps", Integer.valueOf(kbps));
+            for (Class<?> c = agent.getClass(); c != null; c = c.getSuperclass()) {
+                try {
+                    java.lang.reflect.Method m = c.getDeclaredMethod("sendNetworkCapabilities", NetworkCapabilities.class);
+                    m.setAccessible(true);
+                    m.invoke(agent, nc);
+                    return;
+                } catch (NoSuchMethodException e) {
+                    // look in the superclass
+                }
+            }
+            Refl.log("sendNetworkCapabilities: not there");
+        } catch (Throwable t) {
+            Refl.log("bandwidth: " + t);
+        }
+    }
+
+    static android.net.Network networkOf(Object agent) {
+        Object n = Refl.call(agent, "getNetwork");
+        if (n == null) n = Refl.getField(agent, "mNetwork");
+        if (n instanceof android.net.Network) return (android.net.Network) n;
+        Object id = Refl.getField(agent, "netId");
+        if (id instanceof Integer && ((Integer) id).intValue() > 0) {
+            Object made = Refl.create("android.net.Network", new Class<?>[] { int.class }, id);
+            if (made instanceof android.net.Network) return (android.net.Network) made;
+        }
+        return null;
     }
 
     @Override
@@ -98,7 +142,7 @@ final class WifiNet extends NetworkAgent implements WifiLink {
      * [wifiInfo] (may be null) is what apps get as the transport info of the network on Android 10+ (the status bar of 12+
      * reads the signal level from it).
      */
-    static WifiLink register(Looper looper, android.os.IBinder connectivity, WifiConfig cfg, Identity id, Object wifiInfo) throws Exception {
+    static WifiLink register(Looper looper, android.os.IBinder connectivity, WifiConfig cfg, Identity id, Object wifiInfo, int kbps) throws Exception {
         Context ctx = contextFor(connectivity);
 
         NetworkInfo ni = (NetworkInfo) Refl.create("android.net.NetworkInfo",
@@ -111,8 +155,8 @@ final class WifiNet extends NetworkAgent implements WifiLink {
         NetworkCapabilities nc = (NetworkCapabilities) Refl.newNoArg("android.net.NetworkCapabilities");
         Refl.call(nc, "addTransportType", Integer.valueOf(id.transport));
         for (int c : CAPABILITIES) Refl.call(nc, "addCapability", Integer.valueOf(c));
-        Refl.call(nc, "setLinkUpstreamBandwidthKbps", Integer.valueOf(100000));
-        Refl.call(nc, "setLinkDownstreamBandwidthKbps", Integer.valueOf(100000));
+        Refl.call(nc, "setLinkUpstreamBandwidthKbps", Integer.valueOf(kbps));
+        Refl.call(nc, "setLinkDownstreamBandwidthKbps", Integer.valueOf(kbps));
         if (id == Identity.WIFI && wifiInfo != null) Refl.call(nc, "setTransportInfo", wifiInfo); // 10+; absent before: ignored
 
         LinkProperties lp = (LinkProperties) Refl.newNoArg("android.net.LinkProperties");

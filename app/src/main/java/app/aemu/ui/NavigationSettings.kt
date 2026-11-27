@@ -29,7 +29,7 @@ internal fun NavButton.labelRes(): Int = when (this) {
 }
 
 @Composable
-internal fun NavigationSettings(s: VmSettings, preRelease: Boolean = false, set: (VmSettings) -> Unit) {
+internal fun NavigationSettings(s: VmSettings, preRelease: Boolean = false, xperiaPlay: Boolean = false, set: (VmSettings) -> Unit) {
     val buttons = NavControls.parse(s.navButtons)
     if (s.showNavBar) {
         Text(stringResource(R.string.nav_buttons), modifier = Modifier.padding(horizontal = 16.dp))
@@ -69,5 +69,7 @@ internal fun NavigationSettings(s: VmSettings, preRelease: Boolean = false, set:
         Toggle(stringResource(R.string.vi_mouse_keyboard), stringResource(R.string.vi_mouse_keyboard_sub), s.mouseKeyboard) { set(s.copy(mouseKeyboard = it)) }
         Toggle(stringResource(R.string.vi_keypad), stringResource(R.string.vi_keypad_sub), s.keypad) { set(s.copy(keypad = it)) }
         Toggle(stringResource(R.string.vi_spen), stringResource(R.string.vi_spen_sub), s.spen) { set(s.copy(spen = it)) }
+        // only for an R800 machine (the caller decides: the app-wide defaults have no model and never pass it)
+        if (xperiaPlay) Toggle(stringResource(R.string.vi_xperia_play), stringResource(R.string.vi_xperia_play_sub), s.xperiaPlay) { set(s.copy(xperiaPlay = it)) }
     }
 }

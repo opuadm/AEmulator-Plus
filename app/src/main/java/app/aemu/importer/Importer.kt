@@ -194,7 +194,7 @@ class Importer(
             val seekable = runCatching { ch.position(0); ch.size() > 0 }.getOrDefault(false)
             if (seekable) handle(ChannelSource(ch), ch, name, 0)
             else {
-                val t = spill(FileInputStream(pfd.fileDescriptor), "whole")
+                val t = spill(FileInputStream(pfd.fileDescriptor), "whole", pfd.statSize, name)
                 FileChannel.open(t.toPath(), StandardOpenOption.READ).use { c -> handle(ChannelSource(c), c, name, 0) }
                 t.delete()
             }
@@ -785,14 +785,62 @@ class Importer(
             b.contains("firmware", true) || b.contains("flash", true)
     }
 
-    private fun spillPreservingName(i: InputStream, name: String): File {
+    @Volatile private var lastProgressMs = 0L
+
+    /**
+     * The one place that reports "N MB of M MB" for anything that is copied or unpacked, so that no step sits on a static
+     * message while big data moves. Throttled (the UI is not flooded). [frac] is the overall progress if the caller knows it;
+     * -1 keeps the bar where it is.
+     */
+    private fun byteProgress(res: Int, label: String, done: Long, total: Long = -1, frac: Float = -1f, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastProgressMs < 400) return
+        lastProgressMs = now
+        val text = when {
+            total > 0 && done >= 0 -> "$label (${done shr 20} / ${total shr 20} MB)"
+            done >= (1L shl 20) -> "$label (${done shr 20} MB)"
+            else -> label
+        }
+        onProgress(lt(res, text), frac)
+    }
+
+    /** A message that changes with every file: shown at most every 400 ms, however many files go by (never skipped by a count). */
+    private fun progressTimed(text: String, frac: Float = -1f) {
+        val now = System.currentTimeMillis()
+        if (now - lastProgressMs < 400) return
+        lastProgressMs = now
+        onProgress(text, frac)
+    }
+
+    /** [InputStream.copyTo] that reports its bytes, honours cancel and does not spin on a source that answers with nothing. */
+    private fun copyReporting(i: InputStream, o: java.io.OutputStream, label: String, total: Long = -1, res: Int = R.string.imp_extracting, bufSize: Int = 1 shl 20): Long {
+        val buffer = ByteArray(bufSize)
+        var count = 0L
+        var empty = 0
+        while (true) {
+            if (cancelled) throw IOException("cancelled")
+            val n = i.read(buffer)
+            if (n < 0) break
+            if (n == 0) {
+                if (++empty > 5000) throw IOException("source stopped delivering data: $label")
+                Thread.sleep(1); continue
+            }
+            empty = 0
+            o.write(buffer, 0, n)
+            count += n
+            byteProgress(res, label, count, total)
+        }
+        return count
+    }
+
+    private fun spillPreservingName(i: InputStream, name: String, total: Long = -1): File {
         val safe = name.substringAfterLast('/').replace('\\', '_')
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
             .ifEmpty { "entry" }
         val dir = File(tmp, "entries-${System.nanoTime()}").apply { mkdirs() }
         val f = File(dir, safe)
         if (i is ExtractedEntry && i.moveTo(f)) return f
-        f.outputStream().use { o -> i.copyTo(o, 1 shl 20) }
+        f.outputStream().use { o -> copyReporting(i, o, safe, total) }
         return f
     }
 
@@ -805,7 +853,8 @@ class Importer(
         val base = name.substringAfterLast('/').substringAfterLast('\\')
         val inner = base.replace(Regex("(?i)\\.(tgz|tbz2?|txz)$"), ".tar")
             .replace(Regex("(?i)\\.(tlz|tzst)$"), ".tar").let { ImageCodecs.stripSuffix(it) }.ifEmpty { "payload" }
-        val f = decoded.use { spill(it, inner) }
+        onProgress(lt(R.string.imp_unpacking, base), -1f)
+        val f = decoded.use { spill(it, inner, progressLabel = base) }
         try {
             if (f.length() < 2) throw LocalizedIOException("compressed file is empty: $name", R.string.imp_compressed_file_is_empty, name)
             FileChannel.open(f.toPath(), StandardOpenOption.READ).use { c -> handle(ChannelSource(c), c, inner, depth + 1) }
@@ -2057,7 +2106,7 @@ class Importer(
                         val pick = cands.firstOrNull { it.name.replace('\\', '/').substringBeforeLast('/', "") == xmlDir }
                             ?: cands.minByOrNull { it.name.length }!!
                         onProgress(lt(R.string.imp_edl, base), -1f)
-                        zip.getInputStream(pick).use { i -> File(chunks, base).outputStream().use { o -> i.copyTo(o, 1 shl 20) } }
+                        zip.getInputStream(pick).use { i -> File(chunks, base).outputStream().use { o -> copyReporting(i, o, base, pick.size, R.string.imp_edl) } }
                     }
                     FirmwareToolset.combineEdl(plan, chunks, raw) { msg -> log(msg) }
                     deleteTree(chunks)
@@ -2480,7 +2529,7 @@ class Importer(
                     val r = input.read(buf, 0, minOf(buf.size.toLong(), end - pos).toInt())
                     if (r < 0) break
                     if (r > 0) feed(buf, r)
-                    if (++tick % 16 == 0) onProgress(lt(R.string.imp_reading, label), (pos.toFloat() / end).coerceIn(0f, 1f) * 0.5f)
+                    if (++tick % 4 == 0) progressTimed(lt(R.string.imp_reading, label), (pos.toFloat() / end).coerceIn(0f, 1f) * 0.5f)
                 }
             } finally { chans.forEach { runCatching { it.close() } } }
             for (o in outs) {
@@ -2601,7 +2650,7 @@ class Importer(
                     val r = input.read(scratch, 0, minOf(scratch.size.toLong(), target - pos).toInt())
                     if (r < 0) { eof = true; return false }
                     pos += r
-                    if (++tick % 16 == 0) onProgress(lt(R.string.imp_reading, label), -1f)
+                    if (++tick % 4 == 0) progressTimed(lt(R.string.imp_reading, label), -1f)
                 }
                 return true
             }
@@ -2629,7 +2678,7 @@ class Importer(
                         o.write(scratch, 0, r)
                         left -= r
                         pos += r
-                        if (++tick % 16 == 0) onProgress(lt(R.string.imp_reading, label), -1f)
+                        if (++tick % 4 == 0) progressTimed(lt(R.string.imp_reading, label), -1f)
                     }
                 }
                 outs.add(Out(role, p, f))
@@ -2700,7 +2749,7 @@ class Importer(
                 val out = File(tmp, "$stem.img")
                 val actual = if (data.name.endsWith(".br", true)) {
                     val dec = File(tmp, "$stem.new.dat")
-                    ArcStreams.brotli(FileInputStream(data)).use { input -> dec.outputStream().use { o -> input.copyTo(o, 1 shl 20) } }
+                    ArcStreams.brotli(FileInputStream(data)).use { input -> dec.outputStream().use { o -> copyReporting(input, o, data.name, -1, R.string.imp_unpacking) } }
                     dec
                 } else data
                 try {
@@ -2803,7 +2852,7 @@ class Importer(
         } finally { t.delete() }
     }
 
-    private fun spillEntry(zip: ZipFile, e: ZipArchiveEntry): File = zip.getInputStream(e).use { spill(it, e.name.substringAfterLast('/')) }
+    private fun spillEntry(zip: ZipFile, e: ZipArchiveEntry): File = zip.getInputStream(e).use { spill(it, e.name.substringAfterLast('/'), e.size) }
 
     /**
      * Copies a stream into a temp file that keeps its ORIGINAL name. Uniqueness comes from a
@@ -2811,7 +2860,7 @@ class Importer(
      * "<random>-<random>-system.new.dat" names and made sibling lookups
      * (system.new.dat <-> system.transfer.list) impossible.
      */
-    private fun spill(i: InputStream, name: String): File {
+    private fun spill(i: InputStream, name: String, total: Long = -1, progressLabel: String? = null): File {
         val safe = name.substringAfterLast('/').replace('\\', '_').ifEmpty { "entry" }
         val dir = File(tmp, "spill-${System.nanoTime()}").apply { mkdirs() }
         val t = File(dir, safe)
@@ -2820,14 +2869,23 @@ class Importer(
             t.outputStream().use { o ->
                 val buffer = ByteArray(1 shl 20)
                 var count = 0L
+                var empty = 0
                 while (true) {
                     if (cancelled) throw IOException("cancelled")
                     val n = i.read(buffer)
                     if (n < 0) break
+                    // a read that returns nothing must not spin forever (a source that answers 0 bytes without ending)
+                    if (n == 0) {
+                        if (++empty > 5000) throw IOException("source stopped delivering data: $name")
+                        Thread.sleep(1); continue
+                    }
+                    empty = 0
                     count += n
                     if (count > 16L * 1024 * 1024 * 1024 || tmp.usableSpace < n + 32L * 1024 * 1024)
                         throw LocalizedIOException("Not enough space to unpack firmware", R.string.imp_not_enough_space_to_unpack_firmware)
                     o.write(buffer, 0, n)
+                    // unpacking a big file takes minutes: say how far it is, whatever the container
+                    byteProgress(R.string.imp_unpacking, progressLabel ?: safe, count, total)
                 }
             }
             return t
@@ -3043,7 +3101,9 @@ class Importer(
                     }
                 }
             }
-            if (files % 200 == 0) onProgress(lt(R.string.imp_extracting, base), -1f)
+            // by time, not by file count: a few huge files (or only directories / links) never reached a multiple of 200,
+            // so the screen sat on the last message for the whole extraction
+            byteProgress(R.string.imp_extracting, n.substringAfterLast('/').ifEmpty { base }, -1)
         }
     }
 
@@ -3126,7 +3186,7 @@ class Importer(
                 node.isLink -> { val t = fs.linkTarget(node); symlinks.add(t to "/$rel"); cap?.link(path, t) }
                 node.isFile -> fileTasks.add(path to node)
             }
-            if (++n % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
+            if (++n % 4 == 0) progressTimed(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
         }
         fun extractOne(path: String, node: Ext4Reader.Node): ByteArray {
             val rel = if (asRoot) path else "$mount/$path"
@@ -3153,7 +3213,7 @@ class Importer(
             val (path, node) = fileTasks[i]
             cap?.file(path, node, digests[i]!!)
             files++; bytes += node.size
-            if (i % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
+            if (i % 4 == 0) progressTimed(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
         }
         if (cap != null && layoutPartition != null) {
             onProgress(lt(R.string.imp_recording_the_layout_of_image, mount), -1f)
@@ -3179,7 +3239,7 @@ class Importer(
             headFile.writeBytes(head.array())
             FirmwareToolset.detect(headFile)
         } finally { headFile.delete() }
-        if (kind != "SQUASHFS" && kind != "RFS")
+        if (kind != "SQUASHFS" && kind != "RFS" && kind != "XSR")
             throw LocalizedIOException("unrecognized filesystem for $mount (expected ext4, YAFFS2, UBIFS, SquashFS or RFS)", R.string.imp_unrecognized_filesystem_for_expected_ext_yaf, mount)
         val fsName = if (kind == "SQUASHFS") "SquashFS" else "RFS"
         onProgress(lt(R.string.imp_reading_image, mount, fsName), -1f)
@@ -3210,7 +3270,7 @@ class Importer(
                             zip.getInputStream(e).use { writeFile(rel, it, e.unixMode.takeIf { m -> m != 0 }) }
                         }
                     }
-                    if (++n % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, mount, inner.substringAfterLast('/')), -1f)
+                    if (++n % 4 == 0) progressTimed(lt(R.string.ota_detail_with_name, mount, inner.substringAfterLast('/')), -1f)
                 }
             }
             if (mount == "system") gotSystem = true
@@ -3324,13 +3384,13 @@ class Importer(
                         dest.parentFile?.mkdirs()
                         // Links are only created by finishTree, after all file bytes.
                         if (isLink(dest)) throw LocalizedIOException("WIM destination is a symlink", R.string.imp_yaffs_destination_is_a_symlink)
-                        wim.open(e.data).use { i -> dest.outputStream().buffered(1 shl 20).use { o -> i.copyTo(o, 1 shl 16) } }
+                        wim.open(e.data).use { i -> dest.outputStream().buffered(1 shl 20).use { o -> copyReporting(i, o, rel.substringAfterLast('/'), -1, R.string.imp_extracting, 1 shl 16) } }
                         applyMode(dest, if (unixMode >= 0) unixMode and 0xfff else 0x1a4)
                         files++; bytes += dest.length()
                     }
                     else -> {}   // device nodes, fifos, sockets: nothing to make on the host
                 }
-                if (++n % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, "system", rel.substringAfterLast('/')), -1f)
+                if (++n % 4 == 0) progressTimed(lt(R.string.ota_detail_with_name, "system", rel.substringAfterLast('/')), -1f)
             })
             gotSystem = true
             systemAsRoot = true
@@ -3374,7 +3434,7 @@ class Importer(
                 }
                 5 -> {} // Guest /dev is created by the VM; never mknod on the host.
             }
-            if (++n % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
+            if (++n % 4 == 0) progressTimed(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
         }
         if (mount == "system") gotSystem = true
         val geo = fs.geometry
@@ -3416,7 +3476,7 @@ class Importer(
                 }
                 else -> {} // Guest /dev is created by the VM; never mknod on the host.
             }
-            if (++n % 150 == 0) onProgress(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
+            if (++n % 4 == 0) progressTimed(lt(R.string.ota_detail_with_name, mount, path.substringAfterLast('/')), -1f)
         }
         if (mount == "system") gotSystem = true
         log("UBIFS $mount: $n objects")
@@ -3455,7 +3515,7 @@ class Importer(
                 }
                 1 -> fileTasks.add(path to node)
             }
-            if (++n % 150 == 0) onProgress("$mount: ${path.substringAfterLast('/')}", -1f)
+            if (++n % 4 == 0) progressTimed("$mount: ${path.substringAfterLast('/')}", -1f)
         }
         fun extractOne(path: String, node: ErofsReader.Node): Long {
             val rel = if (asRoot) path else "$mount/$path"
@@ -3481,7 +3541,7 @@ class Importer(
         for (i in fileTasks.indices) {
             errors[i]?.let { throw it }
             files++; bytes += lengths[i]
-            if (i % 150 == 0) onProgress("$mount: ${fileTasks[i].first.substringAfterLast('/')}", -1f)
+            if (i % 4 == 0) progressTimed("$mount: ${fileTasks[i].first.substringAfterLast('/')}", -1f)
         }
         if (mount == "system") gotSystem = true
         log("EROFS $mount: $n objects")
@@ -3736,6 +3796,7 @@ class Importer(
                 return
             }
         }
+        var written = 0L
         f.outputStream().buffered(1 shl 20).use { o ->
             val buffer = ByteArray(1 shl 16)
             while (true) {
@@ -3743,9 +3804,11 @@ class Importer(
                 val n = src.read(buffer)
                 if (n < 0) break
                 bytes += n
+                written += n
                 if (bytes > 16L * 1024 * 1024 * 1024 || root.usableSpace < n + 32L * 1024 * 1024)
                     throw LocalizedIOException("Not enough space to unpack firmware", R.string.imp_not_enough_space_to_unpack_firmware)
                 o.write(buffer, 0, n)
+                byteProgress(R.string.imp_extracting, rel.substringAfterLast('/'), written)
             }
         }
         if (mode != null) applyMode(f, mode and 0xfff)

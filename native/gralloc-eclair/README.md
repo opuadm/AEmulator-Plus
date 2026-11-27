@@ -11,3 +11,14 @@ for good (FUTEX_WAIT right after the mmap of fb0). The patch clears `HW_FB`, `HW
 The glibc build (`engines/glibc-x86/gralloc.default.so`) is made from the file above by `tools/patch_gralloc_glibc.py`, with
 `engines/glibc-x86/aegr.so` (`native/revue-shims`). Apply with `patch -p1` in an Eclair tree (the paths are `a/` and `b/`).
 The build script and toolchain of the binary are not in this checkout (see docs/license-audit.md).
+
+## Which firmware gets it
+
+Not decided by API level. `TreeFixer.installEngineFiles` reads the firmware's own `system/lib/hw/gralloc.default.so`
+(`GrallocProbe.singlePageDeadlock`) and replaces it only when the module has all three of: the pmem allocation path
+(`/dev/pmem`), the module mutex (import of `pthread_mutex_lock`) and the single-page branch of the framebuffer code
+("page flipping not supported"). That is the structure the deadlock above needs; a gralloc without a pmem path (ashmem only)
+cannot take the lock twice and keeps its own. A module that cannot be read as an ELF32 HAL (absent, other architecture) falls
+back to the old rule, API 5..7. The probe reads strings and imports, so it cannot tell a fixed module from a buggy one: it must
+only be asked about the firmware's own copy (the one parked in `system/.aemu-parked/...gralloc.default.so.eclair`), not about
+the engine's replacement.

@@ -23,6 +23,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct hw_module;
+
 extern int open(const char *path, int flags, ...);
 extern int close(int fd);
 extern int ioctl(int fd, unsigned long req, ...);
@@ -30,6 +32,9 @@ extern int pthread_create(long *t, const void *attr, void *(*fn)(void *), void *
 struct timespec32 { long tv_sec, tv_nsec; };           /* 32-bit bionic: both fields are long */
 extern int clock_gettime(int clk, struct timespec32 *ts);
 extern int nanosleep(const struct timespec32 *req, struct timespec32 *rem);   /* clock_nanosleep only came with 5.0 */
+/* Added for AEmulator Plus (2026-11-25): the open GL bridge (see set()) needs the gralloc framebuffer device */
+extern int __system_property_get(const char *name, char *value);                /* libc */
+extern int hw_get_module(const char *id, const struct hw_module **module);      /* libhardware: it loaded this module, so it is there */
 
 #define EXPORT __attribute__((visibility("default")))
 #define CLOCK_MONOTONIC 1
@@ -116,6 +121,29 @@ struct fb_var {                                        /* linux/fb.h fb_var_scre
 };
 _Static_assert(sizeof(struct fb_var) == 160, "fb_var_screeninfo");
 
+/* hardware/fb.h: framebuffer_device_t as the gralloc module's "fb0" device hands it out. Only post() is used; the float fields are kept as
+   plain words (nothing here does arithmetic on them, and the guest's soft-float ABI needs no helper to move them). 4.0 and 4.2 differ only in
+   what the words after maxSwapInterval are called (reserved[8] / numFramebuffers + reserved[7]): post() sits at the same offset. */
+struct fbdev {
+    struct hw_device common;
+    uint32_t flags, width, height;
+    int32_t stride, format;
+    uint32_t xdpi, ydpi, fps;
+    int32_t min_swap, max_swap;
+    int32_t reserved[8];
+    int (*set_swap_interval)(struct fbdev *d, int interval);
+    int (*set_update_rect)(struct fbdev *d, int l, int t, int w, int h);
+    int (*post)(struct fbdev *d, const void *buffer);
+    int (*composition_complete)(struct fbdev *d);
+    void (*dump)(struct fbdev *d, char *buf, int len);
+    int (*enable_screen)(struct fbdev *d, int enable);
+    void *reserved_proc[6];
+};
+_Static_assert(__builtin_offsetof(struct fbdev, post) == 144, "framebuffer_device_t.post");
+
+#define HWC_FRAMEBUFFER_TARGET 3                       /* hwc_layer_1_t.compositionType of the layer SurfaceFlinger's own GLES frame is in */
+#define SYNC_IOC_WAIT 0x40043e00u                      /* _IOW('>', 0, __s32): wait for a sync fence, the argument is the timeout in ms */
+
 #define DEFAULT_PERIOD_NS 16666667
 
 static struct {
@@ -123,6 +151,9 @@ static struct {
     uint32_t period_ns, xdpi1000, ydpi1000;
     const struct procs *procs;
     volatile int vsync_on, thread_started;
+    int post;                                          /* debug.aemu.fbpost: the frame is for this composer to put on the screen (see hwc_set) */
+    int fb_tried;
+    struct fbdev *fb;                                  /* the gralloc module's framebuffer device, opened by the first frame */
 } g;
 
 /* the guest's bionic has no __aeabi_uidiv to give: a plain shift-and-subtract divide, for the few non-constant ones */
@@ -200,18 +231,42 @@ static int hwc_prepare(struct hwc *d, size_t n, struct contents **c) {
     return 0;                                          /* every layer stays HWC_FRAMEBUFFER: SurfaceFlinger's GLES draws them */
 }
 
+/* The framebuffer device of the gralloc module: what SurfaceFlinger's HWComposer calls post() on when there is no composer or a 1.0 one. */
+static struct fbdev *open_fbdev(void) {
+    if (g.fb_tried) return g.fb;
+    g.fb_tried = 1;
+    const struct hw_module *m = 0;
+    struct hw_device *dev = 0;
+    if (hw_get_module("gralloc", &m) != 0 || !m || !m->methods || !m->methods->open) return 0;
+    if (m->methods->open(m, "fb0", &dev) != 0 || !dev) return 0;       /* GRALLOC_HARDWARE_FB0 */
+    g.fb = (struct fbdev *)dev;
+    return g.fb;
+}
+
 static int hwc_set(struct hwc *d, size_t n, struct contents **c) {
     (void)d;
-    /* nothing to show: the frame went to the framebuffer through SurfaceFlinger's own eglSwapBuffers. Fences the caller handed
-       over are ours to close, and none are handed back, as everything is already complete (-1) */
+    /* A composer of version 1.1 is what SurfaceFlinger (4.2 - 4.4) hands the finished GLES frame to: its framebuffer window is a buffer queue
+       whose consumer calls HWComposer::fbPost(), and with a 1.1 composer that is setFramebufferTarget() + this set(), not the fb HAL's post().
+       The engine's closed GL driver wrote the frame to fb0 from inside eglSwapBuffers, so there was nothing to do here. The open bridge fills
+       the window's buffer instead (a plain buffer of fb0's layout while fb0 has a single page) and relies on the fb HAL to put it on the
+       screen: here that is post() of the gralloc module's fb0 device, which copies it to fb0 (or pans). Only when the VM said so
+       (debug.aemu.fbpost): with the closed driver the buffer is empty and a post would blank the frame the driver has just written. */
+    struct fbdev *fb = g.post && n >= 1 && c && c[0] ? open_fbdev() : 0;
     for (size_t i = 0; i < n; i++) {
         struct contents *l = c ? c[i] : 0;
         if (!l) continue;
+        const void *target = 0;
         for (size_t k = 0; k < l->n; k++) {
-            if (l->layers[k].acquire_fence >= 0) { close(l->layers[k].acquire_fence); l->layers[k].acquire_fence = -1; }
-            l->layers[k].release_fence = -1;
+            struct layer *y = &l->layers[k];
+            if (i == 0 && fb && y->type == HWC_FRAMEBUFFER_TARGET && y->handle) {
+                if (y->acquire_fence >= 0) { int ms = 1000; ioctl(y->acquire_fence, SYNC_IOC_WAIT, &ms); }
+                target = y->handle;
+            }
+            if (y->acquire_fence >= 0) { close(y->acquire_fence); y->acquire_fence = -1; }
+            y->release_fence = -1;
         }
-        l->retire_fence = -1;
+        if (target) fb->post(fb, target);
+        l->retire_fence = -1;       /* everything is already complete (-1) */
     }
     return 0;
 }
@@ -282,6 +337,10 @@ static int hwc_open(const struct hw_module *m, const char *id, struct hw_device 
     const char want[] = "composer";
     for (int i = 0; i < 9; i++) if (id[i] != want[i]) return -EINVAL_;
     read_fb();
+    {   char v[92];
+        v[0] = 0;
+        g.post = __system_property_get("debug.aemu.fbpost", v) > 0 && v[0] == '1';
+    }
     the_device.common.tag = HARDWARE_DEVICE_TAG;
     the_device.common.version = HWC_DEVICE_API_VERSION_1_1;
     the_device.common.module = &HMI;

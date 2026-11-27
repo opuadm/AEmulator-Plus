@@ -7,6 +7,7 @@ import java.io.InputStream;
 /** Decompressing stream over libaemuarc. Output goes straight into the caller's array: no copy on the Java side. */
 final class NativeInputStream extends InputStream {
     private static final int IN_CAP = 1 << 18;
+    private static final int MAX_IDLE = 1000;
 
     private final InputStream src;
     private final int codec;
@@ -57,6 +58,7 @@ final class NativeInputStream extends InputStream {
 
     private int pump(byte[] b, int off, int len) throws IOException {
         if (done) return -1;
+        int idle = 0;                                  // rounds in a row that moved neither input nor output
         for (;;) {
             NativeArc.decStep(h, in, inPos, inLen - inPos, b, off, len, srcEof, res);
             int status = res[0], used = res[1], made = res[2];
@@ -67,20 +69,23 @@ final class NativeInputStream extends InputStream {
                 return made > 0 ? made : -1;
             }
             if (made > 0) return made;
-            if (used > 0) continue;
+            if (used > 0) { idle = 0; continue; }
             if (srcEof) throw new EOFException("Unexpected end of compressed data");
-            fill();
+            // the decoder wants more input: if the source keeps handing back nothing, give up instead of spinning forever
+            if (fill() == 0 && ++idle > MAX_IDLE) throw new IOException("Compressed data stalled: the source returned no bytes");
         }
     }
 
-    /** Appends source bytes behind what the decoder has not consumed yet. */
-    private void fill() throws IOException {
+    /** Appends source bytes behind what the decoder has not consumed yet. Returns how many were added (0 at EOF or on an empty read). */
+    private int fill() throws IOException {
         int rem = inLen - inPos;
         if (inPos > 0 && rem > 0) System.arraycopy(in, inPos, in, 0, rem);
         inPos = 0; inLen = rem;
         if (inLen == in.length) throw new IOException("Corrupt compressed data");
         int n = src.read(in, inLen, in.length - inLen);
-        if (n < 0) srcEof = true; else inLen += n;
+        if (n < 0) { srcEof = true; return 0; }
+        inLen += n;
+        return n;
     }
 
     private IOException error(int status) {

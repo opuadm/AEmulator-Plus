@@ -147,6 +147,17 @@ object GrallocProbe {
         return when { at44 > 0 && at48 == 0 -> 0x44; at48 > 0 && at44 == 0 -> 0x48; else -> null }
     }
 
+    /**
+     * Added for AEmulator Plus (2026-11-26): does this libui take the length of its framebuffer FIFO from the gralloc's fb0 device
+     * (framebuffer_device_t.numFramebuffers, +0x68)? HTC's Gingerbread libui does and logs it, "FramebufferNativeWindow: mNumBuffers = %d";
+     * AOSP's 2.3 libui has a constant there and no such message. The vendor's own gralloc fills the field in, the engine's (AOSP layout)
+     * does not, and a window of 0 buffers never shows anything (every eglSwapBuffers fails with EGL_BAD_SURFACE, fb0 stays zero).
+     */
+    fun libuiTakesFbCount(libui: ByteArray): Boolean = indexOf(libui, "mNumBuffers = ".toByteArray(Charsets.ISO_8859_1)) >= 0
+
+    /** The FIFO length the host asks libaemushim to put in fb0's numFramebuffers (a double-buffered window; see libaemushim's hw_get_module). */
+    const val FB_BUFFERS = 2
+
     /** File offset of the Thumb `gralloc_device_open` (HMI.methods->open), or null. */
     private fun openFunctionOffset(d: ByteArray): Int? {
         return try {
@@ -178,6 +189,112 @@ object GrallocProbe {
             if ((open and 1) == 0) return null
             fo(open and 1.inv())
         } catch (_: Exception) { null }
+    }
+
+    /**
+     * Added for AEmulator Plus (2026-11-24). Does this firmware gralloc deadlock when fb0 offers a single page (the qemu fb0 always
+     * does)? Stock AOSP gralloc (Eclair, Froyo, Gingerbread and the vendor trees derived from them) answers a single-page fb0 from
+     * `gralloc_alloc_framebuffer_locked` with `gralloc_alloc_buffer(usage | GRALLOC_USAGE_HW_2D)`. HW_2D makes that call take the pmem
+     * path, `init_pmem_area()` locks the module mutex, and the caller already holds it (the mutex is not recursive): SurfaceFlinger
+     * sleeps in FUTEX_WAIT right after the mmap of fb0 and system_init never starts the Java services (see native/gralloc-eclair).
+     *
+     * The bug needs three things in the same module, all of which survive stripping because they are strings and imports:
+     *  - the pmem allocation path ("/dev/pmem"): a gralloc without it (ashmem only: goldfish/ranchu, the engine's own, vendor trees
+     *    that allocate some other way) has nothing for HW_2D to select, so it cannot take the lock a second time;
+     *  - the framebuffer's single-page branch (the "page flipping not supported" message of mapFrameBufferLocked);
+     *  - the module mutex (an import of pthread_mutex_lock).
+     * A gralloc that has all three is [SinglePage.DEADLOCKS]; a readable ELF32 module without one of them is [SinglePage.SAFE];
+     * anything that is not an ELF32 little-endian ARM / i386 shared object is [SinglePage.UNKNOWN], and the caller decides what that
+     * means (TreeFixer falls back to the old API 5..7 rule there). This reads the binary the firmware shipped, so a gralloc that
+     * already is the engine's replacement says DEADLOCKS as well (it has the pmem code, only its single-page branch is fixed):
+     * ask it about the firmware's own copy (the one kept in system/.aemu-parked), never about the one in place.
+     */
+    enum class SinglePage { DEADLOCKS, SAFE, UNKNOWN }
+
+    fun singlePageDeadlock(elf: ByteArray): SinglePage = try {
+        val b = ByteBuffer.wrap(elf).order(ByteOrder.LITTLE_ENDIAN)
+        fun u16(o: Int) = b.getShort(o).toInt() and 0xffff
+        val machine = if (elf.size >= 52) u16(18) else -1
+        if (elf.size < 52 || elf[0] != 0x7f.toByte() || elf[1] != 'E'.code.toByte() || elf[2] != 'L'.code.toByte() || elf[3] != 'F'.code.toByte() ||
+            elf[4].toInt() != 1 || elf[5].toInt() != 1 || (machine != 40 && machine != 3)) SinglePage.UNKNOWN
+        else {
+            val imports = importedNames(elf)
+            if (imports == null) SinglePage.UNKNOWN
+            else {
+                // the HAL module descriptor (tag 'HWMT'): something that is not a gralloc module is not for us to judge
+                if (!hasHalModule(elf)) SinglePage.UNKNOWN
+                else {
+                    val pmem = indexOf(elf, "/dev/pmem".toByteArray(Charsets.ISO_8859_1)) >= 0
+                    val singlePage = indexOf(elf, "page flipping not supported".toByteArray(Charsets.ISO_8859_1)) >= 0
+                    val mutex = "pthread_mutex_lock" in imports
+                    if (pmem && singlePage && mutex) SinglePage.DEADLOCKS else SinglePage.SAFE
+                }
+            }
+        }
+    } catch (_: Exception) {
+        SinglePage.UNKNOWN
+    }
+
+    private fun indexOf(d: ByteArray, pat: ByteArray): Int {
+        outer@ for (i in 0..d.size - pat.size) {
+            for (j in pat.indices) if (d[i + j] != pat[j]) continue@outer
+            return i
+        }
+        return -1
+    }
+
+    /** True when the ELF32 has a defined `HMI` symbol whose object starts with the 'HWMT' tag. */
+    private fun hasHalModule(d: ByteArray): Boolean = try {
+        val dyn = DynSyms.parse(d)
+        val hmi = dyn?.let { y -> (0 until y.count).firstOrNull { y.name(it) == "HMI" && y.defined(it) } }
+        if (dyn == null || hmi == null) false
+        else dyn.fileOffset(dyn.value(hmi))?.let { o -> o + 4 <= d.size && ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN).getInt(o) == 0x48574d54 } ?: false
+    } catch (_: Exception) { false }
+
+    /** Names of the symbols this ELF32 imports (undefined in .dynsym), or null when its dynamic section cannot be read. */
+    private fun importedNames(d: ByteArray): Set<String>? = try {
+        val y = DynSyms.parse(d)
+        y?.let { s -> (0 until s.count).filter { !s.defined(it) }.map { s.name(it) }.toSet() }
+    } catch (_: Exception) { null }
+
+    /** .dynsym / .dynstr of an ELF32 little-endian shared object (ARM or i386: the Elf32_Sym layout is the same). */
+    private class DynSyms(private val d: ByteArray, private val loads: List<IntArray>, private val symtab: Int, private val strtab: Int, val count: Int) {
+        private val b = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN)
+        fun value(s: Int) = b.getInt(symtab + s * 16 + 4)
+        fun defined(s: Int) = (b.getShort(symtab + s * 16 + 14).toInt() and 0xffff) != 0
+        fun name(s: Int): String {
+            val st = strtab + b.getInt(symtab + s * 16)
+            var e = st
+            while (e < d.size && d[e] != 0.toByte()) e++
+            return String(d, st, e - st, Charsets.ISO_8859_1)
+        }
+        fun fileOffset(va: Int): Int? { for (l in loads) if (va >= l[0] && va < l[0] + l[2]) return va - l[0] + l[1]; return null }
+
+        companion object {
+            fun parse(d: ByteArray): DynSyms? {
+                val b = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN)
+                fun u32(o: Int) = b.getInt(o)
+                fun u16(o: Int) = b.getShort(o).toInt() and 0xffff
+                val phoff = u32(0x1c); val phent = u16(0x2a); val phnum = u16(0x2c)
+                val loads = ArrayList<IntArray>()
+                var dynOff = -1; var dynSize = 0
+                for (i in 0 until phnum) {
+                    val p = phoff + i * phent
+                    if (u32(p) == 1) loads.add(intArrayOf(u32(p + 8), u32(p + 4), u32(p + 16)))
+                    if (u32(p) == 2) { dynOff = u32(p + 4); dynSize = u32(p + 16) }
+                }
+                if (dynOff < 0) return null
+                val tags = HashMap<Int, Int>()
+                var i = 0
+                while (i + 8 <= dynSize) { val t = u32(dynOff + i); if (t == 0) break; if (!tags.containsKey(t)) tags[t] = u32(dynOff + i + 4); i += 8 }
+                fun fo(va: Int): Int? { for (l in loads) if (va >= l[0] && va < l[0] + l[2]) return va - l[0] + l[1]; return null }
+                val symtab = fo(tags[6] ?: return null) ?: return null
+                val strtab = fo(tags[5] ?: return null) ?: return null
+                val n = (strtab - symtab) / 16            // .dynstr follows .dynsym
+                if (n !in 1..65536) return null
+                return DynSyms(d, loads, symtab, strtab, n)
+            }
+        }
     }
 
     fun verdict(elf: ByteArray): Verdict = try {

@@ -139,6 +139,7 @@ class SocProfileTest {
         assertTrue(a64.contains("sve2"))
         // an ARMv7 chip is the ARMv7 layout either way
         assertTrue(resolve("msm8974", guest32 = false).cpuinfo.contains("model name\t: ARMv7 Processor rev 0 (v7l)"))
+        assertTrue(resolve("sc6820", guest32 = false).cpuinfo.contains("processor\t: 0\n"))   // one core still lists its processor
     }
 
     @Test fun bigLittleCoresAreListedLittleFirst() {

@@ -1,0 +1,1694 @@
+[
+ {
+  "id": "skin-alcatel-onetouch-pixi",
+  "name": "Alcatel OneTouch Pixi",
+  "brand": "Alcatel",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.1298086643218994,
+  "frameColor": -16777216,
+  "frameImage": "skin-alcatel-onetouch-pixi.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.08666666597127914,
+   0.1198500394821167,
+   0.9233333468437195,
+   0.8471064567565918
+  ],
+  "skinWidth": 480,
+  "skinHeight": 800,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.41999998688697815,
+     0.8671064376831055,
+     0.5816484689712524,
+     0.9544281959533691
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.11039891839027405,
+     0.8671064376831055,
+     0.2974010109901428,
+     0.9541150331497192
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.7146327495574951,
+     0.8671064376831055,
+     0.890784502029419,
+     0.9522086381912231
+    ]
+   }
+  ],
+  "skinLed": [
+   0.18339097499847412,
+   0.058965083211660385
+  ]
+ },
+ {
+  "id": "skin-mi-max-2-white",
+  "name": "Mi Max 2 (White)",
+  "brand": "Xiaomi",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": null,
+  "pressColor": 788529151,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 0.699999988079071,
+  "frameColor": -16777216,
+  "frameImage": "skin-mi-max-2-white.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.0535714285714286,
+   0.08609834949804318,
+   0.9434523809523809,
+   0.9001191083886336
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "back",
+    "area": [
+     0.6726716756820679,
+     0.9212741255760193,
+     0.8326716423034668,
+     0.9812741279602051
+    ]
+   },
+   {
+    "key": "home",
+    "area": [
+     0.42160892486572266,
+     0.9213447570800781,
+     0.5816088914871216,
+     0.9813447594642639
+    ]
+   },
+   {
+    "key": "volume_up",
+    "area": [
+     0.9737572073936462,
+     0.20418313145637512,
+     1,
+     0.2707659602165222
+    ]
+   },
+   {
+    "key": "volume_down",
+    "area": [
+     0.9736746549606323,
+     0.2688732147216797,
+     1,
+     0.3343321979045868
+    ]
+   },
+   {
+    "key": "power",
+    "area": [
+     0.9761136174201965,
+     0.37120795249938965,
+     1,
+     0.4258140027523041
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.1700725555419922,
+     0.9220300912857056,
+     0.3300723135471344,
+     0.9820300936698914
+    ]
+   }
+  ]
+ },
+ {
+  "id": "skin-galaxy-note-2",
+  "name": "Galaxy Note 2",
+  "brand": "Samsung",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -10429450,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.2627391815185547,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-note-2.png",
+  "screenCorner": 7,
+  "skinScreen": [
+   0.06841362847222221,
+   0.0892193308550186,
+   0.9385308159722222,
+   0.9172862453531598
+  ],
+  "skinWidth": 720,
+  "skinHeight": 1280,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.388049453496933,
+     0.9295699000358582,
+     0.5962674617767334,
+     0.969961941242218
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6686397790908813,
+     0.92355877161026,
+     0.8678475022315979,
+     0.9867097735404968
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.13314156234264374,
+     0.9219961762428284,
+     0.3460369110107422,
+     0.9863587021827698
+    ]
+   }
+  ],
+  "skinLed": [
+   0.2155824601650238,
+   0.042080093175172806
+  ]
+ },
+ {
+  "id": "skin-galaxy-note-3",
+  "name": "Galaxy Note 3",
+  "brand": "Samsung",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -10429450,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.2627391815185547,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-note-3.png",
+  "screenCorner": 5,
+  "skinScreen": [
+   0.05528544542032621,
+   0.08965062623599207,
+   0.9459692597239648,
+   0.9215557020435069
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.38891246914863586,
+     0.9334643483161926,
+     0.6062512993812561,
+     0.9724982976913452
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6825152039527893,
+     0.9276186227798462,
+     0.8429961800575256,
+     0.988292396068573
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.1442907750606537,
+     0.9243924021720886,
+     0.31461191177368164,
+     0.9873372316360474
+    ]
+   }
+  ],
+  "skinLed": [
+   0.15367107093334198,
+   0.03931037709116936
+  ]
+ },
+ {
+  "id": "skin-galaxy-pocket-neo-duos",
+  "name": "Galaxy Pocket Neo Duos",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -7895161,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-pocket-neo-duos.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.1392757660167131,
+   0.1876923076923077,
+   0.8467966573816156,
+   0.7738461538461539
+  ],
+  "skinWidth": 320,
+  "skinHeight": 480,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.3583042025566101,
+     0.8378891348838806,
+     0.6304383277893066,
+     0.906180739402771
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.706193745136261,
+     0.8391605019569397,
+     0.849429726600647,
+     0.9024257063865662
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.1360882669687271,
+     0.8427689075469971,
+     0.29743728041648865,
+     0.900040864944458
+    ]
+   }
+  ],
+  "skinLed": [
+   0.2296425849199295,
+   0.08477702736854553
+  ]
+ },
+ {
+  "id": "skin-galaxy-s4-mini",
+  "name": "Galaxy S4 Mini",
+  "brand": "Samsung",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -10429450,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.2627391815185547,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s4-mini.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.06435006435006435,
+   0.1145431145431145,
+   0.9330759330759331,
+   0.8867438867438867
+  ],
+  "skinWidth": 540,
+  "skinHeight": 960,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.37740227580070496,
+     0.9198340177536011,
+     0.6236240863800049,
+     0.963775098323822
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.673591136932373,
+     0.9007354378700256,
+     0.8741214275360107,
+     0.9764256477355957
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.118742436170578,
+     0.9005458950996399,
+     0.31246697902679443,
+     0.9773826599121094
+    ]
+   }
+  ],
+  "skinLed": [
+   0.1969456523656845,
+   0.03878742456436157
+  ]
+ },
+ {
+  "id": "skin-galaxy-s4",
+  "name": "Galaxy S4",
+  "brand": "Samsung",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -10429450,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.2627391815185547,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s4.png",
+  "screenCorner": 7,
+  "skinScreen": [
+   0.05192430025445294,
+   0.09238776837996093,
+   0.9493479643765903,
+   0.9082628497072218
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.38426515460014343,
+     0.9303981065750122,
+     0.6302222609519958,
+     0.9722230434417725
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6857767701148987,
+     0.9105523824691772,
+     0.9164093732833862,
+     0.9886590242385864
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.09600228071212769,
+     0.9091540575027466,
+     0.3354070782661438,
+     0.990638792514801
+    ]
+   }
+  ],
+  "skinLed": [
+   0.18180634081363678,
+   0.03961019963026047
+  ]
+ },
+ {
+  "id": "skin-galaxy-s5",
+  "name": "Galaxy S5",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s5.png",
+  "screenCorner": 1,
+  "skinScreen": [
+   0.05994897959183676,
+   0.10505443795515185,
+   0.9426020408163264,
+   0.9033816425120771
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.39456403255462646,
+     0.927781343460083,
+     0.61296546459198,
+     0.9613761901855469
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6491371989250183,
+     0.9139783382415771,
+     0.9003516435623169,
+     0.9716314077377319
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.10414201021194458,
+     0.9129509329795837,
+     0.35996511578559875,
+     0.9740238189697266
+    ]
+   }
+  ],
+  "skinLed": [
+   0.14236508309841156,
+   0.040431443601846695
+  ]
+ },
+ {
+  "id": "skin-galaxy-s6-edge",
+  "name": "Galaxy S6 Edge",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s6-edge.png",
+  "screenCorner": 2,
+  "skinScreen": [
+   0.03999999910593033,
+   0.09496194124221802,
+   0.9599999785423279,
+   0.9083548188209534
+  ],
+  "skinWidth": 540,
+  "skinHeight": 960,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.38112038373947144,
+     0.9230086207389832,
+     0.6175174713134766,
+     0.9727765917778015
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6846956610679626,
+     0.9130263924598694,
+     0.8807944059371948,
+     0.9771754145622253
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.13105548918247223,
+     0.9145426750183105,
+     0.30746638774871826,
+     0.976514995098114
+    ]
+   }
+  ],
+  "skinLed": [
+   0.23227016627788544,
+   0.03725366294384003
+  ]
+ },
+ {
+  "id": "skin-galaxy-s6",
+  "name": "Galaxy S6",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s6.png",
+  "screenCorner": 2,
+  "skinScreen": [
+   0.03999999910593033,
+   0.09931918978691101,
+   0.9599999785423279,
+   0.9072705507278442
+  ],
+  "skinWidth": 540,
+  "skinHeight": 960,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.3893040716648102,
+     0.922194242477417,
+     0.6115322113037109,
+     0.9729870557785034
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6850860714912415,
+     0.9221343994140625,
+     0.8765299320220947,
+     0.9739848971366882
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.13450150191783905,
+     0.9221938848495483,
+     0.321842759847641,
+     0.9728754162788391
+    ]
+   }
+  ],
+  "skinLed": [
+   0.24509727954864502,
+   0.040747784078121185
+  ]
+ },
+ {
+  "id": "skin-galaxy-s7-black-onyx",
+  "name": "Galaxy S7 (Black Onyx)",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s7-black-onyx.png",
+  "screenCorner": 1,
+  "skinScreen": [
+   0.034076015727391884,
+   0.10560813179109713,
+   0.9646133682830931,
+   0.901962846126884
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.38702693581581116,
+     0.914305567741394,
+     0.6181017160415649,
+     0.9687286019325256
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6778478026390076,
+     0.9078612923622131,
+     0.8897333741188049,
+     0.978243350982666
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.11257245391607285,
+     0.9092126488685608,
+     0.30674615502357483,
+     0.9765145778656006
+    ]
+   }
+  ],
+  "skinLed": [
+   0.16034464538097382,
+   0.039764538407325745
+  ]
+ },
+ {
+  "id": "skin-galaxy-s7-gold-platinum",
+  "name": "Galaxy S7 (Gold Platinum)",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s7-gold-platinum.png",
+  "screenCorner": 1,
+  "skinScreen": [
+   0.03149606299212593,
+   0.10799355471486621,
+   0.9619422572178478,
+   0.9027252346924477
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.37581196427345276,
+     0.9176598191261292,
+     0.6216521263122559,
+     0.9677934646606445
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6739982962608337,
+     0.9104205965995789,
+     0.8979189395904541,
+     0.9766512513160706
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.09929047524929047,
+     0.9125556945800781,
+     0.31187868118286133,
+     0.9748010039329529
+    ]
+   }
+  ],
+  "skinLed": [
+   0.1759670376777649,
+   0.04244910553097725
+  ]
+ },
+ {
+  "id": "skin-galaxy-s8",
+  "name": "Galaxy S8",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-s8.png",
+  "screenCorner": 34,
+  "skinScreen": [
+   0.021592442645074206,
+   0.05906396893521354,
+   0.9770580296896086,
+   0.9513590844062947
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 2220,
+  "skinKeys": [],
+  "skinLed": [
+   0.1568228155374527,
+   0.036915164440870285
+  ]
+ },
+ {
+  "id": "skin-lg-g2",
+  "name": "LG G2",
+  "brand": "LG",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -10429450,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.2627391815185547,
+  "frameColor": -16777216,
+  "frameImage": "skin-lg-g2.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.033854166666666685,
+   0.06967741935483873,
+   0.964863782051282,
+   0.9025806451612903
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [],
+  "skinLed": [
+   0.8782379627227783,
+   0.043909959495067596
+  ]
+ },
+ {
+  "id": "skin-lg-g5",
+  "name": "LG G5",
+  "brand": "LG",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -10429450,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.2627391815185547,
+  "frameColor": -16777216,
+  "frameImage": "skin-lg-g5.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.055837563451776595,
+   0.10227594006219959,
+   0.9441624365482234,
+   0.8939072660446707
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [],
+  "skinLed": [
+   0.8410593271255493,
+   0.048218678683042526
+  ]
+ },
+ {
+  "id": "skin-mi-6",
+  "name": "Mi 6",
+  "brand": "Xiaomi",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -7895161,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-mi-6.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.03734756097560976,
+   0.10143042912873856,
+   0.9626524390243902,
+   0.8907672301690507
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.3842494785785675,
+     0.9092099070549011,
+     0.614057719707489,
+     0.9693588614463806
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6633205413818359,
+     0.9054994583129883,
+     0.8944078683853149,
+     0.968207597732544
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.08058618754148483,
+     0.9043793678283691,
+     0.32825326919555664,
+     0.9668495655059814
+    ]
+   }
+  ],
+  "skinLed": [
+   0.8578479886054993,
+   0.053673502057790756
+  ]
+ },
+ {
+  "id": "skin-nexus-4",
+  "name": "Nexus 4",
+  "brand": "Google",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -7895161,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-nexus-4.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.05464037122969839,
+   0.10991636798088411,
+   0.944199535962877,
+   0.8733572281959379
+  ],
+  "skinWidth": 768,
+  "skinHeight": 1280,
+  "skinKeys": [],
+  "skinLed": [
+   0.1487647444009781,
+   0.0539785772562027
+  ]
+ },
+ {
+  "id": "skin-oneplus-3t",
+  "name": "OnePlus 3T",
+  "brand": "OnePlus",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-oneplus-3t.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.04155844155844157,
+   0.08852064301395085,
+   0.9636363636363636,
+   0.8929962467247361
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.41565006971359253,
+     0.9141140580177307,
+     0.5838346481323242,
+     0.9680001735687256
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6497553586959839,
+     0.9163150787353516,
+     0.9023334980010986,
+     0.9659216403961182
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.09228336811065674,
+     0.9131761789321899,
+     0.34834277629852295,
+     0.970050036907196
+    ]
+   }
+  ],
+  "skinLed": [
+   0.83856600522995,
+   0.044814638793468475
+  ]
+ },
+ {
+  "id": "skin-redmi-4x-black",
+  "name": "Redmi 4X (Black)",
+  "brand": "Xiaomi",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -7895161,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-redmi-4x-black.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.05465425531914897,
+   0.09660297239915072,
+   0.9474734042553192,
+   0.8885350318471338
+  ],
+  "skinWidth": 720,
+  "skinHeight": 1280,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.4141402542591095,
+     0.9196490049362183,
+     0.5886194109916687,
+     0.9791935682296753
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.683990478515625,
+     0.9216048717498779,
+     0.8502635359764099,
+     0.9796199798583984
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.15823882818222046,
+     0.9182494878768921,
+     0.3240956962108612,
+     0.979253888130188
+    ]
+   }
+  ],
+  "skinLed": [
+   0.8658446073532104,
+   0.05774952098727226
+  ]
+ },
+ {
+  "id": "skin-redmi-4x-gold",
+  "name": "Redmi 4X (Gold)",
+  "brand": "Xiaomi",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -7895161,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-redmi-4x-gold.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.05430327868852458,
+   0.09773662551440332,
+   0.9395491803278688,
+   0.8878600823045267
+  ],
+  "skinWidth": 720,
+  "skinHeight": 1280,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.41999998688697815,
+     0.9198631644248962,
+     0.5790092349052429,
+     0.9776067137718201
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.17211884260177612,
+     0.9190544486045837,
+     0.3345080316066742,
+     0.9781484603881836
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6623979806900024,
+     0.9204907417297363,
+     0.8513318300247192,
+     0.9787003993988037
+    ]
+   }
+  ],
+  "skinLed": [
+   0.13473427295684814,
+   0.052806973457336426
+  ]
+ },
+ {
+  "id": "skin-redmi-6",
+  "name": "Redmi 6",
+  "brand": "Xiaomi",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -7895161,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-redmi-6.png",
+  "screenCorner": 10,
+  "skinScreen": [
+   0.06788511749347259,
+   0.08402029169308817,
+   0.9281984334203656,
+   0.9197844007609386
+  ],
+  "skinWidth": 720,
+  "skinHeight": 1440,
+  "skinKeys": [],
+  "skinLed": [
+   0.13166384398937225,
+   0.04979846999049187
+  ]
+ },
+ {
+  "id": "skin-xperia-x10-mini-pro",
+  "name": "Xperia X10 mini pro",
+  "brand": "Sony",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.1298086643218994,
+  "frameColor": -16777216,
+  "frameImage": "skin-xperia-x10-mini-pro.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.1133333370089531,
+   0.13699164986610413,
+   0.8933333158493042,
+   0.7458208799362183
+  ],
+  "skinWidth": 240,
+  "skinHeight": 320,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.36769476532936096,
+     0.8736451268196106,
+     0.641279935836792,
+     0.9074676036834717
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6237962245941162,
+     0.8744944930076599,
+     0.8887971043586731,
+     0.9038785099983215
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.10837537795305252,
+     0.8724695444107056,
+     0.37284907698631287,
+     0.9070917963981628
+    ]
+   }
+  ],
+  "skinLed": [
+   0.7644748687744141,
+   0.07775062322616577
+  ]
+ },
+ {
+  "id": "skin-xperia-z",
+  "name": "Xperia Z",
+  "brand": "Sony",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -10429450,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.2627391815185547,
+  "frameColor": -16777216,
+  "frameImage": "skin-xperia-z.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.05867346938775514,
+   0.09803285776048426,
+   0.9387755102040816,
+   0.8935365326415909
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [],
+  "skinLed": [
+   0.8822721838951111,
+   0.053862132132053375
+  ]
+ },
+ {
+  "id": "skin-xperia-xz",
+  "name": "Xperia XZ",
+  "brand": "Sony",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -1506560539,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-xperia-xz.png",
+  "screenCorner": 1,
+  "skinScreen": [
+   0.05372236671001307,
+   0.1145038167938931,
+   0.9475780234070221,
+   0.8918575063613231
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [],
+  "skinLed": [
+   0.14911416172981262,
+   0.06845948100090027
+  ]
+ },
+ {
+  "id": "skin-pixel-1-blue",
+  "name": "Pixel 1 (Blue)",
+  "brand": "Google",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -12632257,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-pixel-1-blue.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.05666666850447655,
+   0.10785147547721863,
+   0.9466666579246521,
+   0.8823446035385132
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [],
+  "skinLed": [
+   0.7903860807418823,
+   0.04134592041373253
+  ]
+ },
+ {
+  "id": "skin-nexus-7",
+  "name": "Nexus 7",
+  "brand": "Google",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -16009243,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-nexus-7.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.07888349514563109,
+   0.11935923653715064,
+   0.9199029126213593,
+   0.8751874573960463
+  ],
+  "skinWidth": 800,
+  "skinHeight": 1280,
+  "skinKeys": [],
+  "skinLed": [
+   0.5011962652206421,
+   0.9314361214637756
+  ]
+ },
+ {
+  "id": "skin-galaxy-tab-7-plus",
+  "name": "Galaxy Tab 7.0 Plus",
+  "brand": "Samsung",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -16009243,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-tab-7-plus.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.12666666507720947,
+   0.09950250387191772,
+   0.8833333253860474,
+   0.9067605137825012
+  ],
+  "skinWidth": 600,
+  "skinHeight": 1024,
+  "skinKeys": [],
+  "skinLed": [
+   0.15776421129703522,
+   0.053377095609903336
+  ]
+ },
+ {
+  "id": "skin-galaxy-tab-3-10-1",
+  "name": "Galaxy Tab 3 10.1",
+  "brand": "Samsung",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -16009243,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-tab-3-10-1.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.05279503105590061,
+   0.11407249466950958,
+   0.9472049689440993,
+   0.8816631130063965
+  ],
+  "skinWidth": 1280,
+  "skinHeight": 800,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.45702749490737915,
+     0.9328320026397705,
+     0.5365327596664429,
+     0.9763556718826294
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.5770679712295532,
+     0.9375386238098145,
+     0.658086895942688,
+     0.9786275029182434
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.3377843201160431,
+     0.9294445514678955,
+     0.41356179118156433,
+     0.9760099053382874
+    ]
+   }
+  ],
+  "skinLed": [
+   0.6021531224250793,
+   0.0629870742559433
+  ]
+ },
+ {
+  "id": "skin-galaxy-tab-2-7-0",
+  "name": "Galaxy Tab 2 7.0",
+  "brand": "Samsung",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -16009243,
+  "pressGlow": true,
+  "halo": true,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-tab-2-7-0.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.12201963534361854,
+   0.10871143375680575,
+   0.8779803646563815,
+   0.8912885662431942
+  ],
+  "skinWidth": 800,
+  "skinHeight": 1280,
+  "skinKeys": [],
+  "skinLed": [
+   0.24309450387954712,
+   0.05860578268766403
+  ]
+ },
+ {
+  "id": "skin-galaxy-note-7",
+  "name": "Galaxy Note 7",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -12632257,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-note-7.png",
+  "screenCorner": 4,
+  "skinScreen": [
+   0.013333333656191826,
+   0.08941170573234558,
+   0.9866666793823242,
+   0.91376793384552
+  ],
+  "skinWidth": 1080,
+  "skinHeight": 1920,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.38700494170188904,
+     0.9285544753074646,
+     0.614590585231781,
+     0.9737924933433533
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.7191076278686523,
+     0.9260714650154114,
+     0.8694074153900146,
+     0.9772313237190247
+    ]
+   },
+   {
+    "key": "recents",
+    "area": [
+     0.12366831302642822,
+     0.9267433881759644,
+     0.3037164807319641,
+     0.9768133163452148
+    ]
+   }
+  ],
+  "skinLed": [
+   0.13958939909934998,
+   0.04802275449037552
+  ]
+ },
+ {
+  "id": "skin-galaxy-note",
+  "name": "Galaxy Note",
+  "brand": "Samsung",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -12632257,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-galaxy-note.png",
+  "screenCorner": 1,
+  "skinScreen": [
+   0.053278688341379166,
+   0.09908467531204224,
+   0.9508196711540222,
+   0.9009153246879578
+  ],
+  "skinWidth": 800,
+  "skinHeight": 1280,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.40681856870651245,
+     0.9132183790206909,
+     0.6032394170761108,
+     0.9638753533363342
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6443226933479309,
+     0.9129583835601807,
+     0.910938560962677,
+     0.9653396010398865
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.08147845417261124,
+     0.9111285209655762,
+     0.3604920506477356,
+     0.9659519195556641
+    ]
+   }
+  ],
+  "skinLed": [
+   0.16965121030807495,
+   0.04271799698472023
+  ]
+ },
+ {
+  "id": "skin-htc-dream",
+  "name": "HTC Dream",
+  "brand": "HTC",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -12632257,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-htc-dream.png",
+  "screenCorner": 1,
+  "skinScreen": [
+   0.08064515888690948,
+   0.11210128664970398,
+   0.9153226017951965,
+   0.6946529150009155
+  ],
+  "skinWidth": 320,
+  "skinHeight": 480,
+  "skinKeys": [
+   {
+    "key": "center",
+    "area": [
+     0.44182470440864563,
+     0.8548197150230408,
+     0.5510385632514954,
+     0.9100184440612793
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.6275782585144043,
+     0.8548253178596497,
+     0.7535649538040161,
+     0.9137506484985352
+    ]
+   },
+   {
+    "key": "home",
+    "area": [
+     0.2420753389596939,
+     0.8544173240661621,
+     0.3593411147594452,
+     0.9111618399620056
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.3612333834171295,
+     0.7889314293861389,
+     0.6380571126937866,
+     0.8295238018035889
+    ]
+   }
+  ],
+  "skinLed": [
+   0.18083709478378296,
+   0.048709772527217865
+  ]
+ },
+ {
+  "id": "skin-htc-hd2",
+  "name": "HTC HD2",
+  "brand": "HTC",
+  "glyphs": "HOLO",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -12632257,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-htc-hd2.png",
+  "screenCorner": 1,
+  "skinScreen": [
+   0.062068965286016464,
+   0.06673049926757812,
+   0.9275861978530884,
+   0.868135392665863
+  ],
+  "skinWidth": 480,
+  "skinHeight": 800,
+  "skinKeys": [
+   {
+    "key": "home",
+    "area": [
+     0.25396713614463806,
+     0.9214830994606018,
+     0.3925544023513794,
+     0.9667742252349854
+    ]
+   },
+   {
+    "key": "back",
+    "area": [
+     0.5769929885864258,
+     0.9228382706642151,
+     0.7334733605384827,
+     0.966072678565979
+    ]
+   },
+   {
+    "key": "menu",
+    "area": [
+     0.4053792953491211,
+     0.923815906047821,
+     0.5502297878265381,
+     0.9652981162071228
+    ]
+   }
+  ],
+  "skinLed": [
+   0.8422313928604126,
+   0.04073523357510567
+  ]
+ },
+ {
+  "id": "skin-nexus-5x",
+  "name": "Nexus 5X",
+  "brand": "Google",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -13750738,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-nexus-5x.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.046666666865348816,
+   0.09656301140785217,
+   0.9566666483879089,
+   0.8919803500175476
+  ],
+  "skinWidth": 0,
+  "skinHeight": 0,
+  "skinKeys": [],
+  "skinLed": [
+   0.8501504063606262,
+   0.04440867900848389
+  ]
+ },
+ {
+  "id": "skin-nexus-6p",
+  "name": "Nexus 6P",
+  "brand": "Google",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -13750738,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-nexus-6p.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.036666665226221085,
+   0.10517799109220505,
+   0.9633333086967468,
+   0.9045307636260986
+  ],
+  "skinWidth": 0,
+  "skinHeight": 0,
+  "skinKeys": [],
+  "skinLed": [
+   0.857781171798706,
+   0.052231062203645706
+  ]
+ },
+ {
+  "id": "skin-pixel-2",
+  "name": "Pixel 2",
+  "brand": "Google",
+  "glyphs": "LOLLIPOP",
+  "barColor": -16777216,
+  "iconColor": -1,
+  "pressColor": -13750738,
+  "pressGlow": false,
+  "halo": false,
+  "roundedBar": false,
+  "iconScale": 1.159617304801941,
+  "frameColor": -16777216,
+  "frameImage": "skin-pixel-2.png",
+  "screenCorner": 0,
+  "skinScreen": [
+   0.0533333346247673,
+   0.11764705926179886,
+   0.95333331823349,
+   0.8791732788085938
+  ],
+  "skinWidth": 0,
+  "skinHeight": 0,
+  "skinKeys": [],
+  "skinLed": [
+   0.828384280204773,
+   0.062247734516859055
+  ]
+ }
+]

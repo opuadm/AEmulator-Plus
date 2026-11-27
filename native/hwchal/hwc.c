@@ -111,7 +111,14 @@ struct hwc {
     void (*dump)(struct hwc *d, char *buf, int len);
     int (*get_configs)(struct hwc *d, int disp, uint32_t *configs, size_t *n);
     int (*get_attributes)(struct hwc *d, int disp, uint32_t config, const uint32_t *attrs, int32_t *values);
-    void *reserved_proc[7];
+    /* Added for AEmulator Plus (2026-11-24): the three slots hwc_composer_device_1 has after getDisplayAttributes (they are in the struct
+     * whatever the version in common.version says). They were left NULL, and the composer service's HWC2-on-1 adapter calls
+     * setCursorPositionAsync without looking: a layer of composition type Cursor (the mouse pointer) made SurfaceFlinger send
+     * SET_CURSOR_POSITION, and composer@2.1-service died with SIGSEGV pc=0 in HWC2On1Adapter::layerHook<Layer::setCursorPosition>. */
+    int (*get_active_config)(struct hwc *d, int disp);
+    int (*set_active_config)(struct hwc *d, int disp, int index);
+    int (*set_cursor_position_async)(struct hwc *d, int disp, int x, int y);
+    void *reserved_proc[4];
 
     const struct procs *procs;
     volatile int vsync_on;
@@ -122,6 +129,8 @@ struct hwc {
     int direct, gl;             /* SurfaceFlinger draws on the phone's GPU; the connection to the renderer there */
 };
 
+_Static_assert(__builtin_offsetof(struct hwc, set_cursor_position_async) == __builtin_offsetof(struct hwc, get_attributes) + 3 * sizeof(void *),
+               "hwc_composer_device_1: getActiveConfig, setActiveConfig, setCursorPositionAsync follow getDisplayAttributes");
 /* the shapes SurfaceFlinger's composer service and libhardware hand over, for either word size */
 _Static_assert(sizeof(struct hw_module) == (sizeof(void *) == 4 ? 128 : 248), "hw_module_t");
 _Static_assert(sizeof(struct hw_device) == (sizeof(void *) == 4 ? 64 : 120), "hw_device_t");
@@ -355,6 +364,11 @@ static int hwc_query(struct hwc *d, int what, int *value) {
 }
 static void hwc_register_procs(struct hwc *d, const struct procs *p) { d->procs = p; }
 static void hwc_dump(struct hwc *d, char *buf, int len) { (void)d; if (buf && len > 0) buf[0] = 0; }
+static int hwc_get_active_config(struct hwc *d, int disp) { (void)d; (void)disp; return 0; }               /* the one config */
+static int hwc_set_active_config(struct hwc *d, int disp, int index) { (void)d; (void)disp; return index == 0 ? 0 : -22; }
+/* No separate cursor plane: a cursor layer is drawn with the rest at the frame SurfaceFlinger gave it (hwc_prepare keeps no layer
+ * as a cursor overlay), so there is nothing to move ahead of the next frame. Success, as the adapter expects. */
+static int hwc_set_cursor_position_async(struct hwc *d, int disp, int x, int y) { (void)d; (void)disp; (void)x; (void)y; return 0; }
 static int hwc_get_configs(struct hwc *d, int disp, uint32_t *configs, size_t *n) {
     (void)d;
     if (disp) return -22;
@@ -409,6 +423,8 @@ static int hwc_open(const struct hw_module *m, const char *id, struct hw_device 
         d->prepare = hwc_prepare; d->set = hwc_set; d->event_control = hwc_event_control; d->blank = hwc_blank;
         d->query = hwc_query; d->register_procs = hwc_register_procs; d->dump = hwc_dump;
         d->get_configs = hwc_get_configs; d->get_attributes = hwc_get_attributes;
+        d->get_active_config = hwc_get_active_config; d->set_active_config = hwc_set_active_config;
+        d->set_cursor_position_async = hwc_set_cursor_position_async;
         const void *g = 0;
         if (hw_get_module("gralloc", &g) == 0) d->gralloc = g;
         char mode[92] = {0};

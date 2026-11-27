@@ -25,6 +25,11 @@ import java.util.TreeMap
  *     ids are implicit (root = 1, then 257, 258, ...) and the tree is rebuilt in sequential order.
  *  4. Tagged images that the signature search cannot see (few headers, extended headers, byte
  *     count not 0xffff): plausibility scoring over the first pages, first chunk assumed at offset 0.
+ *  5. Page-only dumps of a mounted file system (no spare area at all, pages in physical NAND order, obsolete
+ *     pages still in place, e.g. `nanddump` without OOB or a bootloader's raw partition read): the file system's
+ *     own checkpoint, which YAFFS2 writes at unmount, is found by its marker and decoded. It lists every live
+ *     object with its parent, header chunk and the chunk of every data chunk, so no tags are needed; see
+ *     [Checkpoint]. The names/modes/sizes still come from the object headers the checkpoint points to.
  *
  * Tagged images follow the YAFFS2 scan rules:
  *
@@ -46,10 +51,34 @@ class Yaffs2Reader(private val src: RandomSource, private val checkCancelled: ()
     /**
      * @param base offset of the first chunk inside the image (0 for ordinary images)
      * @param sequential true for spare-less images (no tags; [spareSize] is 0)
+     * @param checkpoint set for spare-less dumps that are indexed from the file system's checkpoint ([spareSize] is 0)
      */
     data class Geometry(val pageSize: Int, val spareSize: Int, val order: ByteOrder, val tagOffset: Int = 0,
-                        val base: Long = 0L, val sequential: Boolean = false, val rows: Boolean = false) {
+                        val base: Long = 0L, val sequential: Boolean = false, val rows: Boolean = false,
+                        val checkpoint: Checkpoint? = null) {
         val stride get() = pageSize + spareSize
+    }
+    /**
+     * One live object of a YAFFS2 checkpoint. [header] is the device chunk number of its object header, [flags] the
+     * state bits (see the properties), [size] the file size (or the equivalent object id of a hard link) and
+     * [dataChunks] the number of data chunks the checkpoint counted, [chunkIds] / [chunkNos] the (file chunk id,
+     * device chunk number) pairs of a file's data. Chunk ids start at 1; holes of a sparse file are simply absent.
+     */
+    class CkObject(val id: Long, val parent: Long, val header: Long, val type: Int, val flags: Int,
+                   val size: Long, val dataChunks: Long, val chunkIds: IntArray, val chunkNos: IntArray) {
+        val deleted get() = flags and 1 != 0
+        val unlinked get() = flags and 4 != 0
+        /** Built-in directories (root, lost+found, unlinked, deleted): no header chunk, except the root's. */
+        val fake get() = flags and 8 != 0
+    }
+    /**
+     * A decoded checkpoint. Device chunk numbers are absolute (block * chunksPerBlock + page, counted from the first
+     * block of the NAND device, not of the dump), so [startChunk] is the chunk number of the dump's first chunk.
+     */
+    class Checkpoint(val objects: List<CkObject>, val chunkSize: Int, val chunksPerBlock: Int,
+                     val startChunk: Long, val order: ByteOrder) {
+        /** Byte position in the dump of device chunk [chunk]; negative if it lies before the dump. */
+        fun offsetOf(chunk: Long): Long = (chunk - startChunk) * chunkSize
     }
     data class Node(val id: Long, val parent: Long, val name: String, val type: Int,
                     val mode: Int, val size: Long, val alias: String, val equivalent: Long)
@@ -95,7 +124,11 @@ class Yaffs2Reader(private val src: RandomSource, private val checkCancelled: ()
 
     init {
         val g = geometry
-        val objs = if (g.sequential) indexSequential(g) else replayTagged(g)
+        val objs = when {
+            g.checkpoint != null -> indexCheckpoint(g)
+            g.sequential -> indexSequential(g)
+            else -> replayTagged(g)
+        }
 
         // ---- surviving objects
         objs[1L]?.let { if (it.hasHeader && it.type != 3) fail("root is not a directory") }
@@ -288,6 +321,58 @@ class Yaffs2Reader(private val src: RandomSource, private val checkCancelled: ()
         return objs
     }
 
+    // ------------------------------------------------------ checkpointed dumps
+    /** Builds the object table from a decoded checkpoint: object headers are read from the chunks it points to. */
+    private fun indexCheckpoint(g: Geometry): HashMap<Long, Obj> {
+        val ck = g.checkpoint!!
+        val big = g.order == ByteOrder.BIG_ENDIAN
+        val page = g.pageSize.toLong()
+        val objs = HashMap<Long, Obj>()
+        val header = ByteBuffer.allocate(512).order(g.order)
+        var order = 0L
+        var noHeader = 0
+        var lostChunks = 0
+        for (rec in ck.objects) {
+            checkCancelled()
+            if (rec.deleted || rec.unlinked || rec.fake && rec.id != 1L) continue
+            val root = rec.id == 1L
+            val at = ck.offsetOf(rec.header)
+            var h: Hdr? = null
+            if (rec.header > 0 && at >= 0 && at + 512 <= src.size) {
+                header.clear(); src.read(at, header)
+                // the root's header has no parent; everything else must be a plausible header of the recorded type and parent
+                val ok = if (root) header.getInt(0) == 3
+                else validHeader(header.array(), 0, big) && header.getInt(0) == rec.type && unsigned(header, 4) == rec.parent
+                if (ok) h = parseHeader(header)
+            }
+            if (h == null) { if (!root) noHeader++; continue }
+            val o = Obj(rec.id)
+            o.hasHeader = true
+            o.type = rec.type
+            o.parent = if (root) 1L else h.parent
+            o.name = if (root) "" else h.name
+            o.mode = h.mode
+            o.alias = if (rec.type == 2) h.alias else ""
+            o.equiv = h.equiv
+            o.size = if (rec.type == 1) h.size else 0L
+            o.order = ++order
+            if (rec.type == 1) for (k in rec.chunkIds.indices) {
+                val index = rec.chunkIds[k].toLong()
+                if (index < 1L) continue
+                val length = minOf(page, o.size - (index - 1) * page)
+                if (length <= 0L) continue
+                val offset = ck.offsetOf(rec.chunkNos[k].toLong() and 0xffffffffL)
+                if (offset < 0 || offset + length > src.size) { lostChunks++; continue }
+                o.chunks[index] = Chunk(offset, length.toInt())
+            }
+            objs[rec.id] = o
+            if (objs.size > 1_000_000) fail("too many objects")
+        }
+        if (noHeader > 0) warnings.add("$noHeader object(s) whose header chunk is not in the dump ignored")
+        if (lostChunks > 0) warnings.add("$lostChunks data chunk(s) outside the dump read as zeros")
+        return objs
+    }
+
     // ----------------------------------------------------------------- output
     fun walk(visit: (String, Node) -> Unit) {
         for (node in nodes.values.sortedBy { paths[it.id] }) {
@@ -370,6 +455,10 @@ class Yaffs2Reader(private val src: RandomSource, private val checkCancelled: ()
         private const val OBJECTID_UNLINKED = 3L
         private const val OBJECTID_DELETED = 4L
         private const val PROBE_BYTES = 16 shl 20
+        private const val CKPT_MAGIC = 0x5941ff53L
+        private const val CKPT_SCAN = 32L shl 20
+        private const val CKPT_MAX_BYTES = 24 shl 20
+        private const val CKPT_MAX_STARTS = 8
         private const val MAX_HEADER_HITS = 3000
         /** Candidates for the signature-based detector (page to spare size). */
         private val PROBE_GEOMETRIES = listOf(2048 to 64, 4096 to 128, 512 to 16, 1024 to 32, 8192 to 256,
@@ -379,6 +468,10 @@ class Yaffs2Reader(private val src: RandomSource, private val checkCancelled: ()
             4096 to 224, 4096 to 256, 8192 to 256, 512 to 16, 1024 to 32, 4096 to 64, 2048 to 16)
         private val TAG_OFFSETS = intArrayOf(0, 2, 1, 4, 8, 16, 32, 40)
         private val SEQUENTIAL_PAGES = intArrayOf(2048, 4096, 1024, 512, 8192)
+        /** Chunks per block and chunk sizes a checkpointed dump may have; tnode widths (bits per chunk number). */
+        private val CKPT_BLOCK_CHUNKS = intArrayOf(64, 32, 128, 256)
+        private val CKPT_CHUNK_SIZES = intArrayOf(2048, 4096, 1024, 512, 8192, 16384)
+        private val CKPT_WIDTHS = intArrayOf(16, 18, 20, 22, 24, 26, 28, 30)
 
         /** A name that can be created as one path component: non-empty, not . or .., no separators or control chars. */
         private fun usableName(name: String) =
@@ -413,7 +506,7 @@ class Yaffs2Reader(private val src: RandomSource, private val checkCancelled: ()
         fun probe(src: RandomSource) = detect(src) != null
 
         private fun detect(src: RandomSource): Geometry? =
-            detectRows(src) ?: detectBySignature(src) ?: detectSequential(src) ?: detectByScoring(src)
+            detectRows(src) ?: detectBySignature(src) ?: detectCheckpoint(src) ?: detectSequential(src) ?: detectByScoring(src)
 
         // ---- detector 1: header-tag signature search (yaffs2zip approach)
 
@@ -617,6 +710,204 @@ class Yaffs2Reader(private val src: RandomSource, private val checkCancelled: ()
                 }
             }
             return best
+        }
+
+        // ---- detector 2b: page-only dumps indexed from the file system's checkpoint
+
+        /** Byte order of a checkpoint validity marker at [at] (size 16, magic, version 4..8, head/tail flag), or null. */
+        private fun checkpointOrder(b: ByteArray, at: Int, head: Long): ByteOrder? {
+            if (at < 0 || at + 16 > b.size) return null
+            for (big in booleanArrayOf(false, true)) {
+                if (u32(b, at, big) == 16L && u32(b, at + 4, big) == CKPT_MAGIC &&
+                    u32(b, at + 8, big) in 4L..8L && u32(b, at + 12, big) == head)
+                    return if (big) ByteOrder.BIG_ENDIAN else ByteOrder.LITTLE_ENDIAN
+            }
+            return null
+        }
+
+        /** Positions (512-byte aligned) that start a checkpoint: looked for in the first and the last [CKPT_SCAN] bytes. */
+        private fun checkpointStarts(src: RandomSource): List<Long> {
+            val out = ArrayList<Long>()
+            val windows = ArrayList<LongArray>()
+            windows.add(longArrayOf(0L, minOf(src.size, CKPT_SCAN)))
+            if (src.size > 2 * CKPT_SCAN) windows.add(longArrayOf((src.size - CKPT_SCAN) and 511L.inv(), src.size))
+            val step = 1 shl 20
+            val bb = ByteBuffer.allocate(step)
+            for (w in windows) {
+                var pos = w[0]
+                while (pos < w[1] && out.size < CKPT_MAX_STARTS) {
+                    val n = minOf(step.toLong(), w[1] - pos).toInt()
+                    bb.clear(); bb.limit(n); src.read(pos, bb)
+                    val a = bb.array()
+                    var i = 0
+                    while (i + 16 <= n && out.size < CKPT_MAX_STARTS) {
+                        if (a[i].toInt() == 0x10 || a[i + 3].toInt() == 0x10) {
+                            if (checkpointOrder(a, i, 1L) != null) out.add(pos + i)
+                        }
+                        i += 512
+                    }
+                    pos += step
+                }
+            }
+            return out
+        }
+
+        /** Word [index] of a packed tnode: [width] bits per entry, little-endian bit stream of 32-bit words. */
+        private fun tnodeEntry(b: ByteArray, at: Int, index: Int, width: Int, big: Boolean): Long {
+            val bit = index * width
+            val word = bit ushr 5
+            val shift = bit and 31
+            var v = u32(b, at + 4 * word, big) ushr shift
+            if (width > 32 - shift) v = v or (u32(b, at + 4 * (word + 1), big) shl (32 - shift))
+            return v and ((1L shl width) - 1)
+        }
+
+        private class CkParse(val objects: List<CkObject>, val width: Int)
+
+        /**
+         * Decodes the object section of a checkpoint that starts at [first] in [b]: object records of [rs] bytes (28, or 32
+         * when the file size is 64 bit), each followed, for files, by its level-0 tnodes (base chunk id, then 16 entries of
+         * [width] bits), the whole list ended by a record with object id ~0, a closing validity marker and a checksum.
+         * Null if anything does not fit, so a wrong guess of the geometry is detected by the structure alone.
+         */
+        private fun parseCheckpointObjects(b: ByteArray, first: Int, rs: Int, big: Boolean, width: Int): CkParse? {
+            val sizeBytes = rs - 24
+            val tsize = maxOf(width * 2, 32)
+            val out = ArrayList<CkObject>()
+            var p = first
+            while (true) {
+                if (p + rs > b.size) return null
+                val st = u32(b, p, big)
+                val id = u32(b, p + 4, big)
+                if (st != rs.toLong()) return null
+                if (id == 0xffffffffL) { p += rs; break }
+                if (id == 0L || id > 0x0fffffffL) return null
+                val parent = u32(b, p + 8, big)
+                val header = u32(b, p + 12, big)
+                val bits = u32(b, p + 16, big).toInt()
+                val dataChunks = u32(b, p + 20, big)
+                val size = if (sizeBytes == 8) {
+                    val a = u32(b, p + 24, big); val c = u32(b, p + 28, big)
+                    if (big) (a shl 32) or c else (c shl 32) or a
+                } else u32(b, p + 24, big)
+                val type = bits and 7
+                if (parent > 0x0fffffffL || type !in 1..5) return null
+                p += rs
+                var ids = IntArray(0)
+                var nos = IntArray(0)
+                if (type == 1) {
+                    var n = 0
+                    ids = IntArray(16); nos = IntArray(16)
+                    while (true) {
+                        if (p + 4 > b.size) return null
+                        val base = u32(b, p, big)
+                        p += 4
+                        if (base == 0xffffffffL) break
+                        if (base > 0x0fffffffL || p + tsize > b.size) return null
+                        for (i in 0 until 16) {
+                            val v = tnodeEntry(b, p, i, width, big)
+                            if (v == 0L) continue
+                            if (n == ids.size) { ids = ids.copyOf(n * 2); nos = nos.copyOf(n * 2) }
+                            ids[n] = (base + i).toInt(); nos[n] = v.toInt(); n++
+                        }
+                        p += tsize
+                    }
+                    ids = ids.copyOf(n); nos = nos.copyOf(n)
+                }
+                if (out.size >= 1_000_000) return null
+                out.add(CkObject(id, parent, header, type, (bits ushr 3) and 0x1f, size, dataChunks, ids, nos))
+            }
+            // closing validity marker (head flag 0), then the checksum word
+            if (checkpointOrder(b, p, 0L) == null || p + 20 > b.size) return null
+            return CkParse(out, width)
+        }
+
+        /** True if the 512 bytes at [at] are the object header [rec] points to (same type and parent, printable name). */
+        private fun checkpointHeaderAt(src: RandomSource, at: Long, rec: CkObject, buf: ByteBuffer, big: Boolean): Boolean {
+            if (at < 0 || at + 512 > src.size) return false
+            buf.clear(); src.read(at, buf)
+            val a = buf.array()
+            return validHeader(a, 0, big) && u32(a, 0, big) == rec.type.toLong() && u32(a, 4, big) == rec.parent
+        }
+
+        /**
+         * Finds chunk size and start chunk of a decoded checkpoint of [blocks] blocks. The chunk size is the one under which the files' data
+         * chunk counts match their sizes (a sparse file has fewer chunks than its size says, so not all of them need to); the start chunk is the one under which the recorded header chunks really
+         * hold object headers of the recorded type and parent (the dump usually starts a block or more into the device).
+         */
+        private fun checkpointGeometry(src: RandomSource, parse: CkParse, ppb: Int, blocks: Int, order: ByteOrder): Checkpoint? {
+            val big = order == ByteOrder.BIG_ENDIAN
+            val live = parse.objects.filter { !it.deleted && !it.unlinked && !it.fake && it.header > 0 }
+            if (live.isEmpty()) return null
+            val files = live.filter { it.type == 1 && it.dataChunks > 0 && it.size > 0 }
+            val sample = ArrayList<CkObject>()
+            val spread = minOf(live.size, 24)
+            for (i in 0 until spread) sample.add(live[(i.toLong() * live.size / spread).toInt()])
+            val buf = ByteBuffer.allocate(512)
+            val ranked = CKPT_CHUNK_SIZES.map { cs ->
+                val hit = files.count { (it.size + cs - 1) / cs == it.dataChunks }
+                cs to (if (files.isEmpty()) 1.0 else hit.toDouble() / files.size)
+            }.filter { it.second >= 0.5 }.sortedByDescending { it.second }
+            for ((cs, _) in ranked) {
+                val head = sample[0]
+                val perBlock = cs.toLong() * ppb
+                // a dump is a faithful copy of the device's blocks: the checkpoint cannot describe more blocks than the dump has.
+                // This also rejects a "parse" that starts in the middle of a damaged object list and so lacks its first objects.
+                if (blocks > src.size / perBlock + 1) continue
+                // the first sample has to lie inside the dump: 0 <= (header - s*ppb) * cs <= size - 512
+                val sHigh = head.header / ppb
+                val sLow = maxOf(-256L, Math.floorDiv(head.header * cs - src.size + 512 + perBlock - 1, perBlock))
+                var s = sLow
+                while (s <= sHigh) {
+                    val start = s * ppb
+                    if (checkpointHeaderAt(src, (head.header - start) * cs, head, buf, big)) {
+                        val good = sample.count { checkpointHeaderAt(src, (it.header - start) * cs, it, buf, big) }
+                        if (good * 10 >= sample.size * 9) return Checkpoint(parse.objects, cs, ppb, start, order)
+                    }
+                    s++
+                }
+            }
+            return null
+        }
+
+        /** Decodes the checkpoint at [at]: its geometry is not stored, so block count and chunks per block are searched. */
+        private fun parseCheckpoint(src: RandomSource, at: Long): Checkpoint? {
+            val len = minOf(src.size - at, CKPT_MAX_BYTES.toLong()).toInt()
+            if (len < 256) return null
+            val bb = ByteBuffer.allocate(len)
+            src.read(at, bb)
+            val b = bb.array()
+            val order = checkpointOrder(b, 0, 1L) ?: return null
+            val big = order == ByteOrder.BIG_ENDIAN
+            if (u32(b, 16, big) != 36L) return null
+            val start = 16 + 36
+            // validity marker, device record, then n blocks of (8-byte block info + chunk bit map); the object records follow
+            for (ppb in CKPT_BLOCK_CHUNKS) {
+                val per = 8 + (ppb + 31) / 32 * 4
+                var n = 1
+                while (start.toLong() + n.toLong() * per + 32 <= len) {
+                    val first = start + n * per
+                    val rs = u32(b, first, big)
+                    if ((rs == 28L || rs == 32L) && u32(b, first + 4, big).let { it in 1L..0x0fffffffL } &&
+                        (u32(b, first + 16, big).toInt() and 7) in 1..5) {
+                        for (width in CKPT_WIDTHS) {
+                            val parse = parseCheckpointObjects(b, first, rs.toInt(), big, width) ?: continue
+                            checkpointGeometry(src, parse, ppb, n, order)?.let { return it }
+                        }
+                    }
+                    n++
+                }
+            }
+            return null
+        }
+
+        private fun detectCheckpoint(src: RandomSource): Geometry? {
+            if (src.size < 4096) return null
+            for (at in checkpointStarts(src)) {
+                val ck = parseCheckpoint(src, at) ?: continue
+                return Geometry(ck.chunkSize, 0, ck.order, 0, 0L, false, false, ck)
+            }
+            return null
         }
 
         // ---- detector 3 / indexer: spare-less sequential images

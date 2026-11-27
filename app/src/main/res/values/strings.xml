@@ -164,6 +164,8 @@
     <string name="vs_kernel_preview">Result:</string>
     <string name="vs_baseband">Baseband version</string>
     <string name="vs_baseband_sub">Reported as gsm.version.baseband and by the modem. Applied on next boot. Blank = default</string>
+    <string name="vs_boot_props">Extra boot properties</string>
+    <string name="vs_boot_props_sub">One key=value per line, given to the guest at boot like a phone’s boot loader does (MIUI picks its name, region, wallpapers and preinstalled apps by them). Copy them from the real phone with getprop, e.g. ro.boot.hwc, ro.boot.hwversion and ro.boot.product.hardware.sku. Applied on next boot.</string>
     <string name="vs_serial_sub">Reported as ro.serialno and ro.boot.serialno (letters and digits, up to 32). Applied on next boot. Blank = default</string>
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
@@ -178,6 +180,25 @@
     <string name="vs_wifi_password">Password</string>
     <string name="vs_wifi_password_sub">Leave empty for an open network. WPA2 needs 8–63 characters.</string>
     <string name="vs_wifi_password_error">Use 8–63 characters, or leave empty for an open network</string>
+    <string name="vs_wifi_network_n">Network %1$d</string>
+    <string name="vs_wifi_extra_dup">This name is already used by another network</string>
+    <string name="vs_wifi_extra_remove">Remove</string>
+    <string name="vs_wifi_count">Number of networks</string>
+    <string name="vs_wifi_count_sub">+ adds a network at the end, − removes the last one</string>
+    <string name="vs_wifi_security">Security</string>
+    <string name="vs_wifi_sec_none">None (open)</string>
+    <string name="vs_wifi_sec_wpa2">WPA2 Personal</string>
+    <string name="vs_wifi_sec_wpa">WPA/WPA2 Personal</string>
+    <string name="vs_wifi_sec_wpa3">WPA3 Personal</string>
+    <string name="vs_wifi_secure_sub">8–63 characters</string>
+    <string name="vs_wifi_password_need">Use 8–63 characters</string>
+    <string name="vs_wifi_auto">Connect automatically</string>
+    <string name="vs_wifi_auto_sub">Joins the first network at boot. Off: the VM starts without Wi-Fi (no internet) until you join one in its own Settings. Changes to the networks apply while the VM runs.</string>
+    <string name="vs_wifi_speed">Speed limit</string>
+    <string name="vs_wifi_speed_hint">e.g. 50</string>
+    <string name="vs_wifi_speed_none">No limit</string>
+    <string name="vs_wifi_speed_set">Link speed %1$s</string>
+    <string name="vs_wifi_speed_error">Type a number (up to 2000 Gbps)</string>
     <string name="vs_wifi_show">Show</string>
     <string name="vs_wifi_hide">Hide</string>
     <string name="vs_hardware">ro.hardware</string>
@@ -220,13 +241,16 @@
     <string name="vs_recovery_install">Install…</string>
     <string name="vs_recovery_failed">Not a recovery image</string>
     <string name="vs_ota">OTA</string>
-    <string name="vs_ota_install">Install delta OTA image on top of this system image</string>
-    <string name="vs_ota_sub">An incremental update zip. Its metadata is checked against this system’s build.prop before anything is changed.</string>
+    <string name="vs_ota_install">Install an OTA update (full or delta) on this system image</string>
+    <string name="vs_ota_sub">A full or an incremental update zip. Its metadata is checked against this system’s build.prop before anything is changed. A full OTA replaces /system; apps and data are kept.</string>
     <string name="vs_ota_button">Install…</string>
     <string name="vs_ota_checking">Checking the OTA…</string>
     <string name="vs_ota_confirm_title">Install this OTA?</string>
     <string name="vs_ota_confirm">This system:\n%1$s\n\nwill be updated to:\n%2$s\n\nThe VM’s /system and boot ramdisk are patched and its dalvik cache is cleared; apps and data are kept. If anything does not match, nothing is changed.</string>
     <string name="vs_ota_partial">Warning: this system has only a build thumbprint, not a full fingerprint. Only the Android version, build ID, incremental, build type and signing keys were compared; manufacturer, product and model could not be verified. Continue anyway?</string>
+    <string name="vs_ota_needs_base">This is an A/B update (payload.bin). To rebuild the old %1$s image the app needs the full firmware this VM was imported from (its OTA zip or payload.bin). It is only read, and needs free space while the update runs.</string>
+    <string name="vs_ota_pick_base">Choose the base firmware…</string>
+    <string name="vs_ota_base_chosen">Base firmware chosen (tap to change)</string>
     <string name="vs_ota_confirm_ok">Install</string>
     <string name="vs_ota_working">Installing the OTA… %1$s</string>
     <string name="vs_ota_done">Updated to %1$s (%2$d files patched, %3$d added, %4$d removed).</string>
@@ -292,10 +316,19 @@
     <string name="vs_sim_number_sub">Shown in Settings › About phone › Status</string>
     <string name="vs_dual_sim">Dual SIM</string>
     <string name="vs_dual_sim_sub">A second fake SIM. Only works on firmware which supports two SIMs (many Samsung and MediaTek ones). Applies at the next boot.</string>
+    <string name="vs_wifi_band">Frequency band</string>
+    <string name="vs_wifi_band_24">2.4 GHz</string>
+    <string name="vs_wifi_band_5">5 GHz</string>
+    <string name="vs_wifi_band_dual">2.4 + 5 GHz</string>
+    <string name="vs_wifi_band_6">6 GHz</string>
+    <string name="vs_wifi_standard">Wi-Fi standard</string>
+    <string name="vs_wifi_std_auto">Automatic</string>
+    <string name="vs_wifi_std_n">Wi-Fi 4 (802.11n)</string>
+    <string name="vs_wifi_std_ac">Wi-Fi 5 (802.11ac)</string>
+    <string name="vs_wifi_std_ax">Wi-Fi 6 (802.11ax)</string>
+    <string name="vs_wifi_std_be">Wi-Fi 7 (802.11be)</string>
     <string name="vs_wifi_signal">Signal strength</string>
     <string name="vs_wifi_signal_sub">Bars the Wi-Fi icon shows</string>
-    <string name="vs_wifi_neighbors">Nearby networks</string>
-    <string name="vs_wifi_neighbors_sub">Shows a few other networks in the WiFi network list. (locked, they cannot be joined)</string>
     <string name="camera_permission_denied">Camera permission denied. The ROM will boot without host-camera access; grant permission in Android app settings and fully restart the VM to retry.</string>
     <string name="vs_skip_setup">Skip setup wizard</string>
     <string name="vs_skip_setup_sub">Mark setup complete and disable recognized setup apps on next full boot. Turning off does not reset completed setup. OEM support may vary.</string>
@@ -442,6 +475,14 @@
     <string name="th_note">Themes change only the app around the VM; the firmware is never modified. Changes apply when a VM screen is opened again.</string>
     <string name="th_group_plain">Plain themes</string>
     <string name="th_group_skins">Device skin themes (by @regectt)</string>
+    <string name="ota_auto_title">System update</string>
+    <string name="ota_auto_preparing">Checking the update package…</string>
+    <string name="ota_auto_working">Installing the update… %1$s</string>
+    <string name="ota_auto_failed_title">The update could not be installed</string>
+    <string name="ota_auto_failed">%1$s\n\nThe system was left as it was.</string>
+    <string name="ota_auto_boot">Start system</string>
+    <string name="ota_auto_recovery">Open recovery</string>
+    <string name="th_brand_other">Other brands</string>
     <string name="th_group_custom">Custom themes</string>
     <string name="th_custom_empty">No custom themes yet. Tap “New theme” to make one, or import an .aetheme file. Plain themes and device skins can’t be changed: duplicate one to edit it.</string>
     <string name="th_expand">Expand list</string>
@@ -477,6 +518,18 @@
     <string name="th_corner_note">With the GPU bridge on, some phones do not round the corners of the guest screen.</string>
     <string name="sk_pick_resolution">Pick resolution</string>
     <string name="sk_any">Any</string>
+    <string name="sk_dpi">Density (dpi)</string>
+    <string name="sk_dpi_sub">Empty = automatic: the real phone this skin is named after, else an estimate from the size.</string>
+    <string name="sk_dpi_auto">Empty = automatic (%1$d dpi for this size).</string>
+    <string name="sk_cutout">Camera cutout</string>
+    <string name="sk_cutout_none">None</string>
+    <string name="sk_cutout_notch">Notch (iPhone X)</string>
+    <string name="sk_cutout_punch_center">Punch hole, centre (Galaxy S20)</string>
+    <string name="sk_cutout_punch_left">Punch hole, left (Galaxy S10)</string>
+    <string name="sk_cutout_drop">Drop notch</string>
+    <string name="sk_overlay_pick">Overlay picture…</string>
+    <string name="sk_overlay_remove">Remove overlay</string>
+    <string name="sk_overlay_note">A PNG with transparent areas, stretched over the guest screen of this skin and drawn after the cutout. Only a drawing: the guest still sees the whole screen.</string>
     <string name="sk_resolution_sub">The screen size the phone in the picture had. The screen area keeps this shape while you resize it.</string>
     <string name="sk_width">Width</string>
     <string name="sk_height">Height</string>
@@ -524,6 +577,7 @@
     <string name="nav_dpad">Trackball</string>
     <string name="nav_show">Show the Android button bar</string>
     <string name="nav_hide">Hide the Android button bar</string>
+    <string name="nav_dock">Dock the floating button bar</string>
     <string name="m_reset_menu_pos">Reset menu button</string>
     <string name="as_led">Notification light</string>
     <string name="as_led_sub">Show the guest phone’s LED above its screen</string>

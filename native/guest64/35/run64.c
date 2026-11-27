@@ -38,6 +38,7 @@ enum {
     NR_sched_yield = 124, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_reboot = 142,
     NR_setregid = 143, NR_setgid = 144, NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148,
     NR_setresgid = 149, NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159,
+    NR_seccomp = 277,
     NR_prctl = 167, NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
     NR_socket = 198, NR_socketpair = 199, NR_bind = 200, NR_listen = 201, NR_connect = 203, NR_getsockname = 204, NR_sendto = 206, NR_setsockopt = 208, NR_getsockopt = 209,
     NR_shutdown = 210, NR_sendmsg = 211, NR_recvmsg = 212, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
@@ -1009,6 +1010,8 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     if (g_pad[0]) { memcpy(e_pad, "AEMU64_PAD=", 11); memcpy(e_pad + 11, g_pad, slen(g_pad) + 1); *a++ = e_pad; }
     if (g_kbd[0]) { memcpy(e_kbd, "AEMU64_KBD=", 11); memcpy(e_kbd + 11, g_kbd, slen(g_kbd) + 1); *a++ = e_kbd; }
     if (g_spen[0]) { memcpy(e_spen, "AEMU64_SPEN=", 12); memcpy(e_spen + 12, g_spen, slen(g_spen) + 1); *a++ = e_spen; }
+    static char e_bproto[32];
+    if (g_bproto > 0 && g_bproto < 100) { memcpy(e_bproto, "AEMU64_BINDER_PROTOCOL=", 23); char tb[24], *ts = utoa((u64)g_bproto, tb + sizeof tb); memcpy(e_bproto + 23, ts, slen(ts) + 1); *a++ = e_bproto; }
     static char e_nd[32], e_ns[32];
     if (nh_port) { memcpy(e_nd, "AEMU64_NETDBG=", 14); char t2[24], *s2 = utoa((u64)nh_port, t2 + sizeof t2); memcpy(e_nd + 14, s2, slen(s2) + 1); *a++ = e_nd; }
     if (nh_dns) { memcpy(e_ns, "AEMU64_NETDNS=", 14); char t2[24], *s2 = utoa((u64)nh_dns, t2 + sizeof t2); memcpy(e_ns + 14, s2, slen(s2) + 1); *a++ = e_ns; }
@@ -1788,6 +1791,7 @@ static long trap2_base(long nr, long *a, void *uc, char **pbp) {
         return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     case NR_mount: case NR_umount2: case NR_chroot: case NR_capset: case NR_setgroups: case NR_unshare: case 268 /* setns */: return 0;
     case NR_prctl: return 0;                    // only PR_CAPBSET_DROP gets here
+    case NR_seccomp: if ((u32)a[0] <= 1) return 0; return S3(nr, a[0], a[1], a[2]);
     case 107: {                                 // timer_create: the *_ALARM clocks need CAP_WAKE_ALARM (the Bluetooth
         long clk = a[0] == 8 ? 0 : a[0] == 9 ? 7 : a[0];   // stack of 10 stops on a refusal); the plain ones tick the same
         return S3(nr, clk, a[1], a[2]);
@@ -2258,6 +2262,7 @@ static void install_filter(void) {
     f[n++] = JEQ(73 /* ppoll */, L_TRAP, 0);
     f[n++] = JEQ(NR_rt_sigprocmask, L_SIG, 0);
     f[n++] = JEQ(NR_prctl, L_PRCTL, 0);
+    f[n++] = JEQ(NR_seccomp, L_TRAP, 0);
     f[n++] = JEQ(233 /* madvise */, L_MADV, 0);
     f[n++] = JEQ(NR_mmap, L_MMAP, g_trace == 2 ? L_ALL : L_ALLOW);
     // (trace-all: everything else traps too, but for the calls that cannot be made again from the handler - a new
@@ -2377,6 +2382,7 @@ void aemu_main(u64 *sp) {
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_QEMU64")) && slen(r) < sizeof g_qemu64) memcpy(g_qemu64, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_BINDER")) && slen(r) < sizeof g_bsock) memcpy(g_bsock, r, slen(r) + 1);
+    if ((r = env_get(envp, "AEMU64_BINDER_PROTOCOL"))) g_bproto = (int)atou(r);
     if ((r = env_get(envp, "AEMU64_HWBINDER")) && slen(r) < sizeof g_hwbsock) memcpy(g_hwbsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_VNDBINDER")) && slen(r) < sizeof g_vndbsock) memcpy(g_vndbsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_ID"))) { g_uid = (int)atou(r); while (*r && *r != ',') r++; if (*r) g_gid = (int)atou(r + 1); }

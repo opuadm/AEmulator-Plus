@@ -57,10 +57,11 @@ import androidx.compose.material3.Icon
 /**
  * One key of the VM's navigation bar, drawn in the [theme]'s glyph set (the app's own Material and Sunset looks, or
  * Gingerbread 2.x, Honeycomb 3.x, Holo 4.x, Lollipop 5.x) with its colours, size and press feedback.
+ * [compact] scales the key and its glyph (the floating mini bar draws them at 40/48).
  */
 @Composable
 internal fun HoloNavButton(button: NavButton, label: String, onClick: () -> Unit, onDown: () -> Unit, onUp: () -> Unit,
-                           iconRotation: Float = 0f, theme: VmTheme = VmThemes.BUILT_IN[1]) {
+                           iconRotation: Float = 0f, theme: VmTheme = VmThemes.BUILT_IN[1], compact: Float = 1f) {
     val hostView = androidx.compose.ui.platform.LocalView.current
     val down by rememberUpdatedState(onDown)
     val up by rememberUpdatedState(onUp)
@@ -73,7 +74,7 @@ internal fun HoloNavButton(button: NavButton, label: String, onClick: () -> Unit
         theme.pressGlow -> Modifier.background(Brush.radialGradient(listOf(press, press.copy(alpha = press.alpha * 0.28f), Color.Transparent)), CircleShape)
         else -> Modifier.background(press, RoundedCornerShape(8.dp))
     }
-    val keySize = 48.dp * theme.iconScale
+    val keySize = 48.dp * theme.iconScale * compact
     Box(Modifier.size(keySize).then(pressBackground).semantics {
         contentDescription = label
         role = Role.Button
@@ -116,9 +117,9 @@ internal fun HoloNavButton(button: NavButton, label: String, onClick: () -> Unit
             NavButton.LEFT -> Icons.Rounded.KeyboardArrowLeft
             NavButton.RIGHT -> Icons.Rounded.KeyboardArrowRight
             NavButton.CENTER -> Icons.Rounded.RadioButtonChecked
-        }, null, Modifier.size(24.dp * theme.iconScale).graphicsLayer { rotationZ = iconRotation },
+        }, null, Modifier.size(24.dp * theme.iconScale * compact).graphicsLayer { rotationZ = iconRotation },
             tint = theme.iconColor?.let { Color(it) } ?: androidx.compose.material3.LocalContentColor.current)
-        else Canvas(Modifier.size(30.dp * theme.iconScale).graphicsLayer { rotationZ = iconRotation }) {
+        else Canvas(Modifier.size(30.dp * theme.iconScale * compact).graphicsLayer { rotationZ = iconRotation }) {
             NavGlyphs.draw(this, button, theme, pressed)
         }
     }

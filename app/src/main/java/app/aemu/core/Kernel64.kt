@@ -253,7 +253,7 @@ enum class Kernel64(
         // ART at run time.
         props = mapOf("pm.dexopt.first-boot" to "verify-at-runtime", "pm.dexopt.boot" to "verify-at-runtime")),
     // Android 8.0: starts as kernel 27
-    A8_0("26", 26..26, gpuBridge64 = true, bridgeAsEmulation = true, emulationDir = "system/lib64/egl", navBarRequired = true, audioPolicyXml = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
+    A8_0("26", 26..26, gpuBridge64 = true, qcomHandles = true, bridgeAsEmulation = true, emulationDir = "system/lib64/egl", navBarRequired = true, audioPolicyXml = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
         absentFeatures = listOf("consumerir", "fingerprint", "nfc", "nfc.hce", "nfc.hcef"), trafficAccounting = true, noQemuPipe = true,
         // 8.0's Skia pipeline of hwui is experimental and stops system_server with "GL errors!" (SkiaOpenGLPipeline):
         // 8.0 draws with its OpenGL pipeline

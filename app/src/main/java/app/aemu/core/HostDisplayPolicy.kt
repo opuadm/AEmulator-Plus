@@ -9,6 +9,9 @@ internal object HostDisplayPolicy {
     fun controlIconRotation(tablet: Boolean, rotateNavbar: Boolean, physicalTurns: Int, windowTurns: Int) =
         if (tablet) if (rotateNavbar) 0f else -Math.floorMod(windowTurns, 4) * 90f
         else iconRotation(physicalTurns, windowTurns)
+    /** The floating button bar is laid out in the window's own frame: a tablet's window already turns with the device. */
+    fun floatingIconRotation(tablet: Boolean, physicalTurns: Int, windowTurns: Int) =
+        if (tablet) 0f else iconRotation(physicalTurns, windowTurns)
     fun iconRotation(physicalTurns: Int, windowTurns: Int): Float =
         -Math.floorMod(physicalTurns - windowTurns, 4) * 90f
     fun iconTurns(angle: Int, previous: Int): Int {

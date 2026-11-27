@@ -31,7 +31,17 @@ object StorageSpoof {
 
     fun sanitizeGb(gb: Int): Int = if (gb in PRESETS_GB) gb else 0
 
-    fun bytes(gb: Int): Long = sanitizeGb(gb).toLong() * 1024L * 1024L * 1024L
+    /**
+     * What the guest's statfs reports as the size of its data disk. Android names a disk by rounding its size UP to the next
+     * decimal "marketing" size (StorageManager.roundStorageSize: 1, 2, 4 ... 256, 512 x 10^n bytes), so a disk of exactly
+     * 256 GiB (274.9 x 10^9 bytes) is over 256 x 10^9 and Settings called it 512 GB. A real 256 GB phone's data partition holds
+     * about 93% of the marketing size (the rest is system partitions and flash overhead), which also leaves room for the
+     * system partitions that Settings adds to it, so the figure here is 93% of gb x 10^9.
+     */
+    fun bytes(gb: Int): Long = rawBytes(gb) / 100L * 93L
+
+    /** The raw size of the flash chip (sysfs: /sys/block/.../size), the marketing size itself (1024 GB is the 1 TB chip: 10^12 bytes). */
+    fun rawBytes(gb: Int): Long = sanitizeGb(gb).let { if (it >= 1024) it / 1024L * 1_000_000_000_000L else it * 1_000_000_000L }
 
     fun text(gb: Int): String = if (gb >= 1024 && gb % 1024 == 0) "${gb / 1024} TB" else "$gb GB"
 
@@ -50,7 +60,7 @@ object StorageSpoof {
     /** The sysfs files of the disk the guest sees: path under the tree root -> text. */
     fun sysfs(type: StorageType?, gb: Int): Map<String, String> {
         if (type == null) return emptyMap()
-        val bytes = if (gb > 0) bytes(gb) else 0L
+        val bytes = if (gb > 0) rawBytes(gb) else 0L
         val sectors = (bytes / 512L).toString()
         val m = linkedMapOf<String, String>()
         if (type.ufs) {

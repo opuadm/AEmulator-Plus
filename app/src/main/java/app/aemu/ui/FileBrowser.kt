@@ -47,6 +47,7 @@ import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SdCard
 import androidx.compose.material.icons.rounded.Usb
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,6 +55,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -93,6 +95,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.aemu.AppPrefs
 import app.aemu.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.DateFormat
@@ -262,6 +267,40 @@ private fun readDir(dir: File): Listing {
     })
 }
 
+private const val SEARCH_LIMIT = 2000
+
+private class SearchResult(val entries: List<Entry>, val done: Boolean, val truncated: Boolean)
+
+/**
+ * Added for AEmulator Plus: every file and folder under [root] whose name contains [needle]. Results are handed over in batches while
+ * the walk goes on ([publish]: list so far, finished, cut off at [SEARCH_LIMIT]). Links to folders are not followed (no loops), hidden
+ * names are skipped unless [showHidden], and an unreadable folder is passed over. Stops at once when the calling coroutine is cancelled.
+ */
+private suspend fun searchTree(root: File, needle: String, showHidden: Boolean, publish: (List<Entry>, Boolean, Boolean) -> Unit) {
+    val hits = ArrayList<Entry>()
+    val todo = ArrayDeque<File>()
+    todo.add(root)
+    var lastPublish = System.currentTimeMillis()
+    var cut = false
+    walk@ while (todo.isNotEmpty()) {
+        currentCoroutineContext().ensureActive()
+        val dir = todo.removeFirst()
+        val kids = dir.listFiles() ?: continue
+        for (f in kids) {
+            if (!showHidden && f.name.startsWith(".")) continue
+            val isDir = f.isDirectory
+            if (f.name.contains(needle, ignoreCase = true)) {
+                hits.add(Entry(f, isDir, if (isDir) 0L else f.length(), f.lastModified()))
+                if (hits.size >= SEARCH_LIMIT) { cut = true; break@walk }
+            }
+            if (isDir && !java.nio.file.Files.isSymbolicLink(f.toPath())) todo.add(f)
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastPublish > 300) { lastPublish = now; publish(ArrayList(hits), false, false) }
+    }
+    publish(hits, true, cut)
+}
+
 /** Where the browser opens: where it was last, else Download, else the list of storages (null). */
 private fun startDir(ctx: Context): File? {
     fun ok(f: File?) = f != null && f.isDirectory && f.canRead()
@@ -278,6 +317,8 @@ private fun startDir(ctx: Context): File? {
  * Full-screen file browser on plain file access. A tap on a file picks it at once. With [multiple], press and hold starts
  * a selection (also across folders): further taps tick files and the button at the bottom hands them over. Files are returned as file: URIs.
  * [onSystemPicker]: the way out to the system's document picker (cloud providers, and no-access situations).
+ * [saveName] non-null: save mode (Modified for AEmulator Plus). Pick a folder, type or tap a file name and press Save; the one file
+ * returned is a file: URI of a file that does not exist yet or that the person agreed to replace.
  */
 @Composable
 internal fun FileBrowserDialog(
@@ -285,7 +326,11 @@ internal fun FileBrowserDialog(
     onDismiss: () -> Unit,
     onPicked: (List<Uri>) -> Unit,
     onSystemPicker: () -> Unit,
+    saveName: String? = null,
 ) {
+    val saving = saveName != null
+    var fileName by remember { mutableStateOf(saveName.orEmpty()) }
+    var replacing by remember { mutableStateOf<File?>(null) }
     val ctx = LocalContext.current
     var granted by remember { mutableStateOf(FileAccess.granted(ctx)) }
     val life = LocalLifecycleOwner.current
@@ -307,7 +352,7 @@ internal fun FileBrowserDialog(
         placesLoaded = true
         if (first) { started = true; current = start }
     }
-    // search: filters the names in the open folder; it is cleared when another folder is opened
+    // search: finds names in the open folder and every folder below it; it is cleared when another folder is opened
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     fun go(dir: File?) { current = dir; AppPrefs.setBrowserDir(ctx, dir?.path); searching = false; query = "" }
@@ -347,7 +392,7 @@ internal fun FileBrowserDialog(
                     Column(Modifier.weight(1f)) {
                         Text(
                             dir?.let { d -> places.firstOrNull { it.dir == d }?.label ?: d.name.ifEmpty { d.path } }
-                                ?: stringResource(if (multiple) R.string.fb_title_multi else R.string.fb_title_single),
+                                ?: stringResource(if (saving) R.string.fb_title_save else if (multiple) R.string.fb_title_multi else R.string.fb_title_single),
                             style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (dir != null) Text(dir.path, style = MaterialTheme.typography.bodySmall, maxLines = 1,
                             overflow = TextOverflow.StartEllipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -404,11 +449,49 @@ internal fun FileBrowserDialog(
                         else FolderList(dir, multiple, sortKey, asc, hidden, query, selected,
                             onOpen = { go(it) },
                             // like a file manager: a tap imports at once, unless files are being selected; press and hold starts selecting
+                            // (save mode: a tap on a file takes its name, to be replaced)
                             onFile = { e ->
-                                if (multiple && selected.isNotEmpty()) toggle(e)
+                                if (saving) fileName = e.name
+                                else if (multiple && selected.isNotEmpty()) toggle(e)
                                 else onPicked(listOf(Uri.fromFile(e.file)))
                             },
-                            onHold = { e -> if (multiple) toggle(e) })
+                            onHold = { e -> if (multiple && !saving) toggle(e) })
+                    }
+
+                    if (saving && dir != null) {
+                        HorizontalDivider()
+                        val name = fileName.trim()
+                        val valid = name.isNotEmpty() && !name.contains('/') && name != "." && name != ".."
+                        fun save() {
+                            if (!valid) return
+                            if (!dir.canWrite()) {
+                                android.widget.Toast.makeText(ctx, R.string.fb_not_writable, android.widget.Toast.LENGTH_LONG).show()
+                                return
+                            }
+                            val target = File(dir, name)
+                            if (target.isDirectory) return
+                            if (target.exists()) replacing = target else onPicked(listOf(Uri.fromFile(target)))
+                        }
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = fileName, onValueChange = { fileName = it },
+                                modifier = Modifier.weight(1f), singleLine = true,
+                                label = { Text(stringResource(R.string.fb_file_name)) },
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(onDone = { save() }),
+                            )
+                            Button(enabled = valid, onClick = { save() }) { Text(stringResource(R.string.save)) }
+                        }
+                    }
+                    replacing?.let { f ->
+                        AlertDialog(
+                            onDismissRequest = { replacing = null },
+                            title = { Text(stringResource(R.string.fb_replace_title)) },
+                            text = { Text(stringResource(R.string.fb_replace_text, f.name)) },
+                            dismissButton = { TextButton(onClick = { replacing = null }) { Text(stringResource(R.string.cancel)) } },
+                            confirmButton = { TextButton(onClick = { replacing = null; onPicked(listOf(Uri.fromFile(f))) }) { Text(stringResource(R.string.fb_replace)) } },
+                        )
                     }
 
                     if (multiple && selected.isNotEmpty()) {
@@ -465,21 +548,64 @@ private fun FolderList(
         value = withContext(Dispatchers.IO) { readDir(dir) }
     }
     val state = rememberLazyListState()
-    LaunchedEffect(dir) { state.scrollToItem(0) }
+    val needle = query.trim()
+    LaunchedEffect(dir, needle) { state.scrollToItem(0) }
     val date = remember { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT) }
+
+    // Modified for AEmulator Plus: a search looks through every folder below the open one, not just the open folder
+    if (needle.isNotEmpty()) {
+        val found by produceState(SearchResult(emptyList(), false, false), dir, needle, showHidden) {
+            value = SearchResult(emptyList(), false, false)
+            delay(250)    // typing: wait for a pause before walking the tree
+            withContext(Dispatchers.IO) { searchTree(dir, needle, showHidden) { list, done, cut -> value = SearchResult(list, done, cut) } }
+        }
+        val shown = remember(found, key, asc) { found.entries.sortedWith(entryComparator(key, asc)) }
+        Column(Modifier.fillMaxSize()) {
+            if (!found.done) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (shown.isEmpty()) {
+                if (found.done) Centered { Message(stringResource(R.string.fb_no_matches)) } else Box(Modifier.weight(1f))
+            } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = state) {
+                items(shown, key = { it.path }) { e ->
+                    val checked = !e.isDir && selected.any { it.path == e.path }
+                    ListItem(
+                        modifier = Modifier.combinedClickable(
+                            onClick = { if (e.isDir) onOpen(e.file) else onFile(e) },
+                            onLongClick = if (e.isDir) null else ({ haptic.performHapticFeedback(HapticFeedbackType.LongPress); onHold(e) }),
+                        ),
+                        leadingContent = { Icon(if (e.isDir) Icons.Rounded.Folder else Icons.Rounded.Description, null) },
+                        headlineContent = { Text(e.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = {
+                            // where the hit sits, relative to the folder the search started in
+                            val where = e.file.parentFile?.let { runCatching { it.relativeTo(dir).path }.getOrDefault(it.path) }.orEmpty()
+                            val when_ = date.format(Date(e.modified))
+                            Column {
+                                if (where.isNotEmpty()) Text(where, maxLines = 1, overflow = TextOverflow.StartEllipsis, style = MaterialTheme.typography.bodySmall)
+                                Text(if (e.isDir) when_ else Formatter.formatFileSize(ctx, e.size) + "  ·  " + when_)
+                            }
+                        },
+                        trailingContent = if (multiple && selected.isNotEmpty() && !e.isDir) ({ Checkbox(checked = checked, onCheckedChange = null) }) else null,
+                        colors = ListItemDefaults.colors(containerColor = if (checked) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent),
+                    )
+                }
+                if (found.truncated) item(key = "\u0000more") {
+                    Text(stringResource(R.string.fb_search_truncated, SEARCH_LIMIT), modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        return
+    }
 
     when (val l = listing) {
         Listing.Loading -> Centered { CircularProgressIndicator() }
         Listing.Unreadable -> Centered { Message(stringResource(R.string.fb_unreadable)) }
         is Listing.Ok -> {
-            val needle = query.trim()
-            val shown = remember(l, key, asc, showHidden, needle) {
+            val shown = remember(l, key, asc, showHidden) {
                 l.entries
                     .filter { showHidden || !it.name.startsWith(".") }
-                    .filter { needle.isEmpty() || it.name.contains(needle, ignoreCase = true) }
                     .sortedWith(entryComparator(key, asc))
             }
-            if (shown.isEmpty()) Centered { Message(stringResource(if (needle.isEmpty()) R.string.fb_empty else R.string.fb_no_matches)) }
+            if (shown.isEmpty()) Centered { Message(stringResource(R.string.fb_empty)) }
             else LazyColumn(Modifier.fillMaxSize(), state = state) {
                 items(shown, key = { it.path }) { e ->
                     val checked = !e.isDir && selected.any { it.path == e.path }
@@ -570,3 +696,31 @@ fun rememberFilePicker(multiple: Boolean = false, onResult: (List<Uri>) -> Unit)
 @Composable
 fun rememberSingleFilePicker(onResult: (Uri?) -> Unit): FilePicker =
     rememberFilePicker(multiple = false) { onResult(it.firstOrNull()) }
+
+/** What [rememberSaveFilePicker] hands out. [launch] takes the suggested file name. */
+class SaveFilePicker internal constructor(private val open: (String) -> Unit) {
+    fun launch(name: String) = open(name)
+}
+
+/**
+ * Added for AEmulator Plus: the save counterpart of [rememberFilePicker]. The built-in browser (default) lets the person pick a
+ * folder and a file name; with the browser turned off in the app settings, or through its "System picker" button, the system's
+ * create-document picker is used. [onResult] gets a URI to write to (file: from the browser, content: from the system), or null when
+ * the picker was dismissed. [mime] is only for the system picker.
+ */
+@Composable
+fun rememberSaveFilePicker(mime: String = "*/*", onResult: (Uri?) -> Unit): SaveFilePicker {
+    val ctx = LocalContext.current
+    val result by rememberUpdatedState(onResult)
+    var browserName by remember { mutableStateOf<String?>(null) }
+    val system = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(mime)) { result(it) }
+    browserName?.let { name ->
+        FileBrowserDialog(
+            multiple = false, saveName = name,
+            onDismiss = { browserName = null; result(null) },
+            onPicked = { browserName = null; result(it.firstOrNull()) },
+            onSystemPicker = { browserName = null; system.launch(name) },
+        )
+    }
+    return remember { SaveFilePicker { name -> if (AppPrefs.builtinBrowser(ctx)) browserName = name else system.launch(name) } }
+}

@@ -35,4 +35,9 @@ class HostDisplayPolicyTest {
         assertEquals(2, HostDisplayPolicy.iconTurns(-1, 2))
         assertEquals(0, HostDisplayPolicy.iconTurns(359, 3))
     }
+    @Test fun floatingBarIconsStayUprightInTheWindowOnTablets() {
+        for (w in 0..3) assertEquals(0f, HostDisplayPolicy.floatingIconRotation(true, 1, w), 0f)
+        assertEquals(-90f, HostDisplayPolicy.floatingIconRotation(false, 1, 0), 0f)
+        assertEquals(0f, HostDisplayPolicy.floatingIconRotation(false, 2, 2), 0f)
+    }
 }

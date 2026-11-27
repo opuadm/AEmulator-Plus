@@ -79,6 +79,7 @@ public final class FirmwareToolset {
         if (h.length >= 4 && (u32(h,0) == 0x414C5030L || starts(h, "LP\u00fe\u00ff"))) return "SUPER";
         if (Lp.hasGeometry(f)) return "SUPER";
         if (h.length >= 4 && (u32(h,0) == 0x73717368L || u32(h,0) == 0x68737173L)) return "SQUASHFS";
+        if (Xsr.looks(h)) return "XSR";
         if (looksRfs(h)) return "RFS";
         String n = f.getName().toLowerCase(Locale.US);
         if (n.endsWith(".ofp")) return "OFP";
@@ -100,6 +101,15 @@ public final class FirmwareToolset {
         // the FAT/RFS boot sector may sit a few sectors into the image (up to 8 MiB)
         if (Rfs.probe(f)) return "RFS";
         return "UNKNOWN";
+    }
+
+    /** True if [head] (the first bytes of a file) starts an XSR raw flash dump (Samsung *.rfs of the I5700 / I7500 era). */
+    public static boolean isXsrDump(byte[] head) { return Xsr.looks(head); }
+
+    /** Puts an XSR raw flash dump back together into the plain volume (FAT/RFS) it holds; the result is a new file in [work]. */
+    public static File unwrapXsr(File image, File work, Consumer<String> log) throws IOException {
+        if (!work.exists() && !work.mkdirs()) throw new IOException("cannot create work directory");
+        return Xsr.unwrap(image, work, log);
     }
 
     /** Partitions a container extractor should take when its caller does not say: what the importer has always read. */
@@ -134,6 +144,11 @@ public final class FirmwareToolset {
             case "LG_KDZ": return LgKdz.extractKdz(input, work, want, log);
             case "LG_KDZ_CAB": return LgKdz.extractEncryptedKdz(input, work, want, log);
             case "LG_DZ": return LgKdz.extractDz(input, work, want, log);
+            case "XSR": {
+                // Samsung XSR raw flash dump (I5700 Spica, I7500 ...): unscramble it into the plain RFS/FAT volume it holds
+                File flat = Xsr.unwrap(input, work, log);
+                try { return extract(flat, work, want, log); } finally { flat.delete(); }
+            }
             case "RFS": return Collections.singletonList(new Artifact(Rfs.toZip(input, work, log), Role.ARCHIVE));
             case "SQUASHFS": return Collections.singletonList(new Artifact(SquashFs.toZip(input, work, log), Role.ARCHIVE));
             case "SUPER": return SuperImage.extract(input, work, log);
@@ -150,6 +165,11 @@ public final class FirmwareToolset {
 
     public static List<Artifact> extractWindow(FileChannel ch, long base, long size, File work, Consumer<String> log) throws Exception {
         return PayloadExtractor.extractWindow(ch, base, size, work, log);
+    }
+
+    /** Like [extractWindow], but only the partitions [only] accepts (by name without slot suffix) are unpacked. */
+    public static List<Artifact> extractWindow(FileChannel ch, long base, long size, File work, java.util.function.Predicate<String> only, Consumer<String> log) throws Exception {
+        return PayloadExtractor.extractWindow(ch, base, size, work, only, log);
     }
 
     /** True for an old LG KDZ (RC4-encrypted CAB). {@code head} is the start of the file, {@code size} its full length. */
@@ -1025,6 +1045,67 @@ public final class FirmwareToolset {
         static long[]bytesToLongWords(byte[]b){long[]w=new long[4];for(int i=0;i<4;i++)w[i]=leWord(b,i*4)&0xffffffffL;return w;}
     }
 
+    // ===== XSR raw flash dump (Samsung OneNAND, e.g. Galaxy Spica I5700 *.rfs) ===
+    /**
+     * Odin's factoryfs.rfs / datafs.rfs / cache.rfs of the first Samsung Androids are not a FAT volume but a raw
+     * dump of the XSR flash layer: 64 pages of (2048 data + 64 spare) bytes per erase block. Page 0 of every block
+     * is a header (word at 12 = "XSR2", word at 16 = logical block number) and pages 1..63 carry 63 * 2048 bytes of
+     * the volume. Blocks are stored in physical order, so the volume has to be put back together by logical number.
+     */
+    static final class Xsr {
+        static final int MAGIC = 0x32525358; // "XSR2" little endian
+        static final int[][] GEOMETRIES = {{2048, 64, 64}, {4096, 128, 64}, {512, 16, 32}}; // data, spare, pages per block
+        static final int MAGIC_OFF = 12, LBN_OFF = 16, CHK_OFF = 24;
+
+        /** True if the head of a file looks like the first block header of an XSR dump. */
+        static boolean looks(byte[] h) {
+            return h.length >= 32 && u32(h, MAGIC_OFF) == (MAGIC & 0xffffffffL) && u32(h, CHK_OFF) == 0xa5a5a5a5L;
+        }
+        static int[] geometry(File f) throws IOException {
+            long len = f.length();
+            try (RandomAccessFile r = new RandomAccessFile(f, "r")) {
+                for (int[] g : GEOMETRIES) {
+                    long block = (long) (g[0] + g[1]) * g[2];
+                    if (len < block * 2 || len % block != 0) continue;
+                    // the second block must start with the same header
+                    byte[] h = readAt(r, block, 32);
+                    if (looks(h)) return g;
+                }
+            }
+            return null;
+        }
+        static File unwrap(File image, File work, Consumer<String> log) throws IOException {
+            int[] g = geometry(image);
+            if (g == null) throw new IOException("XSR dump: unsupported block geometry (file size " + image.length() + ")");
+            int page = g[0], stride = g[0] + g[1], ppb = g[2], dataPages = ppb - 1;
+            long block = (long) stride * ppb, blocks = image.length() / block, chunk = (long) dataPages * page;
+            File out = new File(work, safe(stripExt(image.getName())) + ".xsr.flat");
+            int[] lbn = new int[(int) blocks]; int max = -1, skipped = 0;
+            try (RandomAccessFile r = new RandomAccessFile(image, "r")) {
+                for (int i = 0; i < blocks; i++) {
+                    byte[] h = readAt(r, i * block, 32);
+                    long l = looks(h) ? u32(h, LBN_OFF) : -1;
+                    if (l < 0 || l >= blocks) { lbn[i] = -1; skipped++; continue; }   // erased / bad / foreign block
+                    lbn[i] = (int) l; if (l > max) max = (int) l;
+                }
+                try (RandomAccessFile w = new RandomAccessFile(out, "rw")) {
+                    w.setLength((max + 1L) * chunk);
+                    byte[] buf = new byte[(int) chunk];
+                    for (int i = 0; i < blocks; i++) {
+                        if (lbn[i] < 0) continue;
+                        long o = i * block;
+                        for (int pg = 1; pg < ppb; pg++) {
+                            r.seek(o + (long) pg * stride); r.readFully(buf, (pg - 1) * page, page);
+                        }
+                        w.seek((long) lbn[i] * chunk); w.write(buf);
+                    }
+                }
+            }
+            log.accept("XSR dump: " + blocks + " blocks of " + (block >> 10) + " KB, " + skipped + " skipped -> " + ((max + 1L) * chunk >> 10) + " KB volume");
+            return out;
+        }
+    }
+
     // ===== RFS (port of rfs2zip.py) ==========================================
     static final class Rfs {
         static final int ATTR_DIR = 0x10, ATTR_VOL = 0x08, ATTR_LFN = 0x0f, ATTR_EXT = 0xcf;
@@ -1360,7 +1441,7 @@ public final class FirmwareToolset {
                 case"SPARSE":{File d=new File(out,safe(f.getName()));copy(f,d);break;}
                 case"EXT4":{File d=new File(out,safe(f.getName()));copy(f,d);break;}
                 case"SQUASHFS":{File z=SquashFs.toZip(f,out,log);unzip(z,out);break;}
-                case"SBF":case"PAC":case"NBH":case"LG_BIN":case"LG_TOT":case"OFP":case"OPS":case"SUPER":case"RFS":case"OTA_PAYLOAD":case"OTA_DAT_BR":case"VDAT_LIST":case"VDAT_DATA":{List<Artifact>x=FirmwareToolset.extract(f,out,log);for(Artifact q:x)if(q.file.isFile())extractAny(q.file,new File(out,"_"+safe(q.file.getName())),log,depth+1);return;}
+                case"SBF":case"PAC":case"NBH":case"LG_BIN":case"LG_TOT":case"OFP":case"OPS":case"SUPER":case"RFS":case"XSR":case"OTA_PAYLOAD":case"OTA_DAT_BR":case"VDAT_LIST":case"VDAT_DATA":{List<Artifact>x=FirmwareToolset.extract(f,out,log);for(Artifact q:x)if(q.file.isFile())extractAny(q.file,new File(out,"_"+safe(q.file.getName())),log,depth+1);return;}
                 default:genericScan(f,out,log);return;
             }
             for(File x:allFiles(out)){if(x.equals(f)||x.getName().equals("report.json"))continue;String sub=detect(x);if(!"UNKNOWN".equals(sub)&&!sub.equals(k))extractAny(x,new File(out,"_"+safe(x.getName())),log,depth+1);}
@@ -1402,9 +1483,15 @@ public final class FirmwareToolset {
             return extract(() -> new ChannelSeek(new FileInputStream(f).getChannel(), 0, f.length(), true), work, log);
         }
         static List<Artifact> extractWindow(FileChannel ch, long base, long size, File work, Consumer<String> log) throws Exception {
-            return extract(() -> new ChannelSeek(ch, base, base + size, false), work, log);
+            return extract(() -> new ChannelSeek(ch, base, base + size, false), work, null, log);
+        }
+        static List<Artifact> extractWindow(FileChannel ch, long base, long size, File work, java.util.function.Predicate<String> only, Consumer<String> log) throws Exception {
+            return extract(() -> new ChannelSeek(ch, base, base + size, false), work, only, log);
         }
         static List<Artifact> extract(SeekSource src, File work, Consumer<String> log) throws Exception {
+            return extract(src, work, null, log);
+        }
+        static List<Artifact> extract(SeekSource src, File work, java.util.function.Predicate<String> only, Consumer<String> log) throws Exception {
             try (Seek r = src.open()) {
                 byte[] magic = new byte[4]; r.readFully(magic, 0, 4);
                 if (!starts(magic, "CrAU")) throw new IOException("not payload.bin");
@@ -1431,7 +1518,7 @@ public final class FirmwareToolset {
                     // only what the importer uses is unpacked (bootloader, radio, vbmeta, dtbo, init_boot, vendor_boot,
                     // userdata ... are not); with a super partition its own system / vendor are the ones that count
                     String stem = partStem(p.name);
-                    if (!wantedPartition(stem) || (hasSuper && (stem.equals("system") || stem.equals("vendor")))) {
+                    if (!wantedPartition(stem) || (only != null && !only.test(stem)) || (hasSuper && (stem.equals("system") || stem.equals("vendor")))) {
                         log.accept("payload: skipped " + p.name); continue;
                     }
                     File dst = createImage(out, p);

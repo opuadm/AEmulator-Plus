@@ -20,6 +20,16 @@ symlink conversion is used. Special objects are not created on the host.
 UID/GID ownership, timestamps and exact POSIX permission masks are not restored
 (the importer uses its existing Android-host permission policy).
 
+Page-only NAND dumps (no spare/OOB area at all, pages in physical order with obsolete
+pages still in place, e.g. an HTC engineering dump with 4096-byte chunks) are read
+through the checkpoint YAFFS2 writes at unmount: the reader finds its marker in the
+first or last 32 MiB, decodes the object records and chunk maps (versions 4-8, 32- or
+64-bit sizes, either byte order), then finds chunk size and the dump's first device
+chunk by checking that the recorded header chunks really hold object headers. A dump
+without a valid checkpoint, or one that skipped bad blocks (so chunk numbers no longer
+match positions), is not recognised. Whatever was never part of the checkpoint (e.g.
+files deleted before it was written) does not appear.
+
 Limits: at most 1,000,000 pages, 100,000 object headers and 256 parent/link hops.
 Corrupt/missing chunks, repeated headers/chunks, unsafe names, duplicate paths,
 parent/hard-link cycles, missing parents and truncated pages fail explicitly.

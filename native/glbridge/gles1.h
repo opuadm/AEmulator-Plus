@@ -29,6 +29,9 @@
 #define G1_NLIGHT 8
 #define G1_NPROG 48
 #define G1_NREC 256
+/* GL's default texture (name 0) is a real texture in GLES 1: the boot animation's one-shot parts (count 1) draw through it. Its record lives
+ * under this key, which no glGenTextures name reaches. */
+#define G1_DEFTEX 0xfffffff0u
 
 /* attribute slots of the generated programs */
 enum { A_POS, A_COL, A_NRM, A_TC0, A_TC1, A_N };
@@ -47,7 +50,9 @@ static const struct { const char *name; int group; } kLoc[L_N] = {
     { "u_lcut", U_LIGHT }, { "u_s0", -1 }, { "u_s1", -1 },
 };
 
-struct g1_tex { unsigned name; int w, h, alpha, genmip, defined, crop[4]; };
+struct g1_tex { unsigned name; int w, h, alpha, genmip, defined, crop[4]; void *img; uint64_t img_sum; };
+/* (guest.c) a texture made from an EGLImage of a window buffer: its pixels go to the host again when the guest has drawn into the buffer since */
+static void aemu_image_refresh(void *image, uint64_t *sum);
 struct g1_prog { uint64_t key; unsigned prog; int ok; int loc[L_N]; unsigned sent[U_N]; };
 struct g1_arr { int on, size, type, norm, stride; unsigned buf; const void *ptr; };
 struct g1_light { float amb[4], dif[4], spc[4], pos[4], dir[4], att[4], cut; int spot; };
@@ -58,6 +63,7 @@ struct g1 {
     unsigned v[U_N];                                /* the versions of the uniform groups */
     float color[4], normal[3], mtc[G1_NTEX][4];
     int tex2d[G1_NTEX]; unsigned bound[G1_NTEX];
+    int texx[G1_NTEX]; unsigned boundx[G1_NTEX];    /* GL_TEXTURE_EXTERNAL_OES (OES_EGL_image_external): enabled, bound (SurfaceFlinger of 4.x draws every layer with one) */
     int texenv[G1_NTEX]; float tec[G1_NTEX][4];
     int alpha_on, alpha_func; float alpha_ref;
     int fog_on, fog_mode; float fog_density, fog_start, fog_end, fog_color[4];
@@ -142,7 +148,7 @@ static void g1_surface_size(int *w, int *h);
 
 /* ---- textures the driver knows (sizes for glDrawTex, ALPHA textures for the texture environment) ---- */
 static struct g1_tex *g1_rec(struct g1 *s, unsigned name, int make) {
-    if (!name) return 0;
+    if (!name) name = G1_DEFTEX;
     unsigned h = name % G1_NREC;
     for (unsigned i = 0; i < G1_NREC; i++) {
         struct g1_tex *r = &s->rec[(h + i) % G1_NREC];
@@ -158,6 +164,12 @@ static struct g1_tex *g1_rec(struct g1 *s, unsigned name, int make) {
     return r;
 }
 static struct g1_tex *g1_bound_rec(struct g1 *s, int make) { return g1_rec(s, s->bound[s->active], make); }
+/* the record of what is bound to a texture target of the active unit: 2D, or external (0: any other target) */
+static struct g1_tex *g1_target_rec(struct g1 *s, GLenum target, int make) {
+    if (target == 0x0DE1) return g1_bound_rec(s, make);
+    if (target == 0x8D65) return g1_rec(s, s->boundx[s->active], make);
+    return 0;
+}
 
 /* ---- matrices ---- */
 static float *g1_cur(struct g1 *s) {
@@ -389,6 +401,7 @@ static void e1_glGetMaterialxv(GLenum fc, GLenum pname, GLfixed *o) { float f[4]
 static int g1_cap(struct g1 *s, GLenum cap, int on, int query) {
     switch (cap) {
     case 0x0DE1: if (query) return s->tex2d[s->active]; s->tex2d[s->active] = on; return 1;
+    case 0x8D65: if (query) return s->texx[s->active]; s->texx[s->active] = on; return 1;      /* GL_TEXTURE_EXTERNAL_OES: not a host capability, a texture unit's mode here */
     case 0x0BC0: if (query) return s->alpha_on; s->alpha_on = on; return 1;
     case 0x0B50: if (query) return s->lighting; s->lighting = on; return 1;
     case 0x0B57: if (query) return s->cmat; s->cmat = on; return 1;
@@ -410,7 +423,7 @@ static void e1_glEnable(GLenum cap) { if (!g1_cap(G1(), cap, 1, 0)) e_glEnable(c
 static void e1_glDisable(GLenum cap) { if (!g1_cap(G1(), cap, 0, 0)) e_glDisable(cap); }
 static GLboolean e1_glIsEnabled(GLenum cap) {
     struct g1 *s = G1();
-    if (cap == 0x0DE1 || cap == 0x0BC0 || cap == 0x0B50 || cap == 0x0B57 || cap == 0x0B60 || cap == 0x0BA1 || cap == 0x8861 ||
+    if (cap == 0x0DE1 || cap == 0x8D65 || cap == 0x0BC0 || cap == 0x0B50 || cap == 0x0B57 || cap == 0x0B60 || cap == 0x0BA1 || cap == 0x8861 ||
         (cap >= 0x4000 && cap < 0x4000 + G1_NLIGHT) || cap == 0x803A || cap == 0x0B10 || cap == 0x0B20 || cap == 0x0BF2 ||
         cap == 0x809D || cap == 0x809F || (cap >= 0x3000 && cap < 0x3006))
         return (GLboolean)g1_cap(s, cap, 0, 1);
@@ -423,14 +436,19 @@ static void e1_glClientActiveTexture(GLenum t) { struct g1 *s = G1(); unsigned u
 static void e1_glBindTexture(GLenum target, GLuint name) {
     struct g1 *s = G1();
     if (target == 0x0DE1) { s->bound[s->active] = name; if (name) g1_rec(s, name, 1); }
+    else if (target == 0x8D65) { s->boundx[s->active] = name; if (name) g1_rec(s, name, 1); }
     e_glBindTexture(target, name);
+    /* Gingerbread's SurfaceFlinger binds a layer's buffer to its texture once (glEGLImageTargetTexture2DOES, when the buffer is new) and then only
+     * glBindTextures it: on a GPU the image aliases the buffer's memory, here the host holds a copy, so the copy is renewed whenever the buffer changed */
+    if (target == 0x0DE1 && name) { struct g1_tex *r = g1_rec(s, name, 0); if (r && r->img) aemu_image_refresh(r->img, &r->img_sum); }
 }
 static void e1_glDeleteTextures(GLsizei n, const GLuint *names) {
     struct g1 *s = G1();
     for (int i = 0; names && i < n; i++) {
+        if (!names[i]) continue;            /* (glDeleteTextures ignores 0: the default texture stays) */
         struct g1_tex *r = g1_rec(s, names[i], 0);
         if (r) r->name = 0;
-        for (int u = 0; u < G1_NTEX; u++) if (s->bound[u] == names[i]) s->bound[u] = 0;
+        for (int u = 0; u < G1_NTEX; u++) { if (s->bound[u] == names[i]) s->bound[u] = 0; if (s->boundx[u] == names[i]) s->boundx[u] = 0; }
     }
     e_glDeleteTextures(n, names);
 }
@@ -440,7 +458,7 @@ static void g1_defined(GLenum target, GLint level, GLint ifmt, int w, int h, int
     struct g1_tex *r = g1_bound_rec(s, 1);
     if (!r) return;
     if (level == 0) {
-        r->w = w; r->h = h; r->defined = 1;
+        r->w = w; r->h = h; r->defined = 1; r->img = 0;
         r->alpha = ifmt == 0x1906;           /* GL_ALPHA */
         (void)compressed;
         if (r->genmip) e_glGenerateMipmap(target);
@@ -464,7 +482,7 @@ static void e1_glCopyTexImage2D(GLenum t, GLint lv, GLenum ifmt, GLint x, GLint 
     g1_defined(t, lv, (GLint)ifmt, w, h, 0);
 }
 static void g1_texparam(GLenum target, GLenum pname, const int *v, int n) {
-    struct g1_tex *r = target == 0x0DE1 ? g1_bound_rec(G1(), 1) : 0;
+    struct g1_tex *r = g1_target_rec(G1(), target, 1);
     if (pname == 0x8B9D /* GL_TEXTURE_CROP_RECT_OES */) { if (r && n >= 4) memcpy(r->crop, v, 16); return; }
     if (pname == 0x8191 /* GL_GENERATE_MIPMAP */) { if (r) { r->genmip = v[0] != 0; if (r->genmip && r->defined) e_glGenerateMipmap(target); } return; }
     if (n == 1) e_glTexParameteri(target, pname, v[0]);
@@ -486,8 +504,8 @@ static void e1_glTexParameterfv(GLenum t, GLenum p, const GLfloat *v) {
 static void e1_glTexParameterx(GLenum t, GLenum p, GLfixed v) { g1_texparam(t, p, &v, 1); }
 static void e1_glTexParameterxv(GLenum t, GLenum p, const GLfixed *v) { if (v) g1_texparam(t, p, v, p == 0x8B9D ? 4 : 1); }
 static void e1_glGetTexParameteriv(GLenum t, GLenum p, GLint *o) {
-    if (p == 0x8B9D) { struct g1_tex *r = t == 0x0DE1 ? g1_bound_rec(G1(), 0) : 0; if (o) { if (r) memcpy(o, r->crop, 16); else memset(o, 0, 16); } return; }
-    if (p == 0x8191) { struct g1_tex *r = t == 0x0DE1 ? g1_bound_rec(G1(), 0) : 0; if (o) *o = r && r->genmip; return; }
+    if (p == 0x8B9D) { struct g1_tex *r = g1_target_rec(G1(), t, 0); if (o) { if (r) memcpy(o, r->crop, 16); else memset(o, 0, 16); } return; }
+    if (p == 0x8191) { struct g1_tex *r = g1_target_rec(G1(), t, 0); if (o) *o = r && r->genmip; return; }
     e_glGetTexParameteriv(t, p, o);
 }
 static void e1_glGetTexParameterxv(GLenum t, GLenum p, GLfixed *o) { GLint v[4] = { 0, 0, 0, 0 }; e1_glGetTexParameteriv(t, p, v); if (o) *o = v[0]; }
@@ -593,16 +611,29 @@ static void g1_viewport(struct g1 *s, int *vp) {
 #define K_LMASK_OF(k) ((unsigned)(((k) >> 23) & 0xff))
 #define K_PSPRITE (1ull << 31)
 #define K_DRAWTEX (1ull << 32)
+#define K_EXT(u) (1ull << (33 + (u)))      /* the unit samples an external texture */
 
-static int g1_unit_on(struct g1 *s, int u) { return s->tex2d[u] && s->bound[u]; }
+/* what a texture unit samples: 0 nothing, 1 a 2D texture, 2 an external one (which wins when both are on, as in
+ * OES_EGL_image_external) */
+static int g1_unit_kind(struct g1 *s, int u) {
+    if (s->texx[u] && s->boundx[u]) return 2;
+    if (!s->tex2d[u]) return 0;
+    if (s->bound[u]) return 1;
+    /* name 0 is the default texture: it samples once the program has given it an image (until then it is incomplete, i.e. texturing is off) */
+    struct g1_tex *d = g1_rec(s, 0, 0);
+    return d && d->defined ? 1 : 0;
+}
+static int g1_unit_on(struct g1 *s, int u) { return g1_unit_kind(s, u) != 0; }
+static unsigned g1_unit_name(struct g1 *s, int u) { return g1_unit_kind(s, u) == 2 ? s->boundx[u] : s->bound[u]; }
 static int g1_mode_code(int m) { return m == 0x1E01 ? 1 : m == 0x2101 ? 2 : m == 0x0BE2 ? 3 : m == 0x0104 ? 4 : 0; }
 static uint64_t g1_key(struct g1 *s, int drawtex) {
     uint64_t k = 0;
     for (int u = 0; u < G1_NTEX; u++) {
         if (!g1_unit_on(s, u)) continue;
-        struct g1_tex *r = g1_rec(s, s->bound[u], 0);
+        struct g1_tex *r = g1_rec(s, g1_unit_name(s, u), 0);
         k |= K_TEX(u) | K_MODE(u, g1_mode_code(s->texenv[u]));
-        if (r && r->alpha) k |= K_ALPHA(u);
+        if (g1_unit_kind(s, u) == 2) k |= K_EXT(u);
+        else if (r && r->alpha) k |= K_ALPHA(u);
         if (!drawtex && s->arr[A_TC0 + u].on) k |= K_TCARR(u);
     }
     if (drawtex) return k | K_DRAWTEX;
@@ -685,10 +716,12 @@ static void g1_gen(uint64_t k, struct sb *vs, struct sb *fs) {
     sb_s(vs, "}\n");
 
     /* fragment shader */
+    if ((k & K_EXT(0)) || (k & K_EXT(1))) sb_s(fs, "#extension GL_OES_EGL_image_external : require\n");
     sb_s(fs, "#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n");
+    if ((k & K_EXT(0)) || (k & K_EXT(1))) sb_s(fs, "precision lowp samplerExternalOES;\n");
     sb_s(fs, "varying mediump vec4 v_col;\n");
     for (int u = 0; u < G1_NTEX; u++) if (tex[u]) {
-        sb_s(fs, "varying highp vec4 v_t"); sb_i(fs, u); sb_s(fs, ";\nuniform sampler2D u_s"); sb_i(fs, u);
+        sb_s(fs, "varying highp vec4 v_t"); sb_i(fs, u); sb_s(fs, (k & K_EXT(u)) ? ";\nuniform samplerExternalOES u_s" : ";\nuniform sampler2D u_s"); sb_i(fs, u);
         sb_s(fs, ";\nuniform vec4 u_tec"); sb_i(fs, u); sb_s(fs, ";\n");
     }
     if (fog) sb_s(fs, "varying highp float v_fog;\nuniform vec4 u_fogp;\nuniform vec4 u_fogc;\n");
@@ -881,7 +914,12 @@ static void g1_drawtex(float x, float y, float z, float w, float h) {
     memcpy(pos, q, sizeof(q));
     for (int u = 0; u < G1_NTEX; u++) {
         if (!g1_unit_on(s, u)) continue;
-        struct g1_tex *r = g1_rec(s, s->bound[u], 0);
+        struct g1_tex *r = g1_rec(s, g1_unit_name(s, u), 0);
+        if (g1_unit_kind(s, u) == 2 && (!r || r->w <= 0 || r->h <= 0)) {      /* (an external texture's size is the buffer's: the whole of it) */
+            static const float whole[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+            memcpy(tc[u], whole, sizeof(whole));
+            continue;
+        }
         if (!r || r->w <= 0 || r->h <= 0) return;          /* (a texture this driver did not see made: no size to take the crop rectangle from) */
         float u0 = (float)r->crop[0] / (float)r->w, v0 = (float)r->crop[1] / (float)r->h;
         float u1 = (float)(r->crop[0] + r->crop[2]) / (float)r->w, v1 = (float)(r->crop[1] + r->crop[3]) / (float)r->h;
@@ -922,6 +960,7 @@ static const char kEs1Ext[] =
     "GL_OES_compressed_ETC1_RGB8_texture GL_OES_depth24 GL_OES_draw_texture GL_OES_fixed_point GL_OES_framebuffer_object "
     "GL_OES_matrix_get GL_OES_packed_depth_stencil GL_OES_point_sprite GL_OES_read_format GL_OES_rgb8_rgba8 "
     "GL_OES_single_precision GL_OES_stencil8 GL_OES_texture_mirrored_repeat GL_OES_texture_npot GL_OES_EGL_image "
+    "GL_OES_EGL_image_external "
     "GL_EXT_texture_format_BGRA8888";
 static const GLubyte *e1_glGetString(GLenum name) {
     if (name == 0x1F02) return (const GLubyte *)kEs1Version;

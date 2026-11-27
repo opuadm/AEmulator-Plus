@@ -18,8 +18,30 @@ class WifiEmuTest {
         assertTrue(WifiEmu.passwordValid(""))
         assertFalse(WifiEmu.passwordValid("short"))
         assertTrue(WifiEmu.passwordValid("12345678"))
-        assertFalse(WifiEmu.secured(VmSettings(wifiPassword = "short")))
-        assertTrue(WifiEmu.secured(VmSettings(wifiPassword = "12345678")))
+        assertFalse(WifiEmu.secured(VmSettings(wifiSecurity = WifiSecurity.WPA2, wifiPassword = "short")))
+        assertTrue(WifiEmu.secured(VmSettings(wifiSecurity = WifiSecurity.WPA2, wifiPassword = "12345678")))
+        assertTrue(WifiEmu.secured(VmSettings(wifiSecurity = WifiSecurity.WPA3, wifiPassword = "12345678")))
+        assertFalse(WifiEmu.secured(VmSettings(wifiSecurity = WifiSecurity.NONE, wifiPassword = "12345678")))
+        assertTrue(WifiEmu.credentialValid(WifiSecurity.NONE, ""))
+        assertFalse(WifiEmu.credentialValid(WifiSecurity.WPA2, ""))
+    }
+    @Test fun speedParsing() {
+        assertEquals(0, WifiEmu.speedKbps(""))
+        assertEquals(50_000, WifiEmu.speedKbps("50"))
+        assertEquals(50_000, WifiEmu.speedKbps("50 Mbps"))
+        assertEquals(50_000, WifiEmu.speedKbps("50mb/s"))
+        assertEquals(800, WifiEmu.speedKbps("800 Kbps"))
+        assertEquals(1_000_000, WifiEmu.speedKbps("1 Gbps"))
+        assertEquals(1_500, WifiEmu.speedKbps("1,5 mbit/s"))
+        assertEquals(null, WifiEmu.speedKbps("fast"))
+        assertEquals(null, WifiEmu.speedKbps("0 Mbps"))
+        assertEquals(null, WifiEmu.speedKbps("3000 Gbps"))
+        assertEquals(1_000_000_000, WifiEmu.speedKbps("1000 Gbps"))
+        assertEquals(0, WifiEmu.speedKbps("Gbps"))
+        assertEquals("" to "Gbps", WifiEmu.speedParts("Gbps"))
+        assertEquals("1,5" to "Mbps", WifiEmu.speedParts("1,5 mbit/s"))
+        assertEquals("800" to "Kbps", WifiEmu.speedParts("800 Kbps"))
+        assertEquals("50 Gbps", WifiEmu.speedJoin("50", "Gbps"))
     }
     @Test fun bssidIsStableAndLocallyAdministered() {
         assertEquals(WifiEmu.bssid("home"), WifiEmu.bssid("home"))
@@ -44,7 +66,8 @@ class WifiEmuTest {
     }
     @Test fun androidEightToSeventeenRunOnTheSixtyFourBitEngine() {
         for (api in 26..37) assertTrue("api $api", WifiEmu.supported(Engine.N64, api, false, false))
-        assertFalse(WifiEmu.supported(Engine.N64, 25, false, false))   // 5.0 - 7.1 keep to the 32-bit engine
+        for (api in 14..25) assertTrue("api $api", WifiEmu.supported(Engine.N64, api, false, false))
+        assertFalse(WifiEmu.supported(Engine.N64, 13, false, false))
         assertFalse(WifiEmu.supported(Engine.N64, 38, false, false))
         assertFalse(WifiEmu.supported(Engine.N64, 30, true, false))    // recovery
         assertFalse(WifiEmu.supported(Engine.N64, 30, false, true))    // native UI / low power boot
@@ -94,5 +117,17 @@ class WifiEmuTest {
         assertTrue(back.wifi); assertEquals("Home", back.wifiSsid); assertEquals("hunter2hunter2", back.wifiPassword)
         assertFalse(VmSettings.fromJson(org.json.JSONObject()).wifi)
         assertEquals(WifiEmu.DEFAULT_SSID, VmSettings.fromJson(org.json.JSONObject().put("wifiSsid", "")).wifiSsid)
+    }
+    @Test fun bandAndStandardReachTheGuestAndSurviveJson() {
+        val s = VmSettings(wifi = true, wifiBand = WifiBand.DUAL, wifiStandard = WifiStandard.BE,
+            wifiExtra = listOf(WifiNetworkDef("Other", "password123", band = WifiBand.GHZ6, standard = WifiStandard.AC)))
+        val p = WifiEmu.properties(s)
+        assertEquals("dual", p.getProperty("band")); assertEquals("be", p.getProperty("standard"))
+        assertTrue(p.getProperty("extras").endsWith("|6|ac"))
+        val back = VmSettings.fromJson(s.toJson())
+        assertEquals(WifiBand.DUAL, back.wifiBand); assertEquals(WifiStandard.BE, back.wifiStandard)
+        assertEquals(WifiBand.GHZ6, back.wifiExtra[0].band); assertEquals(WifiStandard.AC, back.wifiExtra[0].standard)
+        assertEquals(WifiBand.GHZ24, VmSettings.fromJson(org.json.JSONObject()).wifiBand)
+        assertEquals(WifiStandard.AUTO, WifiStandard.fromId("nonsense"))
     }
 }

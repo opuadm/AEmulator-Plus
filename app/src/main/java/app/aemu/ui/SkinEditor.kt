@@ -155,7 +155,7 @@ internal fun ThemeEditor(initial: VmTheme, onCancel: () -> Unit, onSave: (VmThem
     }
 
     var pendingDetect by remember { mutableStateOf(false) }
-    val pngPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val pngPicker = rememberSingleFilePicker { uri ->
         if (uri != null) runCatching {
             val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: localizedError("cannot read the picture", R.string.err_cannot_read_the_picture)
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -235,11 +235,11 @@ internal fun ThemeEditor(initial: VmTheme, onCancel: () -> Unit, onSave: (VmThem
     }
 
     if (style) StyleSheet(t, initial, onChange = { t = it }, onDismiss = { style = false })
-    if (resolution) ResolutionDialog(t.skinWidth, t.skinHeight, onDismiss = { resolution = false }) { w, h ->
+    if (resolution) ResolutionDialog(t.skinWidth, t.skinHeight, t.skinDensity, t.name, onDismiss = { resolution = false }) { w, h, dpi ->
         resolution = false
         val b = bitmap
         val screen = t.skinScreen
-        t = t.copy(skinWidth = w, skinHeight = h,
+        t = t.copy(skinWidth = w, skinHeight = h, skinDensity = dpi,
             skinScreen = if (screen != null && b != null && w > 0) DeviceSkin.withAspect(screen, w, h, b.width, b.height) else screen)
     }
     if (addKey) AddKeyDialog(onDismiss = { addKey = false }) { button ->
@@ -397,7 +397,7 @@ private fun ThemePreview(t: VmTheme, picture: ImageBitmap?) {
 private fun StyleSheet(t: VmTheme, initial: VmTheme, onChange: (VmTheme) -> Unit, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     var picking by remember { mutableStateOf<String?>(null) }
-    val backgroundPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val backgroundPicker = rememberSingleFilePicker { uri ->
         if (uri != null) runCatching {
             val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: localizedError("cannot read the picture", R.string.err_cannot_read_the_picture)
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -405,6 +405,15 @@ private fun StyleSheet(t: VmTheme, initial: VmTheme, onChange: (VmTheme) -> Unit
             require(bounds.outWidth > 0 && bounds.outHeight > 0) { "not a picture" }
             // a background fills the screen behind the guest: not a phone skin
             onChange(t.copy(frameImage = VmThemes.importImage(ctx, bytes), skinScreen = null, skinKeys = emptyList(), skinLed = null))
+        }.onFailure { toast(ctx, ctx.getString(R.string.th_failed, it.userMessage(ctx))) }
+    }
+    val overlayPicker = rememberSingleFilePicker { uri ->
+        if (uri != null) runCatching {
+            val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: localizedError("cannot read the picture", R.string.err_cannot_read_the_picture)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            require(bounds.outWidth > 0 && bounds.outHeight > 0) { "not a picture" }
+            onChange(t.copy(skinOverlay = VmThemes.importImage(ctx, bytes)))
         }.onFailure { toast(ctx, ctx.getString(R.string.th_failed, it.userMessage(ctx))) }
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -434,6 +443,20 @@ private fun StyleSheet(t: VmTheme, initial: VmTheme, onChange: (VmTheme) -> Unit
             Toggle(stringResource(R.string.th_glow), stringResource(R.string.th_glow_sub), t.pressGlow) { onChange(t.copy(pressGlow = it)) }
             Toggle(stringResource(R.string.th_halo), stringResource(R.string.th_halo_sub), t.halo) { onChange(t.copy(halo = it)) }
             Toggle(stringResource(R.string.th_rounded_bar), stringResource(R.string.th_rounded_bar_sub), t.roundedBar) { onChange(t.copy(roundedBar = it)) }
+
+            if (t.isSkin) {
+                ThemeLabel(R.string.sk_cutout)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (c in app.aemu.core.SkinCutout.entries) FilterChip(selected = t.skinCutout == c, onClick = { onChange(t.copy(skinCutout = c)) },
+                        label = { Text(stringResource(cutoutLabel(c))) })
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                    OutlinedButton(onClick = { overlayPicker.launch(arrayOf("image/*")) }) { Text(stringResource(R.string.sk_overlay_pick)) }
+                    if (t.skinOverlay != null) TextButton(onClick = { onChange(t.copy(skinOverlay = null)) }) { Text(stringResource(R.string.sk_overlay_remove)) }
+                }
+                Text(stringResource(R.string.sk_overlay_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
 
             ThemeLabel(R.string.th_frame_section)
             Text(stringResource(R.string.th_corner, t.screenCorner), style = MaterialTheme.typography.bodyMedium)
@@ -465,9 +488,12 @@ private fun StyleSheet(t: VmTheme, initial: VmTheme, onChange: (VmTheme) -> Unit
 }
 
 @Composable
-private fun ResolutionDialog(width: Int, height: Int, onDismiss: () -> Unit, onPick: (Int, Int) -> Unit) {
+private fun ResolutionDialog(width: Int, height: Int, density: Int, name: String, onDismiss: () -> Unit, onPick: (Int, Int, Int) -> Unit) {
     var w by remember { mutableStateOf(if (width > 0) width.toString() else "") }
     var h by remember { mutableStateOf(if (height > 0) height.toString() else "") }
+    var dpi by remember { mutableStateOf(if (density > 0) density.toString() else "") }
+    // 0 = automatic: the real device of this name, else an estimate from the size (VmThemes.guestDensity)
+    val dpiValue = dpi.toIntOrNull()?.takeIf { it in 80..1000 } ?: 0
     val custom = w.toIntOrNull()?.takeIf { it in 120..8192 }?.let { cw -> h.toIntOrNull()?.takeIf { it in 120..8192 }?.let { cw to it } }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -477,13 +503,13 @@ private fun ResolutionDialog(width: Int, height: Int, onDismiss: () -> Unit, onP
                 Text(stringResource(R.string.sk_resolution_sub), style = MaterialTheme.typography.bodyMedium)
                 LazyColumn(Modifier.height(260.dp).padding(top = 8.dp)) {
                     item {
-                        Row(Modifier.fillMaxWidth().clickable { onPick(0, 0) }, verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.fillMaxWidth().clickable { onPick(0, 0, 0) }, verticalAlignment = Alignment.CenterVertically) {
                             RadioButton(selected = width == 0, onClick = null, modifier = Modifier.padding(12.dp))
                             Text(stringResource(R.string.sk_any))
                         }
                     }
                     items(DeviceSkin.RESOLUTIONS) { (rw, rh) ->
-                        Row(Modifier.fillMaxWidth().clickable { onPick(rw, rh) }, verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.fillMaxWidth().clickable { onPick(rw, rh, dpiValue) }, verticalAlignment = Alignment.CenterVertically) {
                             RadioButton(selected = width == rw && height == rh, onClick = null, modifier = Modifier.padding(12.dp))
                             Text("${rw}x${rh}")
                         }
@@ -496,9 +522,14 @@ private fun ResolutionDialog(width: Int, height: Int, onDismiss: () -> Unit, onP
                     OutlinedTextField(h, { h = it.filter(Char::isDigit).take(4) }, Modifier.weight(1f), singleLine = true,
                         label = { Text(stringResource(R.string.sk_height)) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                 }
+                val auto = custom?.let { app.aemu.core.SkinDensity.forDevice(name, it.first, it.second) }
+                OutlinedTextField(dpi, { dpi = it.filter(Char::isDigit).take(4) }, Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true,
+                    label = { Text(stringResource(R.string.sk_dpi)) },
+                    supportingText = { Text(if (auto != null) stringResource(R.string.sk_dpi_auto, auto) else stringResource(R.string.sk_dpi_sub)) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             }
         },
-        confirmButton = { TextButton(onClick = { custom?.let { onPick(it.first, it.second) } }, enabled = custom != null) { Text(stringResource(R.string.sk_use)) } },
+        confirmButton = { TextButton(onClick = { custom?.let { onPick(it.first, it.second, dpiValue) } }, enabled = custom != null) { Text(stringResource(R.string.sk_use)) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
@@ -517,4 +548,12 @@ private fun AddKeyDialog(onDismiss: () -> Unit, onPick: (NavButton) -> Unit) {
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+private fun cutoutLabel(c: app.aemu.core.SkinCutout) = when (c) {
+    app.aemu.core.SkinCutout.NONE -> R.string.sk_cutout_none
+    app.aemu.core.SkinCutout.NOTCH -> R.string.sk_cutout_notch
+    app.aemu.core.SkinCutout.PUNCH_CENTER -> R.string.sk_cutout_punch_center
+    app.aemu.core.SkinCutout.PUNCH_LEFT -> R.string.sk_cutout_punch_left
+    app.aemu.core.SkinCutout.DROP -> R.string.sk_cutout_drop
 }

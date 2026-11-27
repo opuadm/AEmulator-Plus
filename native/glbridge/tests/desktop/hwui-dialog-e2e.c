@@ -34,7 +34,7 @@ static void fwin_init(struct fwin *f, int w, int h, int format) {
     f->w = w; f->h = h; f->stride = w; f->mem = calloc(1, (size_t)w * h * 4);
     f->buf.common.incRef = inc; f->buf.common.decRef = dec;
     f->buf.width = w; f->buf.height = h; f->buf.stride = w; f->buf.format = format; f->buf.usage_deprecated = 0x933; f->buf.handle = f->mem;
-    f->win.common.incRef = inc; f->win.common.decRef = dec;
+    f->win.common.incRef = inc; f->win.common.decRef = dec; f->win.common.version = (int)sizeof(struct ANativeWindow);
     f->win.dequeueBuffer = fw_dequeue; f->win.queueBuffer = fw_queue; f->win.query = fw_query; f->win.perform = fw_perform; f->win.setSwapInterval = fw_interval; f->win.cancelBuffer = fw_cancel;
 }
 static struct fwin *g_cur;
@@ -115,7 +115,7 @@ static void make_resources(void) {
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
     glBufferData(GL_ARRAY_BUFFER, 262144, 0, GL_DYNAMIC_DRAW);             /* PatchCache: empty at first */
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    uint16_t idx[6 * 16]; for (int q = 0; q < 16; q++) { static const int o[6] = { 0, 1, 2, 2, 1, 3 }; for (int k = 0; k < 6; k++) idx[q * 6 + k] = (uint16_t)(q * 4 + o[k]); }
+    static uint16_t idx[6 * 2048]; for (int q = 0; q < 2048; q++) { static const int o[6] = { 0, 1, 2, 2, 1, 3 }; for (int k = 0; k < 6; k++) idx[q * 6 + k] = (uint16_t)(q * 4 + o[k]); }
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_ibo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof idx, idx, GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
@@ -230,6 +230,115 @@ static void patch_extra(struct fwin *f, EGLDisplay d, EGLSurface s) {
     CHECK(is("1-pixel divider", 100, 100, 0, 255, 0, 255, 2));
 }
 
+
+/* 4.4's nine-patch (drawIndexedTextureMesh): the patch cache's VBO for the vertices (4 per quad), the shared quad index buffer
+ * bound with glBindBuffer(GL_ELEMENT_ARRAY_BUFFER), glDrawElements(GL_TRIANGLES, n, GL_UNSIGNED_SHORT, NULL) - between draws
+ * that take their vertices from memory and the same index buffer (text, drawIndexedQuads), which unbind the VBO. */
+static void quad4(float *v, float ww, float wh, float l, float t, float r, float b) {
+    float x0 = l / ww * 2 - 1, x1 = r / ww * 2 - 1, y0 = 1 - t / wh * 2, y1 = 1 - b / wh * 2;
+    float q[4][4] = { { x0, y0, .5f, .5f }, { x1, y0, .5f, .5f }, { x0, y1, .5f, .5f }, { x1, y1, .5f, .5f } };
+    memcpy(v, q, sizeof q);
+}
+static void patch44(struct fwin *f, EGLDisplay d, EGLSurface s, int rounds) {
+    int ww = f->w, wh = f->h;
+    glEnable(GL_SCISSOR_TEST); glScissor(0, 0, ww, wh); glClear(GL_COLOR_BUFFER_BIT); glViewport(0, 0, ww, wh);
+    glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(g_pr);
+    float m[8 * 4];
+    quad4(m, ww, wh, 10, 10, 60, 40); quad4(m + 16, ww, wh, 60, 10, 110, 40);          /* a 2-quad patch */
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 1024, 2 * 64, m);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    for (int round = 0; round < rounds; round++) {
+        /* the patch */
+        glBindTexture(GL_TEXTURE_2D, g_tex[0]); glUniform1f(g_ut, 0.f);
+        glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_ibo);
+        glEnableVertexAttribArray(0); glEnableVertexAttribArray(1);
+        glVertexAttribPointer(0, 2, GL_FLOAT, 0, 16, (const void *)1024);
+        glVertexAttribPointer(1, 2, GL_FLOAT, 0, 16, (const void *)1032);
+        glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_SHORT, 0);
+        /* a second patch right after (the VBO stays bound, only the offsets change) */
+        glVertexAttribPointer(0, 2, GL_FLOAT, 0, 16, (const void *)1024);
+        glVertexAttribPointer(1, 2, GL_FLOAT, 0, 16, (const void *)1032);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
+        /* text / drawIndexedQuads: vertices in memory, the same index buffer */
+        float tv[16]; quad4(tv, ww, wh, 10, 60, 110, 80);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindTexture(GL_TEXTURE_2D, g_tex[1]); glUniform1f(g_ut, 1.f); glUniform4f(g_uc, 0.f, 0.f, 1.f, 1.f);
+        glVertexAttribPointer(0, 2, GL_FLOAT, 0, 16, tv);
+        glVertexAttribPointer(1, 2, GL_FLOAT, 0, 16, tv + 2);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
+        /* something else unbinds the index buffer, then it is bound again for the next patch */
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        glUniform1f(g_ut, 0.f);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    eglSwapBuffers(d, s);
+    g_cur = f;
+    CHECK(is("4.4 patch, first quad", 30, 25, 220, 220, 220, 255, 2));
+    CHECK(is("4.4 patch, second quad", 90, 25, 220, 220, 220, 255, 2));
+    CHECK(is("4.4 text-like indexed draw from memory", 50, 70, 0, 0, 255, 255, 2));
+}
+
+/* Merged nine-patches (DrawPatchOp batches, drawPatches): the vertices of several patches in one block of memory, the
+ * shared index buffer, glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_SHORT, NULL). */
+static void patches_merged(struct fwin *f, EGLDisplay d, EGLSurface s, int patches, int quads_each) {
+    int ww = f->w, wh = f->h, nq = patches * quads_each;
+    glEnable(GL_SCISSOR_TEST); glScissor(0, 0, ww, wh); glClear(GL_COLOR_BUFFER_BIT); glViewport(0, 0, ww, wh);
+    glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(g_pr); glUniform1f(g_ut, 0.f);
+    float *v = malloc((size_t)nq * 64);
+    for (int p = 0; p < patches; p++) for (int q = 0; q < quads_each; q++)
+        quad4(v + ((size_t)p * quads_each + q) * 16, (float)ww, (float)wh, 5 + q * 12.f, 5 + p * 20.f, 15 + q * 12.f, 20 + p * 20.f);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_ibo);
+    glBindTexture(GL_TEXTURE_2D, g_tex[0]);
+    glEnableVertexAttribArray(0); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(0, 2, GL_FLOAT, 0, 16, v);
+    glVertexAttribPointer(1, 2, GL_FLOAT, 0, 16, v + 2);
+    glDrawElements(GL_TRIANGLES, nq * 6, GL_UNSIGNED_SHORT, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    eglSwapBuffers(d, s);
+    g_cur = f;
+    CHECK(is("merged patches, first", 10, 12, 220, 220, 220, 255, 2));
+    CHECK(is("merged patches, last", 10 + (quads_each - 1) * 12, 12 + (patches - 1) * 20, 220, 220, 220, 255, 2));
+    free(v);
+}
+
+/* AssetAtlasService (4.4): the atlas buffer is written with glTexSubImage2D into a texture that is an EGLImage of it; hwui in
+ * another process binds the same buffer later. With a gralloc that leaves no note the bind copies the buffer's memory, so
+ * the write has to reach the memory. */
+static void atlas_image(EGLDisplay d) {
+    static uint8_t mem[64 * 64 * 4];
+    static struct ANativeWindowBuffer ab;
+    memset(mem, 0, sizeof mem);
+    memset(&ab, 0, sizeof ab);
+    ab.common.incRef = inc; ab.common.decRef = dec;
+    ab.width = 64; ab.height = 64; ab.stride = 64; ab.format = 1; ab.usage_deprecated = 0x100; ab.handle = mem;
+    EGLImageKHR img = eglCreateImageKHR(d, 0, 0x3140, &ab, 0);
+    CHECK(img != 0);
+    GLuint t; glGenTextures(1, &t);
+    glActiveTexture(0x84C0);
+    glBindTexture(GL_TEXTURE_2D, t);
+    e_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
+    uint8_t px[64 * 64 * 4];
+    for (int i = 0; i < 64 * 64; i++) { px[i * 4] = (uint8_t)(i & 255); px[i * 4 + 1] = 77; px[i * 4 + 2] = 5; px[i * 4 + 3] = 255; }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK(memcmp(mem, px, sizeof px) == 0);
+    /* a partial write */
+    uint8_t part[8 * 4 * 4]; memset(part, 9, sizeof part);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 10, 20, 8, 4, GL_RGBA, GL_UNSIGNED_BYTE, part);
+    CHECK(mem[((20 * 64) + 10) * 4] == 9 && mem[((23 * 64) + 17) * 4 + 3] == 9 && mem[((24 * 64) + 10) * 4] == (uint8_t)((24 * 64 + 10) & 255));
+    /* re-specified with glTexImage2D: no longer the image's */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, part);
+    memset(mem, 0, sizeof mem);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, part);
+    CHECK(mem[0] == 0);
+    glDeleteTextures(1, &t);
+}
+
 int main(void) {
     int tries = 0;
     setvbuf(stdout, 0, _IOLBF, 0);
@@ -274,6 +383,15 @@ int main(void) {
     printf("a real nine-patch and a divider\n");
     CHECK(eglMakeCurrent(d, sa, sa, c));
     patch_extra(&act, d, sa);
+    printf("4.4 indexed nine-patch\n");
+    patch44(&act, d, sa, 1);
+    patch44(&act, d, sa, 4);
+    printf("merged patches\n");
+    patches_merged(&act, d, sa, 2, 3);
+    patches_merged(&act, d, sa, 9, 9);
+    patches_merged(&act, d, sa, 2, 3);
+    printf("an image-backed texture written with the GPU\n");
+    atlas_image(d);
     printf("hwui dialog end to end: %d checks, %d failed\n", checks, bad);
     return bad != 0;
 }

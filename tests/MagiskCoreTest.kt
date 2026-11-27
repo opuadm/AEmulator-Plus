@@ -40,6 +40,15 @@ fun main(a: Array<String>) {
     for (f in listOf("magisk", "busybox", "magiskpolicy", "magiskinit", "magiskboot", "util_functions.sh", "boot_patch.sh", "init-ld"))
         check(File(root, "data/adb/magisk/$f").isFile, "data/adb/magisk/$f")
     check(File(root, "data/adb/magisk/magisk").length() == 384440L, "arm64 libmagisk.so extracted intact (384440 bytes)")
+    // module installs (LSPosed) died on "can't create /proc/self/fd/1" because ps never shows the guest's zygote: BOOTMODE is forced
+    val utilText = File(root, "data/adb/magisk/util_functions.sh").readText()
+    check(utilText.lines().none { it.trim() == "[ -z \$BOOTMODE ] && BOOTMODE=false" } && utilText.contains("BOOTMODE=true   # aemu"), "util_functions.sh: BOOTMODE defaults to true")
+    run {   // stock script copied back by the app, then another boot: patched again, once
+        val u = File(root, "data/adb/magisk/util_functions.sh")
+        u.writeText(utilText.replace("BOOTMODE=true   # aemu: always booted Android", "BOOTMODE=false"))
+        MagiskCore.patchBootMode(u); MagiskCore.patchBootMode(u)
+        check(u.readText() == utilText, "patchBootMode restores the patch and is idempotent")
+    }
 
     // modules
     fun mod(id: String, vararg files: Pair<String, String>) { for ((p, c) in files) File(root, "data/adb/modules/$id/$p").apply { parentFile.mkdirs(); writeText(c) } }
@@ -67,6 +76,7 @@ fun main(a: Array<String>) {
     MagiskCore.prepareTmp(root)    // twice: rebuilt, not an error, and a mode-000 directory does not stop it
     check(!File(root, "dev/.aemu-mounts").exists() && !File(root, "dev/.aemu-tmpfs").exists() && File(root, MagiskCore.VMOUNT_FLAG).isFile, "mounts of an earlier boot are gone, the switch stays on")
     check(true, "prepareTmp is repeatable")
+    check(File(root, "proc/cmdline").readText().contains("androidboot."), "prepareTmp leaves a readable /proc/cmdline for the scripts")
     // the magic-mount worker that Magisk makes inside (mode 000 for its own directories) must be enterable
     for (d in listOf("system", "system/bin", "system/xbin"))
         check(File(root, "debug_ramdisk/.magisk/worker/$d").let { it.isDirectory && it.canExecute() && it.canWrite() }, "worker/$d exists and is enterable")

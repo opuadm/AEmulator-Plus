@@ -62,7 +62,7 @@ object GuestLog {
             out.write("\n")
         }
         // Fatal assertions can be written to stderr instead of Android's main buffer.
-        for (name in listOf("zygote", "zygote_secondary", "binderd", "servicemanager", "surfaceflinger", "bootanim", "installd", "netd", "mediaserver")) {
+        for (name in listOf("zygote", "zygote_secondary", "binderd", "servicemanager", "surfaceflinger", "bootanim", "installd", "netd", "mediaserver", "aemu-wifi")) {
             val f = File(run, "$name.log")
             if (!f.isFile) continue
             out.write("\n=== service $name stdout/stderr ===\n")

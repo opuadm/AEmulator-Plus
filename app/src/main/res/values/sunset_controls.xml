@@ -38,6 +38,10 @@
     <string name="vi_spen_sub">Registers an S-Pen digitizer (sec_e-pen) in the guest alongside its touch screen and adds two buttons to the navigation bar. S-Pen mode: while it is lit, every touch on the screen reaches the guest as the S-Pen (stylus tool type, pressure, hover just before and after contact; one contact at a time, no multi-touch), and a host stylus also hovers and its side button works. S-Pen button: a tap presses and releases the pen\'s side button while it hovers, which opens Air Command on a Samsung firmware that has it. Needs Android 4.0 or newer and a full VM restart.</string>
     <string name="vi_spen_toggle">S-Pen mode</string>
     <string name="vi_spen_button">S-Pen button (Air Command)</string>
+    <string name="vi_xperia_play">Input: Xperia Play slider and gamepad</string>
+    <string name="vi_xperia_play_sub">Registers the Xperia Play\'s slider switch in the guest and adds a button to the navigation bar that slides the keypad out and in. While it is out, a floating gamepad (D-pad, Cross, Circle, Square, Triangle, L, R, Start, Select, Menu, Play) sends its keys to the guest, and the firmware sees the slider open (the keyguard is bypassed). The analog touchpads are not emulated. Only for an R800 machine (R800i, R800a, R800at, R800x); needs a full VM restart.</string>
+    <string name="vi_xperia_play_toggle">Slide out the Xperia Play gamepad</string>
+    <string name="vi_xperia_play_title">Xperia Play</string>
     <string name="vi_keyboard">Keyboard</string>
     <string name="vi_keypad_title">Keypad</string>
     <string name="vi_close">Close</string>

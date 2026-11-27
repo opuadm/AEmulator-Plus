@@ -524,6 +524,84 @@ static void scene_all_programs(void) {
     printf("    %d programs, %d failed\n", built, fail);
 }
 
+/* What SurfaceFlinger of 4.x does for every layer: the layer's texture is GL_TEXTURE_EXTERNAL_OES (a SurfaceTexture's), it is
+ * enabled and drawn with the fixed-function pipeline, then disabled again. The driver took GL_TEXTURE_EXTERNAL_OES for a
+ * capability of the host (GL_INVALID_ENUM, the 0x0500 "GL error" lines of SurfaceFlinger) and drew the layers without a
+ * texture. (The test makes the texture through the 2D target: an EGL image is what a guest binds to it, the host sees a 2D
+ * texture either way.) */
+static void scene_external(EGLDisplay d, EGLSurface s) {
+    printf("GL_TEXTURE_EXTERNAL_OES: enable, bind, draw, disable (SurfaceFlinger's layers)\n");
+    GLuint tex[2];
+    glGenTextures(2, tex);
+    static const uint8_t red[4] = { 255, 0, 0, 255 }, grey[4] = { 128, 128, 128, 255 };
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    glBindTexture(GL_TEXTURE_2D, tex[1]);
+    glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, grey);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glViewport(0, 0, W, H);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrthof(0.f, (float)W, 0.f, (float)H, -1.f, 1.f);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glMatrixMode(0x1702 /* GL_TEXTURE */); glLoadIdentity();
+    glClearColor(0.f, 0.f, 0.f, 1.f); glClear(GL_COLOR_BUFFER_BIT);
+    static const float v[] = { 20, 20, 120, 20, 20, 120, 120, 120 };
+    static const float v2[] = { 160, 20, 260, 20, 160, 120, 260, 120 };
+    static const float tc[] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY); glTexCoordPointer(2, GL_FLOAT, 0, tc);
+    glTexEnvx(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor4f(1.f, 1.f, 1.f, 1.f);
+    CHECK(glGetError() == 0);
+    glDisable(0x8D65); glDisable(GL_TEXTURE_2D);
+    glBindTexture(0x8D65, tex[0]);
+    glTexParameterx(0x8D65, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameterx(0x8D65, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glEnable(0x8D65);
+    CHECK(glIsEnabled(0x8D65) && !glIsEnabled(GL_TEXTURE_2D));
+    glVertexPointer(2, GL_FLOAT, 0, v);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindTexture(0x8D65, tex[1]);                          /* the next layer's texture */
+    glVertexPointer(2, GL_FLOAT, 0, v2);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(0x8D65);
+    CHECK(!glIsEnabled(0x8D65));
+    CHECK(glGetError() == 0);                               /* (the 0x0500 of the log) */
+    swap_frame(d, s); eglSwapBuffers(d, s);
+    CHECK(is(70, H - 70, 255, 0, 0, 1));                    /* the first layer: its texture */
+    CHECK(is(210, H - 70, 128, 128, 128, 2));               /* the second */
+    CHECK(is(140, H - 70, 0, 0, 0, 1));                     /* between them: the clear colour */
+    /* disabled: a layer without a texture (Layer's dim, the wormhole) is its colour, not the texture of the last one */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glColor4f(0.f, 1.f, 0.f, 1.f);
+    glVertexPointer(2, GL_FLOAT, 0, v);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    swap_frame(d, s); eglSwapBuffers(d, s);
+    CHECK(is(70, H - 70, 0, 255, 0, 1));
+    /* both targets on one unit: the external one is what is sampled (OES_EGL_image_external) */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glColor4f(1.f, 1.f, 1.f, 1.f);
+    glBindTexture(GL_TEXTURE_2D, tex[1]); glEnable(GL_TEXTURE_2D);
+    glBindTexture(0x8D65, tex[0]); glEnable(0x8D65);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    swap_frame(d, s); eglSwapBuffers(d, s);
+    CHECK(is(70, H - 70, 255, 0, 0, 1));
+    glDisable(0x8D65);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);                  /* back to the 2D texture */
+    swap_frame(d, s); eglSwapBuffers(d, s);
+    CHECK(is(70, H - 70, 128, 128, 128, 2));
+    const GLubyte *ext = glGetString(GL_EXTENSIONS);
+    CHECK(ext && strstr((const char *)ext, "GL_OES_EGL_image_external"));
+    glDisable(GL_TEXTURE_2D);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glBindTexture(0x8D65, 0);
+    glDeleteTextures(2, tex);
+    CHECK(glGetError() == 0);
+}
+
 int main(void) {
     int tries = 0;
     setvbuf(stdout, 0, _IOLBF, 0);
@@ -533,6 +611,7 @@ int main(void) {
     g_buf.common.incRef = inc; g_buf.common.decRef = dec;
     g_buf.width = W; g_buf.height = H; g_buf.stride = W; g_buf.format = 2; g_buf.usage_deprecated = 0x933; g_buf.handle = g_mem;
     g_win.common.incRef = inc; g_win.common.decRef = dec;
+    g_win.common.version = (int)sizeof(struct ANativeWindow);       /* a 4.2+ window: the driver picks the fence slots by it (win_new_abi) */
     g_win.dequeueBuffer = fw_dequeue; g_win.queueBuffer = fw_queue; g_win.query = fw_query; g_win.perform = fw_perform; g_win.setSwapInterval = fw_interval; g_win.cancelBuffer = fw_cancel;
 
     CHECK(solo());
@@ -559,6 +638,7 @@ int main(void) {
     scene_texture_modes(d, s);
     scene_lighting_fog_alpha(d, s);
     scene_two_units(d, s);
+    scene_external(d, s);
     scene_all_programs();
     CHECK(g_missing == 0);
     scene_formats(d, s, "converted by the host");

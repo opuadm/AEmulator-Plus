@@ -1,5 +1,6 @@
-/* Emulator-owned evdev touchpad and keyboard for the "mouse and keyboard" input method, and the emulated S-Pen digitizer
- * ("sec_e-pen", input method "S-Pen" in VM settings; see SPenProtocol in the app).
+/* Emulator-owned evdev touchpad and keyboard for the "mouse and keyboard" input method, the emulated S-Pen digitizer
+ * ("sec_e-pen", input method "S-Pen" in VM settings; see SPenProtocol in the app) and the Xperia Play slider switch
+ * ("AEmulator Slider", input method "Xperia Play" in the settings of an R800 VM; see XperiaPlayProtocol in the app).
  * Same technique as trackball.h: the guest's EventHub finds an empty node in /dev/input (made by the app), open()
  * returns a socket to the app and the EVIOC* questions are answered here, so no guest binary or file is patched.
  * Self-contained: needs only sys3() and fail() from the including shim. Used by the ARM shim (aemushim.c) and the x86-32 shim
@@ -13,16 +14,25 @@
 #define VI_KBD_SOCKET "/dev/aemu_keyboard"
 #define VI_SPEN_NODE "/dev/input/aemu-spen"
 #define VI_SPEN_SOCKET "/dev/aemu_spen"
+#define VI_SLIDER_NODE "/dev/input/aemu-slider"
+#define VI_SLIDER_SOCKET "/dev/aemu_slider"
 #define VI_NONE 0
 #define VI_PAD 1
 #define VI_KBD 2
 #define VI_SPEN 3
+#define VI_SLIDER 4
 #define VI_PAD_MAX 4095
 /* The pen digitizer: single-touch "Wacom" protocol. Keep in step with SPenProtocol (VirtualInput.kt). */
 #define VI_SPEN_XY_MAX 16383
 #define VI_SPEN_PRESSURE_MAX 4095
 #define VI_SPEN_DISTANCE_MAX 255
 #define VI_SPEN_TILT_MAX 63
+/* The slider: a switch-only device (EV_SW, SW_LID = 0). The guest reads SW_LID = 1 as "lid shut" and 0 as "lid open"; a
+ * slider phone reports its slider that way (the Xperia Play's framework-res sets config_bypass_keyguard_if_slider_open and
+ * config_lidNavigationAccessibility for it). A VM always boots with the slider shut: EVIOCGSW (the state the guest reads
+ * before any event) says so, and the app sends the real state as the first event of every connection. Keep in step with
+ * XperiaPlayProtocol (VirtualInput.kt). */
+#define VI_SLIDER_SW_LID 0
 
 struct vi_sockaddr { unsigned short family; char path[108]; };
 
@@ -54,7 +64,12 @@ static const char *vi_socket_of(const char *path) {
     if (vi_equal(path, VI_PAD_NODE)) return VI_PAD_SOCKET;
     if (vi_equal(path, VI_KBD_NODE)) return VI_KBD_SOCKET;
     if (vi_equal(path, VI_SPEN_NODE)) return VI_SPEN_SOCKET;
+    if (vi_equal(path, VI_SLIDER_NODE)) return VI_SLIDER_SOCKET;
     return 0;
+}
+
+static const char *vi_socket_of_kind(int kind) {
+    return kind == VI_PAD ? VI_PAD_SOCKET : kind == VI_KBD ? VI_KBD_SOCKET : kind == VI_SPEN ? VI_SPEN_SOCKET : VI_SLIDER_SOCKET;
 }
 
 /* Raw result; -4096 means the path is not one of ours. */
@@ -83,8 +98,8 @@ static int vinput_fd(int fd) {
     if (vi_getpeername(fd, &addr, &len) < 0 || addr.family != 1) return VI_NONE;
     unsigned n = 0;
     while (n < sizeof(addr.path) && addr.path[n]) n++;
-    for (int kind = VI_PAD; kind <= VI_SPEN; kind++) {
-        const char *suffix = kind == VI_PAD ? VI_PAD_SOCKET : kind == VI_KBD ? VI_KBD_SOCKET : VI_SPEN_SOCKET;
+    for (int kind = VI_PAD; kind <= VI_SLIDER; kind++) {
+        const char *suffix = vi_socket_of_kind(kind);
         unsigned sl = 0;
         while (suffix[sl]) sl++;
         if (n < sl) continue;
@@ -108,7 +123,7 @@ static int vinput_ioctl(int kind, unsigned req, void *arg) {
     if (nr == 1 /* EVIOCGVERSION */ && len == 4) { *(unsigned *)b = 0x10001; return 0; }
     if (nr == 2 /* EVIOCGID */ && len == 8) {
         unsigned short *id = arg;
-        id[0] = 6 /* BUS_VIRTUAL */; id[1] = 0; id[2] = (unsigned short)(kind == VI_PAD ? 2 : kind == VI_KBD ? 3 : 4); id[3] = 1;
+        id[0] = 6 /* BUS_VIRTUAL */; id[1] = 0; id[2] = (unsigned short)(kind == VI_PAD ? 2 : kind == VI_KBD ? 3 : kind == VI_SPEN ? 4 : 5); id[3] = 1;
         return 0;
     }
     if (nr >= 6 && nr <= 8) { /* name, physical path, unique ID */
@@ -116,6 +131,7 @@ static int vinput_ioctl(int kind, unsigned req, void *arg) {
          * firmware treats it as its own S-Pen; AOSP ignores the name and goes by the BTN_TOOL_PEN tool type. */
         const char *s = kind == VI_PAD ? (nr == 6 ? "AEmulator Touchpad" : nr == 7 ? "aemu/touchpad" : "aemu-touchpad")
                       : kind == VI_SPEN ? (nr == 6 ? "sec_e-pen" : nr == 7 ? "sec_e-pen/input1" : "aemu-spen")
+                      : kind == VI_SLIDER ? (nr == 6 ? "AEmulator Slider" : nr == 7 ? "aemu/slider" : "aemu-slider")
                                         : (nr == 6 ? "AEmulator Keyboard" : nr == 7 ? "aemu/keyboard" : "aemu-keyboard");
         unsigned i = 0;
         if (!len) return 0;
@@ -128,11 +144,14 @@ static int vinput_ioctl(int kind, unsigned req, void *arg) {
         for (unsigned i = 0; i < len; i++) b[i] = 0;
         if (nr == 9 && kind == VI_PAD) vi_bit(b, len, 0 /* INPUT_PROP_POINTER */);
         if (nr == 9 && kind == VI_SPEN) vi_bit(b, len, 1 /* INPUT_PROP_DIRECT: the pen draws on the screen itself */);
-        if (nr == 0x20) { /* EV bits */
+        if (nr == 0x1b && kind == VI_SLIDER) vi_bit(b, len, VI_SLIDER_SW_LID);   /* EVIOCGSW: shut until the app says otherwise */
+        if (nr == 0x20 && kind == VI_SLIDER) { vi_bit(b, len, 0 /* EV_SYN */); vi_bit(b, len, 5 /* EV_SW */); }   /* a switch, no keys */
+        else if (nr == 0x20) { /* EV bits */
             vi_bit(b, len, 0 /* EV_SYN */); vi_bit(b, len, 1 /* EV_KEY */);
             if (kind != VI_KBD) vi_bit(b, len, 3 /* EV_ABS */);
         }
-        if (nr == 0x21) { /* KEY bits */
+        if (nr == 0x20 + 5 /* SW bits */ && kind == VI_SLIDER) vi_bit(b, len, VI_SLIDER_SW_LID);
+        if (nr == 0x21 && kind != VI_SLIDER) { /* KEY bits */
             if (kind == VI_KBD) { for (unsigned k = 1; k < 249; k++) vi_bit(b, len, k); }
             else if (kind == VI_SPEN) { vi_bit(b, len, 320 /* BTN_TOOL_PEN */); vi_bit(b, len, 330 /* BTN_TOUCH */); vi_bit(b, len, 331 /* BTN_STYLUS */); }
             else { vi_bit(b, len, 272 /* BTN_LEFT */); vi_bit(b, len, 273 /* BTN_RIGHT */); vi_bit(b, len, 330 /* BTN_TOUCH */); }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Per-machine device skin and the skins' default guest screen size. Other languages fall back to these until translated. -->
+<resources>
+    <string name="vs_skin">Screen skin</string>
+    <string name="vs_skin_default">Default skin: %1$s</string>
+    <string name="vs_skin_size">Default guest screen: %1$d×%2$d</string>
+    <string name="vs_resolution_skin_size">Skin\'s resolution (%1$d×%2$d)</string>
+    <string name="vs_resolution_skin_none">Skin\'s resolution (this skin names none)</string>
+    <string name="th_vm_title">Skin for this machine</string>
+    <string name="th_vm_sub">Pick a device skin for this machine only, or let it wear the default skin. A skin sets the guest screen to the resolution of the phone or tablet it shows.</string>
+    <string name="th_vm_default">Default skin</string>
+    <string name="th_vm_default_sub">Now: %1$s (chosen in the app settings)</string>
+    <string name="th_default_hint">This is the default skin of every machine; a machine can wear its own skin in its settings. Each skin lists the guest screen size of the real device it shows.</string>
+</resources>

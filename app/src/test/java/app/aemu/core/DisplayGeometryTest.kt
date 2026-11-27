@@ -30,6 +30,14 @@ class DisplayGeometryTest {
         assertEquals(DisplayGeometry.Rect(100, 200, 0, 0), DisplayGeometry.fit(100, 200, 100, 200, 20, 0, true))
         assertEquals(DisplayGeometry.Rect(200, 100, 0, 0), DisplayGeometry.fit(200, 100, 200, 100, 20, 1, true))
     }
+    @Test fun hostGuestIsTheRealHostSizeAndSitsAtTheTop() {
+        assertEquals(1272 to 2800, DisplayGeometry.hostGuestSize(1272, 2800))
+        assertEquals(1080 to 2400, DisplayGeometry.hostGuestSize(1080, 2400))
+        // odd sizes round down to even, nothing more is taken off
+        assertEquals(1080 to 2398, DisplayGeometry.hostGuestSize(1081, 2399))
+        // the bar is drawn over the bottom of the window: the guest is not centred, it starts at the top
+        assertEquals(DisplayGeometry.Rect(1272, 2800, 0, 0), DisplayGeometry.fit(1272, 2800, 1272, 2800, 48, 0, true))
+    }
     @Test fun convertsCurrentResolutionToNaturalDimensions() {
         assertEquals(1080 to 2400, DisplayGeometry.natural(2400, 1080, 1))
         assertEquals(1080 to 2400, DisplayGeometry.natural(1080, 2400, 0))

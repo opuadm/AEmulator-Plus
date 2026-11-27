@@ -147,7 +147,8 @@ HOOK = '''glPixelStorei glBindVertexArray glDrawArraysIndirect glDrawElementsInd
 glGetVertexAttribiv glGetVertexAttribIiv glGetVertexAttribIuiv
 glDeleteBuffers glDeleteVertexArrays glVertexAttribDivisor glGetBooleanv glGetFloatv glGetIntegerv glGetInteger64v
 glBufferData glBufferSubData glCopyBufferSubData glBindBufferBase glBindBufferRange glBeginTransformFeedback glDispatchCompute
-glDispatchComputeIndirect glMemoryBarrier glMemoryBarrierByRegion'''.split()
+glDispatchComputeIndirect glMemoryBarrier glMemoryBarrierByRegion
+glActiveTexture glBindTexture glDeleteTextures'''.split()
 # sent by a hand-written e_<name> of guest.c (state the guest keeps and sends only when it changed) through the
 # generated encoder, named e0_<name>
 LAZY = '''glBindBuffer glEnableVertexAttribArray glDisableVertexAttribArray'''.split()

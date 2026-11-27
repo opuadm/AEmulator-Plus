@@ -57,6 +57,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -134,35 +135,55 @@ internal fun MiniBar(theme: VmTheme, modifier: Modifier = Modifier, pressedKey: 
     }
 }
 
+/**
+ * Makes the theme picker choose the skin of one machine instead of the app's default skin: [currentId] is the machine's own
+ * choice (null = it follows the default skin), [onPick] gets the id of the skin picked, or null for "use the default skin".
+ */
+internal class VmSkinChoice(val currentId: String?, val onPick: (String?) -> Unit)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ThemeSheet(onDismiss: () -> Unit) {
+internal fun ThemeSheet(onDismiss: () -> Unit, vmChoice: VmSkinChoice? = null) {
     val ctx = LocalContext.current
     var version by remember { mutableIntStateOf(0) }
+    // without [vmChoice] the picker sets the default skin of the whole app; with it, the skin of one machine (or "default")
+    var pickedId by remember { mutableStateOf(vmChoice?.currentId) }
+    val appSelected = remember(version) { VmThemes.selected(ctx) }
+    val inUse = remember(version, pickedId) {
+        if (vmChoice == null) appSelected else pickedId?.let { id -> VmThemes.all(ctx).firstOrNull { it.id == id } } ?: appSelected
+    }
+    fun choose(id: String) {
+        if (vmChoice != null) { pickedId = id; vmChoice.onPick(id) } else VmThemes.select(ctx, id)
+        version++
+    }
     // three lists: the plain themes and the device skins are fixed; only the custom list can grow
     val plain = VmThemes.BUILT_IN
     val skins = remember(version) { VmThemes.skins(ctx) }
     val custom = remember(version) { VmThemes.custom(ctx) }
-    val selectedId = remember(version) { VmThemes.selected(ctx).id }
+    val selectedId = if (vmChoice == null) appSelected.id else pickedId
     // the list holding the chosen theme starts open, the other two closed
-    val startGroup = remember { VmThemes.selected(ctx).group }
+    val startGroup = remember { inUse.group }
     var plainOpen by remember { mutableStateOf(startGroup == ThemeGroup.PLAIN) }
     var skinsOpen by remember { mutableStateOf(startGroup == ThemeGroup.SKIN) }
     var customOpen by remember { mutableStateOf(startGroup == ThemeGroup.CUSTOM) }
+    // inside the skins list: one collapsible list per brand; the brand of the chosen skin starts open
+    val brands = remember(skins) { VmThemes.skinsByBrand(skins) }
+    val openBrands = remember { mutableStateListOf<String>().also { l ->
+        inUse.takeIf { it.group == ThemeGroup.SKIN }?.let { l.add(it.brand ?: OTHER_BRAND_KEY) }
+    } }
     var editing by remember { mutableStateOf<VmTheme?>(null) }
     var exporting by remember { mutableStateOf<VmTheme?>(null) }
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+    val exportLauncher = rememberSaveFilePicker("application/json") { uri ->
         val t = exporting; exporting = null
         if (uri != null && t != null) runCatching {
             ctx.contentResolver.openOutputStream(uri)?.use { it.write(VmThemes.export(ctx, t)) }
         }.onSuccess { toast(ctx, ctx.getString(R.string.th_exported)) }.onFailure { toast(ctx, ctx.getString(R.string.th_failed, it.userMessage(ctx))) }
     }
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val importLauncher = rememberSingleFilePicker { uri ->
         if (uri != null) runCatching {
             val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: localizedError("cannot read the file", R.string.err_cannot_read_the_file)
-            VmThemes.select(ctx, VmThemes.import(ctx, bytes).id)
+            choose(VmThemes.import(ctx, bytes).id)
             customOpen = true
-            version++
         }.onSuccess { toast(ctx, ctx.getString(R.string.th_imported)) }.onFailure { toast(ctx, ctx.getString(R.string.th_failed, it.userMessage(ctx))) }
     }
     // a plain theme or a skin is copied into the custom list before it is edited; only custom themes are edited in place or deleted
@@ -170,7 +191,7 @@ private fun ThemeSheet(onDismiss: () -> Unit) {
     fun row(t: VmTheme) {
         ThemeRow(
             t, selected = t.id == selectedId,
-            onSelect = { VmThemes.select(ctx, t.id); version++ },
+            onSelect = { choose(t.id) },
             onEdit = { editing = if (t.builtIn) VmThemes.detach(ctx, t, ctx.getString(R.string.th_copy_of, VmThemes.displayName(ctx, t))) else t },
             onExport = { exporting = t; exportLauncher.launch("${t.name}.${VmThemes.EXTENSION}") },
             onDelete = { VmThemes.delete(ctx, t.id); version++ },
@@ -178,14 +199,26 @@ private fun ThemeSheet(onDismiss: () -> Unit) {
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp)) {
-            Text(stringResource(R.string.th_title), style = MaterialTheme.typography.headlineSmall)
-            Text(stringResource(R.string.th_sub), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(stringResource(if (vmChoice != null) R.string.th_vm_title else R.string.th_title), style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(if (vmChoice != null) R.string.th_vm_sub else R.string.th_sub), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // the app-wide choice is the default of every machine that has no skin of its own
+            if (vmChoice == null) Text(stringResource(R.string.th_default_hint), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(8.dp))
+            if (vmChoice != null) DefaultSkinRow(VmThemes.displayName(ctx, appSelected), pickedId == null) {
+                pickedId = null; vmChoice.onPick(null); version++
+            }
             ThemeGroupSection(stringResource(R.string.th_group_plain), plain.size, plainOpen, { plainOpen = !plainOpen }) {
                 for (t in plain) row(t)
             }
             if (skins.isNotEmpty()) ThemeGroupSection(stringResource(R.string.th_group_skins), skins.size, skinsOpen, { skinsOpen = !skinsOpen }) {
-                for (t in skins) row(t)
+                for ((brand, list) in brands) {
+                    val key = brand ?: OTHER_BRAND_KEY
+                    BrandSection(brand ?: stringResource(R.string.th_brand_other), list.size, key in openBrands,
+                        { if (!openBrands.remove(key)) openBrands.add(key) }) {
+                        for (t in list) row(t)
+                    }
+                }
             }
             ThemeGroupSection(stringResource(R.string.th_group_custom), custom.size, customOpen, { customOpen = !customOpen }) {
                 if (custom.isEmpty()) Text(stringResource(R.string.th_custom_empty), style = MaterialTheme.typography.bodyMedium,
@@ -196,9 +229,9 @@ private fun ThemeSheet(onDismiss: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
                     // starts from the theme in use; always saved to the custom list
-                    editing = VmThemes.detach(ctx, VmThemes.selected(ctx), ctx.getString(R.string.th_new_name))
+                    editing = VmThemes.detach(ctx, inUse, ctx.getString(R.string.th_new_name))
                 }) { Text(stringResource(R.string.th_new)) }
-                OutlinedButton(onClick = { importLauncher.launch(arrayOf("*/*")) }) { Text(stringResource(R.string.th_import)) }
+                OutlinedButton(onClick = { importLauncher.launch() }) { Text(stringResource(R.string.th_import)) }
             }
             Text(stringResource(R.string.th_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 24.dp))
@@ -206,8 +239,21 @@ private fun ThemeSheet(onDismiss: () -> Unit) {
     }
     editing?.let { t ->
         ThemeEditor(t, onCancel = { editing = null }, onSave = { saved ->
-            VmThemes.select(ctx, VmThemes.save(ctx, saved).id); editing = null; customOpen = true; version++
+            choose(VmThemes.save(ctx, saved).id); editing = null; customOpen = true
         })
+    }
+}
+
+/** First row of a machine's skin picker: no skin of its own, it wears the app's default skin (named [defaultName]). */
+@Composable
+private fun DefaultSkinRow(defaultName: String, selected: Boolean, onSelect: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Column(Modifier.weight(1f)) {
+            Text(stringResource(R.string.th_vm_default), style = MaterialTheme.typography.titleSmall)
+            Text(stringResource(R.string.th_vm_default_sub, defaultName), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -226,6 +272,25 @@ private fun ThemeGroupSection(title: String, count: Int, expanded: Boolean, onTo
     AnimatedVisibility(expanded) { Column(content = content) }
 }
 
+/** Key of the "no brand" list in the open-brands set; a real brand can never be this long. */
+private const val OTHER_BRAND_KEY = "\u0000other"
+
+/** One brand inside the skins list: a smaller, indented header with the number of skins and an arrow, then the rows. */
+@Composable
+private fun BrandSection(title: String, count: Int, expanded: Boolean, onToggle: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "themeBrandArrow")
+    Column(Modifier.padding(start = 8.dp)) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 4.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+            Text(count.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 8.dp))
+            Icon(Icons.Rounded.ExpandMore, stringResource(if (expanded) R.string.th_collapse else R.string.th_expand), Modifier.size(20.dp).rotate(arrow))
+        }
+        // rows are only composed while the brand is open, so the pictures of a closed brand are never loaded
+        AnimatedVisibility(expanded) { Column(content = content) }
+    }
+}
+
 /** A theme in a list: choose it, edit it (plain themes and skins: copy it first), share it and, when it is custom, delete it. */
 @Composable
 private fun ThemeRow(t: VmTheme, selected: Boolean, onSelect: () -> Unit, onEdit: () -> Unit, onExport: () -> Unit, onDelete: () -> Unit) {
@@ -234,8 +299,13 @@ private fun ThemeRow(t: VmTheme, selected: Boolean, onSelect: () -> Unit, onEdit
         RadioButton(selected = selected, onClick = onSelect)
         if (t.fromSkinPack) {
             SkinThumb(t, Modifier.padding(end = 12.dp).size(width = 40.dp, height = 64.dp))
-            Text(VmThemes.displayName(ctx, t), style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text(VmThemes.displayName(ctx, t), style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                // the skin's default guest screen size: the real resolution of the phone or tablet
+                VmThemes.guestSize(t)?.let { (w, h) ->
+                    Text("$w×$h" + (VmThemes.guestDensity(t)?.let { " · $it dpi" } ?: ""), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         } else Column(Modifier.weight(1f)) {
             Text(VmThemes.displayName(ctx, t), style = MaterialTheme.typography.titleSmall)
             MiniBar(t, Modifier.fillMaxWidth(0.85f).padding(top = 4.dp))

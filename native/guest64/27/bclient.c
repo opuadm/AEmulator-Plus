@@ -389,6 +389,9 @@ static void binder_closed(int fd) {
 #define BR_REPLY64 0x80407203u
 #define BR_TRANSACTION32 0x80287202u
 #define BR_REPLY32 0x80287203u
+#define BR_SEC_CTX64 0x80487202u            /* BR_TRANSACTION_SEC_CTX: the 64-bit transaction + a 64-bit pointer to the caller's security context (12+) */
+#define BR_SEC_CTX32 0x802c7202u            /* ...and the 32-bit one: 40 + 4 bytes */
+#define BINDER_SET_CONTEXT_MGR_EXT32 0x4010620du   /* the flat_binder_object it carries is 16 bytes here, 24 in protocol 8 */
 #define T_BINDER 0x73622a85u
 #define T_WBINDER 0x77622a85u
 #define T_HANDLE 0x73682a85u
@@ -558,6 +561,12 @@ static long bwrite_read32(struct bth *t, u32 *w32) {
             if ((r = txn64to32(&d, out)) < 0) break;
             c32 = cmd == BR_TRANSACTION64 ? BR_TRANSACTION32 : BR_REPLY32;
             memcpy(oq, &c32, 4); memcpy(oq + 4, out, 40); oq += 44;
+        } else if (cmd == BR_SEC_CTX64 && sz == sizeof(struct btd) + 8) {   // 12+: the buffer of a transaction that asked for the caller's security context
+            u32 out[10]; struct btd d; u64 sc; memcpy(&d, s + 4, sizeof d); memcpy(&sc, s + 4 + sizeof d, 8);
+            if ((r = txn64to32(&d, out)) < 0) break;
+            u32 sc32 = (u32)sc;
+            c32 = BR_SEC_CTX32;
+            memcpy(oq, &c32, 4); memcpy(oq + 4, out, 40); memcpy(oq + 44, &sc32, 4); oq += 48;
         } else if (((cmd >> 8) & 0xff) == 'r' && nr >= 7 && nr <= 0x0a && sz == 16) {
             u32 v[2] = { (u32)*(const u64 *)a, (u32)*(const u64 *)(a + 2) };
             c32 = 0x80087200u | nr;
@@ -586,6 +595,9 @@ static long binder_ioctl(int fd, u32 cmd, u64 arg) {
         if (cmd == BWR32) return bwrite_read32(t, (u32 *)arg);
         if (cmd == BINDER_VERSION) { *(int *)arg = 7; return 0; }
         if (cmd == BINDER_WRITE_READ) return -EINVAL;
+#ifdef BINDER_SET_CONTEXT_MGR_EXT
+        if (cmd == BINDER_SET_CONTEXT_MGR_EXT32) cmd = BINDER_SET_CONTEXT_MGR_EXT;   // type and flags sit in the same place in both layouts: the flag is all that is read
+#endif
     }
     switch (cmd) {
     case BINDER_WRITE_READ: return bwrite_read(t, (struct bwr *)arg);

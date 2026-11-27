@@ -14,8 +14,10 @@ internal object DisplayGeometry {
         val scale = minOf(aw.toFloat() / guestWidth, ah.toFloat() / guestHeight)
         val w = (guestWidth * scale).toInt().coerceAtLeast(1)
         val h = (guestHeight * scale).toInt().coerceAtLeast(1)
-        return Rect(w, h, (aw - w) / 2 + if (edge == Edge.LEFT) amount else 0,
-            (ah - h) / 2 + if (edge == Edge.TOP) amount else 0)
+        // overlay + bottom bar (the "Host" resolution): the bar covers the bottom of the window, so a guest shorter than the
+        // window sits at the top instead of being centred, which would leave part of its bottom under the bar
+        val top = if (overlay && edge == Edge.BOTTOM) 0 else (ah - h) / 2 + if (edge == Edge.TOP) amount else 0
+        return Rect(w, h, (aw - w) / 2 + if (edge == Edge.LEFT) amount else 0, top)
     }
 
     /** The part of the window the guest screen may occupy: everything except the strip of controls (unless they overlay it). */
@@ -61,4 +63,12 @@ internal object DisplayGeometry {
     }
 
     fun natural(width: Int, height: Int, turns: Int): Pair<Int, Int> = if (turns % 2 == 0) width to height else height to width
+
+    /**
+     * The size the guest gets in the "Host" resolution for a phone whose natural size is [width] x [height]: the real
+     * host size (rounded down to even numbers). The navigation bar overlays the guest in that mode; a person who needs the
+     * strip under it free floats the bar away from the edge (see FloatingNavPolicy), so the guest no longer gives up rows for it.
+     */
+    fun hostGuestSize(width: Int, height: Int): Pair<Int, Int> =
+        (width.coerceAtLeast(2) and -2) to (height.coerceAtLeast(2) and -2)
 }

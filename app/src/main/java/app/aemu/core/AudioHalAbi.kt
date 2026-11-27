@@ -1,10 +1,17 @@
 package app.aemu.core
 
-/** Recognizes the verified stock ZR Thumb callback layout, not merely a brand. */
+/** Recognizes the CAF direct-track stream layout from libnbaio's own code (Sony ZR, LG-D722), not merely a brand. */
 object AudioHalAbi {
+    /**
+     * The Thumb-2 sequence in libnbaio's AudioStreamOutSink::getTimestamp that reads get_presentation_position from the
+     * stream at +0x68 (the CAF direct-track tail) and returns -ENOSYS when it is NULL:
+     * "ldr r3,[r0,#0x68]; cbnz r3,..; mvn.w r0,#37". The AOSP slot 0x60 encodes as 0x6e03, so it never matches.
+     * Modified for AEmulator Plus, 2026-11-23: this used to include the function prologue as well (push {r0,r1,r4,lr};
+     * mov r4,r1; ldr r0,[r0,#0x18]), verified on the Sony ZR build only. The LG-D722 5.0.1 libnbaio has the identical +0x68
+     * reader (mediaserver crash bytes at the call site: 83 6e 13 b9 6f f0 25 00) but the prologue test missed it, so the
+     * AOSP-layout HAL was installed and AudioOut_2 called `device` (=2) as get_presentation_position (SIGSEGV pc=2).
+     */
     private val timestampPrefix = byteArrayOf(
-        0x13, 0xb5.toByte(), 0x0c, 0x46, // push; mov r4,r1
-        0x80.toByte(), 0x69,            // ldr r0,[r0,#0x18] (stream)
         0x83.toByte(), 0x6e,            // ldr r3,[r0,#0x68] (presentation)
         0x13, 0xb9.toByte(),            // cbnz r3
         0x6f, 0xf0.toByte(), 0x25, 0x00 // missing callback -> -ENOSYS
@@ -151,7 +158,7 @@ object AudioHalAbi {
      * AOSP-layout HAL: its audio_stream_out is calloc'ed 8 bytes short of the +0x68 slot libnbaio reads
      * get_presentation_position from, the read returns heap garbage (2) and AudioOut_2 calls it ("SIGSEGV pc=0x00000002, lr in
      * libnbaio.so", mediaserver code 139 on every start). Widening the range cannot misdetect: the detector still has to find the
-     * exact Thumb prefix of the +0x68 reader, which the AOSP slot 0x60 does not match.
+     * +0x68 reader sequence (ldr r3,[r0,#0x68]; cbnz; mvn.w r0,#37), which the AOSP slot 0x60 does not match.
      */
     fun directTrackApi(api: Int): Boolean = api in 19..22
 
@@ -164,6 +171,17 @@ object AudioHalAbi {
         return (0..elf.size - timestampPrefix.size).any { start ->
             timestampPrefix.indices.all { elf[start + it] == timestampPrefix[it] }
         }
+    }
+
+    /** Why [usesDirectTrackTail] said what it said, for the boot log (ELF check, sink symbol, +0x68 reader). */
+    fun describeDirectTrackProbe(elf: ByteArray): String {
+        val elfOk = elf.size >= 52 && elf[0] == 0x7f.toByte() && elf[1] == 'E'.code.toByte() && elf[2] == 'L'.code.toByte() &&
+            elf[3] == 'F'.code.toByte() && elf[4] == 1.toByte() && elf[5] == 1.toByte() && elf[18] == 40.toByte() && elf[19] == 0.toByte()
+        val sink = String(elf, Charsets.ISO_8859_1).contains("AudioStreamOutSink")
+        val reader = elf.size >= timestampPrefix.size && (0..elf.size - timestampPrefix.size).any { start ->
+            timestampPrefix.indices.all { elf[start + it] == timestampPrefix[it] }
+        }
+        return "libnbaio ${elf.size} bytes, arm32 elf=$elfOk, AudioStreamOutSink=$sink, +0x68 presentation reader=$reader"
     }
 
     /**

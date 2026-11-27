@@ -5,8 +5,9 @@
     <string name="fb_title_single">Choose a file</string>
     <string name="fb_up">Up</string>
     <string name="fb_search">Search</string>
-    <string name="fb_search_hint">Search in this folder</string>
+    <string name="fb_search_hint">Search this folder and all folders in it</string>
     <string name="fb_no_matches">No files or folders match</string>
+    <string name="fb_search_truncated">Showing the first %1$d matches. Type more of the name to narrow the search.</string>
     <string name="fb_system_picker">System picker</string>
     <string name="fb_use_system_picker">Use the system picker instead</string>
 
@@ -24,6 +25,13 @@
     <string name="fb_selected">%1$d selected</string>
     <string name="fb_clear">Clear</string>
     <string name="fb_import">Import</string>
+
+    <string name="fb_title_save">Save to a folder</string>
+    <string name="fb_file_name">File name</string>
+    <string name="fb_replace_title">Replace file?</string>
+    <string name="fb_replace_text">%1$s already exists in this folder. Replace it?</string>
+    <string name="fb_replace">Replace</string>
+    <string name="fb_not_writable">This folder cannot be written to. Choose another one.</string>
 
     <string name="fb_empty">Nothing here</string>
     <string name="fb_unreadable">This folder cannot be read. Android keeps some folders (such as other apps\' data) closed to every app.</string>

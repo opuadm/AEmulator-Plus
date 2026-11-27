@@ -56,6 +56,7 @@ internal object MagiskCore {
     /** The stand-in for the preinit partition: block device 259:1 (a blkext minor), mode 0600; see [prepareTmp]. */
     private const val PREINIT_NODE = DEV_PREFIX + "b:259:1:600"
     private const val ABI = "arm64-v8a"
+    private const val BOOT_MARK = "# aemu: always booted Android"
 
     data class Info(val version: String, val code: Int)
 
@@ -115,6 +116,7 @@ internal object MagiskCore {
             put("stub.apk", entry("assets/stub.apk"), false)
             for (script in listOf("util_functions.sh", "boot_patch.sh", "addon.d.sh", "app_functions.sh", "module_installer.sh", "uninstaller.sh"))
                 put(script, z.getEntry("assets/$script"), false)
+            patchBootMode(File(staging, "util_functions.sh"))
             if (!File(staging, "busybox").isFile) error("This Magisk APK has no busybox")
 
             val bin = File(root, BIN)
@@ -212,11 +214,51 @@ internal object MagiskCore {
         return true
     }
 
+    /**
+     * Magisk's util_functions.sh decides "am I running inside a booted Android" (BOOTMODE) by looking for a process named zygote in
+     * `ps`. Here `ps` is the phone's: it does not list the guest's zygote, so BOOTMODE came out false and every module install
+     * (LSPosed's included) took the recovery path: `ui_print` wrote to `/proc/self/fd/$OUTFD`, which the phone refuses to reopen
+     * ("can't create /proc/self/fd/1: Permission denied"), and the install ended in "! Installation failed". The guest is always a
+     * booted Android, so the detection is replaced by `BOOTMODE=true` (an explicit BOOTMODE from the caller still wins).
+     * Idempotent; a script of another layout is left as it is.
+     */
+    internal fun patchBootMode(f: File) {
+        if (!f.isFile) return
+        val text = f.readText()
+        if (text.contains(BOOT_MARK)) return
+        val stock = "[ -z \$BOOTMODE ] && BOOTMODE=false"
+        val lines = text.split("\n")
+        val at = lines.indexOfFirst { it.trimEnd() == stock }
+        if (at < 0) return
+        val out = lines.toMutableList().also { it[at] = "[ -z \$BOOTMODE ] && BOOTMODE=true   $BOOT_MARK" }.joinToString("\n")
+        val mode = runCatching { Files.getPosixFilePermissions(f.toPath()) }.getOrNull()
+        f.writeText(out)
+        if (mode != null) runCatching { Files.setPosixFilePermissions(f.toPath(), mode) }
+        f.setReadable(true, false)
+    }
+
+    /**
+     * Magisk's scripts read `/proc/cmdline` (`grep_cmdline`, the super-partition check). The phone's own file is not readable by an
+     * app ("grep: /proc/cmdline: Permission denied"), and the shim shows the image's `proc/` files before the phone's, so a plain
+     * one is put there (never over a file the image already has).
+     */
+    private fun writeProcCmdline(root: File) {
+        val f = File(root, "proc/cmdline")
+        if (f.isFile) return
+        runCatching {
+            f.parentFile?.mkdirs()
+            f.writeText("androidboot.verifiedbootstate=green androidboot.veritymode=enforcing\n")
+            f.setReadable(true, false)
+        }
+    }
+
     /** The tmpfs stand-in. Rebuilt from scratch before each boot, like a real tmpfs would be. */
     fun prepareTmp(root: File) {
         val bin = File(root, BIN)
         require(File(bin, "magisk").isFile) { "Magisk is not installed in this VM" }
         fixDbMode(root)
+        patchBootMode(File(bin, "util_functions.sh"))   // the app's "additional setup" copies the stock script back over it
+        writeProcCmdline(root)
         resetMounts(root, enable = true)
         val tmp = File(root, TMP)
         deleteTree(tmp.toPath())

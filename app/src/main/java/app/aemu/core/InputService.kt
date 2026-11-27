@@ -1,3 +1,4 @@
+/* Modified for AEmulator Plus, 2026-11-25: Xperia Play input method (slider switch and gamepad keys); input writer started once. */
 package app.aemu.core
 
 import android.os.Process
@@ -18,7 +19,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
 
     private class Client(val out: OutputStream, val pid: Int) {
         private val queue = java.util.concurrent.LinkedBlockingQueue<ByteArray>(512)
-        private var worker: Thread? = null
+        @Volatile private var worker: Thread? = null
         @Volatile var dead = false
         @Volatile var dropped = 0
 
@@ -28,10 +29,14 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
          */
         fun post(a: ByteArray) {
             if (dead) return
-            if (worker == null) worker = Thread({
-                try { while (true) { val b = queue.take(); out.write(b); out.flush() } }
-                catch (e: Exception) { dead = true }
-            }, "input-client-$pid").apply { isDaemon = true; start() }
+            // post() is called from the touch thread, the input pump and a device server's connect handler at once: start the
+            // writer exactly once, or two writers interleave their frames and the guest reads a torn input_event
+            if (worker == null) synchronized(this) {
+                if (worker == null) worker = Thread({
+                    try { while (true) { val b = queue.take(); out.write(b); out.flush() } }
+                    catch (e: Exception) { dead = true }
+                }, "input-client-$pid").apply { isDaemon = true; start() }
+            }
             if (!queue.offer(a)) dropped++
         }
 
@@ -92,8 +97,14 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     private val server = UnixServer(paths.inputSock, "input") { c ->
         runCatching { c.sendBufferSize = 64 * 1024 }
         val pid = runCatching { c.peerCredentials.pid }.getOrDefault(-1)
-        if (!multiPerPid) clients.removeAll { old ->
-            (old.pid == pid && pid > 0).also { if (it) old.close() }
+        // A process may legitimately hold several event0 descriptors (system_server: EventHub's own plus a short-lived probe).
+        // Closing the older one on every new connect of the same pid killed EventHub's real connection and left input dead
+        // while the guest still believed the device open. Only dead clients are dropped; a daemon that leaks descriptors in a
+        // retry loop (lidswitchd) is capped by evicting that pid's oldest connections beyond MAX_PER_PID.
+        clients.removeAll { it.dead }
+        if (pid > 0) {
+            val same = clients.filter { it.pid == pid }
+            if (same.size >= MAX_PER_PID) same.take(same.size - MAX_PER_PID + 1).forEach { old -> old.close(); clients.remove(old) }
         }
         val me = Client(c.outputStream, pid)
         clients.add(me)
@@ -133,12 +144,13 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     val keyboardConnected: Int get() = keyboardClients.size
     private val pad = TouchpadProtocol()
 
-    private fun deviceServer(file: String, name: String, list: CopyOnWriteArrayList<Client>) =
+    private fun deviceServer(file: String, name: String, list: CopyOnWriteArrayList<Client>, onConnect: (Client) -> Unit = {}) =
         UnixServer(java.io.File(paths.root, file), name) { c ->
             runCatching { c.sendBufferSize = 64 * 1024 }
             val me = Client(c.outputStream, runCatching { c.peerCredentials.pid }.getOrDefault(-1))
             list.add(me)
             log("$name: guest connected (pid ${me.pid})")
+            onConnect(me)
             try {
                 val buf = ByteArray(32)
                 while (c.inputStream.read(buf) >= 0) { /* keep the evdev stream alive */ }
@@ -219,6 +231,45 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
         now.firstOrNull()?.let { penX = it.x; penY = it.y }
         val bytes = spen.frame(now, button, System.nanoTime())
         if (bytes.isNotEmpty()) postTo(penClients, bytes)
+    }
+
+    // ---- Xperia Play slider -----------------------------------------------------------------------------------------------
+
+    /**
+     * Input method "Xperia Play" (an R800 machine): the slider is a switch device of its own ("AEmulator Slider", emulated in
+     * the guest shim like the S-Pen's digitizer; see [SliderProtocol]). [xperiaPlayEnabled] is the opt-in: the node exists from
+     * boot, because the guest only looks for input devices then. [sliderOpen] is the state of the slider the navigation-bar
+     * button sets; a VM always boots with it shut. The gamepad's keys need no device of their own: they go through [key].
+     */
+    @Volatile var xperiaPlayEnabled = false
+    @Volatile var sliderOpen = false
+        private set
+    private val sliderClients = CopyOnWriteArrayList<Client>()
+    val sliderConnected: Int get() = sliderClients.size
+    private val slider = SliderProtocol()
+    private val sliderServer = deviceServer("dev/aemu_slider", "slider", sliderClients) { c ->
+        // a guest that starts its input stack late (or restarts system_server) learns where the slider is at once
+        if (xperiaPlayEnabled && sliderOpen) c.post(widen(slider.frame(true, System.nanoTime())))
+    }
+
+    private fun serveSlider() {
+        val node = java.io.File(paths.root, "dev/input/aemu-slider")
+        sliderOpen = false
+        if (!xperiaPlayEnabled) { node.delete(); return }   // a node left from an earlier boot would be opened with nobody serving it
+        node.parentFile?.mkdirs(); node.createNewFile()
+        sliderServer.start(log)
+        log("input: Xperia Play slider (${SliderProtocol.NODE_NAME}) registered")
+    }
+
+    /** Slide the keypad out ([open]) or back in. Returns false when there is no slider to move (not registered at this boot). */
+    @Synchronized
+    fun setSlider(open: Boolean): Boolean {
+        if (!xperiaPlayEnabled) return false
+        if (open == sliderOpen) return true
+        sliderOpen = open
+        postTo(sliderClients, slider.frame(open, System.nanoTime()))
+        log("input: Xperia Play slider ${if (open) "open" else "shut"} (${sliderClients.size} reader(s))")
+        return true
     }
 
     // ---- S-Pen hover and the pen's side button ("action button") -------------------------------------------------------
@@ -357,6 +408,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
         writeTouchIdc()
         serveMouseKeyboard()
         serveSpen()
+        serveSlider()
         val ok = server.start(log)
         if (trackballEnabled) {
             // An emulator-owned node: no vendor library or original image is patched.
@@ -764,11 +816,14 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     }
     @Synchronized fun recentEvents(): List<String> = recent.toList()
 
-    fun inputModeInfo(): String = "mouseKeyboard=$mouseKeyboardEnabled touchpad=${padClients.size} keyboard=${keyboardClients.size} spen=$spenEnabled mode=$spenMode clients=${penClients.size}"
+    fun inputModeInfo(): String = "mouseKeyboard=$mouseKeyboardEnabled touchpad=${padClients.size} keyboard=${keyboardClients.size} spen=$spenEnabled mode=$spenMode clients=${penClients.size} xperiaPlay=$xperiaPlayEnabled slider=${if (sliderOpen) "open" else "shut"} sliderClients=${sliderClients.size}"
 
     fun clientInfo(): String = clients.joinToString { "pid ${it.pid}${if (it.dropped > 0) " (dropped ${it.dropped} frames: guest does not read this descriptor)" else ""}" }
 
     companion object {
+        /** Most simultaneous event0 connections kept per guest process before the oldest is closed. */
+        private const val MAX_PER_PID = 8
+
         /** How long a host stylus that left the screen may stay in the guest's range, so that a touch right after hands over smoothly. */
         const val PEN_LEAVE_GRACE_MS = 80L
 

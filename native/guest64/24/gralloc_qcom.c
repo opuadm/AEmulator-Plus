@@ -1,4 +1,6 @@
 /*
+ * (Since 2026-11-24 the process keeps a table of the default handles it may use - see "live" below: copies of a handle no longer free
+ * the default gralloc's handle twice or use it after the free.)
  * Kernel 24 (Android 7.0): gralloc.default.so for firmware that kept Qualcomm's SurfaceFlinger (MIUI 8 of the Mi 5).
  *
  * Qualcomm's SurfaceFlinger (ExSurfaceFlinger, ExLayer) looks into the handle of every layer's buffer as into one of
@@ -119,51 +121,134 @@ enum {
     W_ROM_PID = 30,     /* the process W_ROM is good in */
     W_REG_PID = 31,     /* the process that made W_ROM in registerBuffer and owes its release */
     W_FLAGS = 32,       /* the default gralloc's own flags */
+    W_SELF = 34,        /* 0x88: the address of the copy of the handle that registered the buffer (8 bytes; 0 for any other copy) */
     W_INTS = 40
 };
 
 static const struct gralloc_module *real;
 
+/*
+ * The default gralloc's handle behind a handle given out is a pointer in the handle's own ints, and the handle is
+ * copied freely (native_handle_clone by the HIDL mapper, by the framework's GraphicBuffer, over binder inside one
+ * process...): every copy carries the pointer and the process it is good in. A copy's register and unregister used to
+ * act on that pointer as if the copy were the only one - the first unregister freed the default handle, the next
+ * one freed it again, and a lock through a copy used it after the free. Its 48 bytes are the size of a
+ * Connection of SurfaceFlinger's EventThread, which took the freed block over and then died in ~RefBase with its
+ * mRefs gone ("gralloc: invalid gralloc handle (at ...)" a few seconds before; Moto E, 8.0, from the second boot on).
+ *
+ * So the process keeps a table of the default handles it may use. A handle is only followed when its pointer is in
+ * the table; a registered one counts the copies that registered it (a copy is told by W_SELF, its own address), and
+ * it is released with the last of them; one allocated here (kind 1) is released by free() only, once.
+ */
+#define LIVE_MAX 8192
+enum { K_ALLOC = 1, K_REG = 2 };
+static struct { void *p; int kind, refs; } live[LIVE_MAX];
+static volatile int live_lock;
+#ifdef __aarch64__
+/* by hand: the compiler's atomic exchange calls __aarch64_swp4_acq, which bionic does not have */
+static int xchg_acq(volatile int *p, int v) {
+    int old; unsigned fail;
+    __asm__ volatile("1: ldaxr %w0, [%2]\n stxr %w1, %w3, [%2]\n cbnz %w1, 1b" : "=&r"(old), "=&r"(fail) : "r"(p), "r"(v) : "memory");
+    return old;
+}
+#else
+static int xchg_acq(volatile int *p, int v) { return __atomic_exchange_n(p, v, __ATOMIC_ACQUIRE); }
+#endif
+static void lk(void) { while (xchg_acq(&live_lock, 1)) { } }
+static void ul(void) { __atomic_store_n(&live_lock, 0, __ATOMIC_RELEASE); }
+static int live_find(const void *p) { for (int i = 0; i < LIVE_MAX; i++) if (live[i].p == p) return i; return -1; }
+/* the kind of a default handle the process may use, 0 for any other pointer */
+static int live_kind(const void *p) { if (!p) return 0; lk(); int i = live_find(p); int k = i < 0 ? 0 : live[i].kind; ul(); return k; }
+static int live_add(void *p, int kind) {
+    lk();
+    int i = live_find(0);
+    if (i >= 0) { live[i].p = p; live[i].kind = kind; live[i].refs = 1; }
+    ul();
+    return i >= 0 ? 0 : -1;
+}
+/* one more copy registered it: 1 if the pointer is a registered one of the table */
+static int live_ref(void *p) {
+    lk();
+    int i = live_find(p), ok = i >= 0 && live[i].kind == K_REG;
+    if (ok) live[i].refs++;
+    ul();
+    return ok;
+}
+/* a copy unregisters: the copies left, or -1 when the pointer is not a registered one of the table */
+static int live_unref(void *p) {
+    lk();
+    int i = live_find(p), left = -1;
+    if (i >= 0 && live[i].kind == K_REG) { left = --live[i].refs; if (left <= 0) { live[i].p = 0; left = 0; } }
+    ul();
+    return left;
+}
+/* take an allocated one out of the table: 1 if it was there (and so is freed here, once) */
+static int live_drop(void *p) {
+    lk();
+    int i = live_find(p), ok = i >= 0 && live[i].kind == K_ALLOC;
+    if (ok) live[i].p = 0;
+    ul();
+    return ok;
+}
+
 static int mine(const int *w) { return w && w[W_VERSION] == 12 && w[W_NUMFDS] + w[W_NUMINTS] == W_INTS - 3 && w[W_MAGIC] == QMAGIC; }
-static struct rom_handle *rom_of(const int *w) { return (struct rom_handle *)(uintptr_t)*(const uint64_t *)&w[W_ROM]; }
+static struct rom_handle *rom_raw(const int *w) { return (struct rom_handle *)(uintptr_t)*(const uint64_t *)&w[W_ROM]; }
 static void set_rom(int *w, struct rom_handle *r) { *(uint64_t *)&w[W_ROM] = (uintptr_t)r; }
+static uint64_t self_of(const int *w) { return *(const uint64_t *)&w[W_SELF]; }
+static void set_self(int *w, uint64_t v) { *(uint64_t *)&w[W_SELF] = v; }
+/* the default handle a copy may be used with here: the one its pointer names, if this process still has it */
+static struct rom_handle *rom_of(const int *w) {
+    struct rom_handle *r = rom_raw(w);
+    return r && w[W_ROM_PID] == getpid() && live_kind(r) ? r : 0;
+}
 
 static int w_register(const struct gralloc_module *m, const void *h) {
     (void)m;
     int *w = (int *)h;
     if (!real || !mine(w)) return -22;
-    if (w[W_ROM_PID] == getpid() && rom_of(w)) return 0;      /* allocated or registered here already */
-    struct rom_handle *r = calloc(1, sizeof *r);
+    struct rom_handle *r = rom_of(w);
+    if (r) {
+        if (live_kind(r) == K_ALLOC) return 0;              /* allocated here: nothing to register */
+        if (self_of(w) == (uintptr_t)w) return 0;           /* this copy registered it already */
+        if (live_ref(r)) { set_self(w, (uintptr_t)w); w[W_REG_PID] = getpid(); return 0; }   /* another copy did */
+    }
+    r = calloc(1, sizeof *r);
     if (!r) return -12;
     r->version = 12; r->numFds = 1; r->numInts = 8;
     r->fd = w[W_FD]; r->magic = MAGIC; r->flags = w[W_FLAGS]; r->size = w[W_SIZE]; r->offset = w[W_OFFSET];
     int e = real->registerBuffer(real, r);
     if (e) { free(r); return e; }
+    if (live_add(r, K_REG)) { real->unregisterBuffer(real, r); free(r); return -12; }
     set_rom(w, r);
     w[W_ROM_PID] = w[W_REG_PID] = getpid();
+    set_self(w, (uintptr_t)w);
     return 0;
 }
 static int w_unregister(const struct gralloc_module *m, const void *h) {
     (void)m;
     int *w = (int *)h;
     if (!real || !mine(w)) return -22;
-    if (w[W_REG_PID] != getpid() || !rom_of(w)) return 0;
     struct rom_handle *r = rom_of(w);
-    int e = real->unregisterBuffer(real, r);
-    free(r);
+    if (!r || w[W_REG_PID] != getpid() || self_of(w) != (uintptr_t)w) return 0;   /* not registered through this copy */
     set_rom(w, 0);
     w[W_ROM_PID] = w[W_REG_PID] = 0;
+    set_self(w, 0);
+    if (live_unref(r) != 0) return 0;                       /* other copies still have it registered (or it is gone already) */
+    int e = real->unregisterBuffer(real, r);
+    free(r);
     return e;
 }
 static int w_lock(const struct gralloc_module *m, const void *hnd, int usage, int l, int t, int w, int h, void **vaddr) {
     (void)m;
-    if (!real || !mine(hnd) || !rom_of(hnd)) return -22;
-    return real->lock(real, rom_of(hnd), usage, l, t, w, h, vaddr);
+    struct rom_handle *r = mine(hnd) ? rom_of(hnd) : 0;
+    if (!real || !r) return -22;
+    return real->lock(real, r, usage, l, t, w, h, vaddr);
 }
 static int w_unlock(const struct gralloc_module *m, const void *h) {
     (void)m;
-    if (!real || !mine(h) || !rom_of(h)) return -22;
-    return real->unlock(real, rom_of(h));
+    struct rom_handle *r = mine(h) ? rom_of(h) : 0;
+    if (!real || !r) return -22;
+    return real->unlock(real, r);
 }
 
 static int d_alloc(struct alloc_device *d, int w, int h, int format, int usage, const void **handle, int *stride) {
@@ -173,7 +258,7 @@ static int d_alloc(struct alloc_device *d, int w, int h, int format, int usage, 
     if (e) return e;
     const struct rom_handle *q = rh;
     int *o = calloc(W_INTS, sizeof(int));
-    if (!o) { r->free(r, rh); return -12; }
+    if (!o || live_add((void *)q, K_ALLOC)) { if (o) free(o); r->free(r, rh); return -12; }
     o[W_VERSION] = 12; o[W_NUMFDS] = 1; o[W_NUMINTS] = W_INTS - 4;
     o[W_FD] = q->fd; o[W_FD_META] = -1;
     o[W_MAGIC] = QMAGIC; o[W_FLAGS] = q->flags; o[W_SIZE] = q->size; o[W_OFFSET] = q->offset;
@@ -187,7 +272,8 @@ static int d_free(struct alloc_device *d, const void *handle) {
     struct alloc_device *r = ((struct wrap_device *)d)->real;
     int *w = (int *)handle;
     if (!mine(w)) return -22;
-    int e = rom_of(w) && w[W_ROM_PID] == getpid() && !w[W_REG_PID] ? r->free(r, rom_of(w)) : 0;
+    struct rom_handle *q = rom_raw(w);
+    int e = q && w[W_ROM_PID] == getpid() && !w[W_REG_PID] && live_drop(q) ? r->free(r, q) : 0;   /* once, and only what was allocated here */
     free(w);
     return e;
 }

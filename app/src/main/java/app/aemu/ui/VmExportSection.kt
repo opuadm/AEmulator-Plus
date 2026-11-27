@@ -37,7 +37,7 @@ internal fun VmExportSection(img: GuestImage, settings: VmSettings, busy: Boolea
     var pending by remember { mutableStateOf<GuestImage?>(null) }
     var pendingParts by remember { mutableStateOf(VmArchive.Selection()) }
     var message by remember { mutableStateOf<String?>(null) }
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+    val pick = rememberSaveFilePicker("application/octet-stream") { uri ->
         val snapshot = pending
         pending = null
         if (uri != null && snapshot != null) {
@@ -46,7 +46,11 @@ internal fun VmExportSection(img: GuestImage, settings: VmSettings, busy: Boolea
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
                     runCatching { VmArchiveStorage.export(ctx, snapshot, pendingParts, uri) {} }
-                        .onFailure { runCatching { DocumentsContract.deleteDocument(ctx.contentResolver, uri) } }
+                        .onFailure {
+                            // (a file the built-in browser picked is a file: URI; the system picker's is a document)
+                            if (uri.scheme == "file") runCatching { java.io.File(uri.path!!).delete() }
+                            else runCatching { DocumentsContract.deleteDocument(ctx.contentResolver, uri) }
+                        }
                 }
                 setBusy(false)
                 message = ctx.getString(if (result.isSuccess) R.string.vm_export_done else R.string.vm_export_failed)

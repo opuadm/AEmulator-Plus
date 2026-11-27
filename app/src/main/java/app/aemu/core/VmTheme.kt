@@ -48,11 +48,19 @@ data class VmTheme(
     val skinHeight: Int = 0,
     /** the skin's own hardware keys; with any, the on-screen bar is hidden while the skin is shown */
     val skinKeys: List<SkinKey> = emptyList(),
+    /** the density the guest screen starts with on this skin (0 = from the real device's table, see [VmThemes.guestDensity]) */
+    val skinDensity: Int = 0,
+    /** a camera cutout drawn on top of the guest screen of the skin */
+    val skinCutout: SkinCutout = SkinCutout.NONE,
+    /** a picture (PNG with transparency) laid over the guest screen of the skin: file name in [VmThemes.dir], null = none */
+    val skinOverlay: String? = null,
     /** where the emulated LED sits on the skin picture; a skin saved without it gets the spot above its screen when read */
     val skinLed: SkinPoint? = null,
     val builtIn: Boolean = false,
     /** one of the device skins bundled with the app: [frameImage] is then an asset of the APK, not a file in [VmThemes.dir] */
     val fromSkinPack: Boolean = false,
+    /** Device skins only: the maker the skin is listed under in the picker (Samsung, Xiaomi, Sony...); null = no brand given. */
+    val brand: String? = null,
 ) {
     val isSkin get() = frameImage != null && skinScreen != null
 
@@ -71,12 +79,21 @@ data class VmTheme(
         .put("skinScreen", skinScreen?.toJson() ?: JSONObject.NULL).put("skinWidth", skinWidth).put("skinHeight", skinHeight)
         .put("skinKeys", JSONArray(skinKeys.map { it.toJson() }))
         .put("skinLed", skinLed?.toJson() ?: JSONObject.NULL)
+        .apply {
+            if (brand != null) put("brand", brand)
+            if (skinDensity > 0) put("skinDensity", skinDensity)
+            if (skinCutout != SkinCutout.NONE) put("skinCutout", skinCutout.name)
+            if (skinOverlay != null) put("skinOverlay", skinOverlay)
+        }
 
     /** This theme with its LED position set: as it is, or (skin without one) right above the screen. */
     fun withLed(): VmTheme = if (skinLed != null || skinScreen == null) this else copy(skinLed = SkinPoint.aboveScreen(skinScreen))
 
     companion object {
         const val NAME_MAX = 32
+        const val BRAND_MAX = 24
+        /** A brand label: no control characters, at most [BRAND_MAX] long, null when empty. */
+        fun cleanBrand(v: String?): String? = v?.filter { !it.isISOControl() }?.trim()?.take(BRAND_MAX)?.takeIf { it.isNotEmpty() }
         fun cleanName(v: String) = v.filter { !it.isISOControl() }.trim().take(NAME_MAX)
 
         fun fromJson(o: JSONObject): VmTheme {
@@ -96,6 +113,10 @@ data class VmTheme(
                 skinWidth = o.optInt("skinWidth").coerceIn(0, 8192), skinHeight = o.optInt("skinHeight").coerceIn(0, 8192),
                 skinKeys = o.optJSONArray("skinKeys")?.let { a -> List(a.length()) { a.optJSONObject(it)?.let(SkinKey::fromJson) }.filterNotNull().take(16) } ?: emptyList(),
                 skinLed = SkinPoint.fromJson(o.optJSONArray("skinLed")),
+                skinDensity = o.optInt("skinDensity").takeIf { it in 80..1000 } ?: 0,
+                skinCutout = SkinCutout.parse(o.optString("skinCutout")),
+                skinOverlay = if (o.isNull("skinOverlay")) null else o.optString("skinOverlay").takeIf { safeFileName(it) },
+                brand = cleanBrand(o.optString("brand")),
             ).withLed()
         }
 
@@ -161,6 +182,39 @@ object VmThemes {
     fun all(ctx: Context) = BUILT_IN + skins(ctx) + custom(ctx)
 
     /**
+     * The device skins as the picker shows them: one entry per brand, brands A to Z, the skins of a brand in natural name
+     * order (Galaxy S4 before Galaxy S10). Skins that name no brand come last under a null key.
+     */
+    fun skinsByBrand(list: List<VmTheme>): List<Pair<String?, List<VmTheme>>> {
+        val byBrand = list.groupBy { it.brand?.takeIf { b -> b.isNotBlank() } }
+        val keys: List<String?> = byBrand.keys.filterNotNull().sortedWith(String.CASE_INSENSITIVE_ORDER) +
+            (if (null in byBrand) listOf(null) else emptyList())
+        return keys.map { it to sortedSkins(byBrand.getValue(it)) }
+    }
+
+    private fun sortedSkins(l: List<VmTheme>) = l.sortedWith { a, b -> naturalCompare(a.name, b.name) }
+
+    /** Compares names with runs of digits as numbers, ignoring case. */
+    internal fun naturalCompare(a: String, b: String): Int {
+        var i = 0; var j = 0
+        while (i < a.length && j < b.length) {
+            if (a[i].isDigit() && b[j].isDigit()) {
+                var ie = i; while (ie < a.length && a[ie].isDigit()) ie++
+                var je = j; while (je < b.length && b[je].isDigit()) je++
+                val x = a.substring(i, ie).trimStart('0'); val y = b.substring(j, je).trimStart('0')
+                val c = if (x.length != y.length) x.length.compareTo(y.length) else x.compareTo(y)
+                if (c != 0) return c
+                i = ie; j = je
+            } else {
+                val c = a[i].lowercaseChar().compareTo(b[j].lowercaseChar())
+                if (c != 0) return c
+                i++; j++
+            }
+        }
+        return (a.length - i).compareTo(b.length - j)
+    }
+
+    /**
      * The choice lives in its own file: the VM runs in another process (read on resume, like host-ui.json), and the
      * settings screen rewrites host-ui.json from its own copy, which would otherwise undo a theme picked meanwhile.
      */
@@ -173,6 +227,39 @@ object VmThemes {
             if (ui.holoNavbar) "holo" else if (ui.sunsetNavbar) "sunset" else "original"
         }
         return all(ctx).firstOrNull { it.id == id } ?: BUILT_IN[1]
+    }
+
+    /**
+     * The skin a machine wears: its own choice ([VmSettings.skinId]) when it has one and that theme still exists, otherwise the
+     * theme chosen in the app settings ([selected]), which is therefore the default of every machine.
+     */
+    fun forVm(ctx: Context, s: VmSettings?): VmTheme {
+        val own = s?.skinId?.takeIf { it.isNotBlank() } ?: return selected(ctx)
+        return all(ctx).firstOrNull { it.id == own } ?: selected(ctx)
+    }
+
+    /** A skin's default guest screen size: the resolution of the phone or tablet it shows; null when the theme names none. */
+    fun guestSize(t: VmTheme): Pair<Int, Int>? =
+        if (t.skinWidth > 0 && t.skinHeight > 0) (t.skinWidth and -2) to (t.skinHeight and -2) else null
+
+    /**
+     * A skin's default screen density: the one the skin names, else what the real device of that name runs at ([SkinDensity]),
+     * else an estimate from the screen size. Null when the skin gives no size (then nothing is known about its screen).
+     */
+    fun guestDensity(t: VmTheme): Int? {
+        val (w, h) = guestSize(t) ?: return null
+        return t.skinDensity.takeIf { it > 0 } ?: SkinDensity.forDevice(t.name, w, h)
+    }
+
+    /**
+     * [s] with the guest screen size and density of the skin it wears (see [forVm]). The density is the skin's ([guestDensity]): the
+     * firmware's own ([firmwareDensity]) was made for the screen of its old phone and would be wrong at the resolution of the skin;
+     * it, or else the density already in the settings, is used only for a skin that gives none. Unchanged when the skin gives no size.
+     */
+    fun withSkinResolution(ctx: Context, s: VmSettings, firmwareDensity: Int?): VmSettings {
+        val skin = forVm(ctx, s)
+        val (w, h) = guestSize(skin) ?: return s
+        return s.copy(width = w, height = h, density = guestDensity(skin) ?: firmwareDensity ?: s.density, hostResolution = false)
     }
 
     fun select(ctx: Context, id: String) {
@@ -198,7 +285,11 @@ object VmThemes {
     fun detach(ctx: Context, t: VmTheme, name: String = t.name): VmTheme {
         val picture = imageFile(ctx, t)?.let { f -> runCatching { importImage(ctx, f.readBytes()) }.getOrNull() }
         val lost = t.frameImage != null && picture == null
-        return t.copy(id = UUID.randomUUID().toString(), name = name, builtIn = false, fromSkinPack = false, frameImage = picture,
+        val overlay = overlayFile(ctx, t)?.let { f -> runCatching { importImage(ctx, f.readBytes()) }.getOrNull() }
+        return t.copy(id = UUID.randomUUID().toString(), name = name, builtIn = false, fromSkinPack = false, brand = null, frameImage = picture,
+            skinOverlay = overlay,
+            // a skin of the pack carries its density in its table entry: keep it when it becomes a custom skin
+            skinDensity = if (t.skinDensity > 0) t.skinDensity else guestDensity(t) ?: 0,
             skinScreen = if (lost) null else t.skinScreen, skinKeys = if (lost) emptyList() else t.skinKeys,
             skinLed = if (lost) null else t.skinLed)
     }
@@ -212,7 +303,7 @@ object VmThemes {
         val list = custom(ctx).filter { it.id != theme.id } + theme.copy(name = VmTheme.cleanName(theme.name).ifBlank { "Theme" })
         write(ctx, list)
         // pictures no theme uses any more
-        val used = list.mapNotNull { it.frameImage }.toSet()
+        val used = list.flatMap { listOfNotNull(it.frameImage, it.skinOverlay) }.toSet()
         dir(ctx).listFiles()?.filter { it.name.endsWith(".img") && it.name !in used }?.forEach { it.delete() }
         return theme
     }
@@ -222,6 +313,7 @@ object VmThemes {
         val gone = list.firstOrNull { it.id == id } ?: return
         write(ctx, list.filter { it.id != id })
         gone.frameImage?.let { File(dir(ctx), it).delete() }
+        gone.skinOverlay?.let { File(dir(ctx), it).delete() }
         if (runCatching { String(choice(ctx).readFully()).trim() }.getOrNull() == id) select(ctx, "sunset")
     }
 
@@ -235,6 +327,13 @@ object VmThemes {
 
     fun imageFile(ctx: Context, t: VmTheme): File? {
         val name = t.frameImage ?: return null
+        if (t.fromSkinPack) return skinPicture(ctx, name)
+        return File(dir(ctx), name).takeIf { it.isFile }
+    }
+
+    /** The overlay picture of a skin (same places as [imageFile]). */
+    fun overlayFile(ctx: Context, t: VmTheme): File? {
+        val name = t.skinOverlay ?: return null
         if (t.fromSkinPack) return skinPicture(ctx, name)
         return File(dir(ctx), name).takeIf { it.isFile }
     }
@@ -263,6 +362,7 @@ object VmThemes {
     fun export(ctx: Context, t: VmTheme): ByteArray {
         val o = JSONObject().put("format", FORMAT).put("version", 1).put("theme", t.copy(builtIn = false).toJson())
         imageFile(ctx, t)?.let { o.put("image", Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)) }
+        overlayFile(ctx, t)?.let { o.put("overlay", Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)) }
         return o.toString(2).toByteArray()
     }
 
@@ -271,8 +371,9 @@ object VmThemes {
         require(bytes.size <= (12 shl 20)) { "file too large" }
         val o = JSONObject(String(bytes, Charsets.UTF_8))
         require(o.optString("format") == FORMAT) { "not an AEmulator theme" }
-        var t = VmTheme.fromJson(o.getJSONObject("theme")).copy(id = UUID.randomUUID().toString(), builtIn = false, frameImage = null)
+        var t = VmTheme.fromJson(o.getJSONObject("theme")).copy(id = UUID.randomUUID().toString(), builtIn = false, brand = null, frameImage = null, skinOverlay = null)
         if (o.has("image")) t = t.copy(frameImage = importImage(ctx, Base64.decode(o.getString("image"), Base64.DEFAULT)))
+        if (o.has("overlay")) t = t.copy(skinOverlay = importImage(ctx, Base64.decode(o.getString("overlay"), Base64.DEFAULT)))
         return save(ctx, t)
     }
 }

@@ -16,15 +16,21 @@ int ioctl(int fd, unsigned long r, ...) { (void)fd; (void)r; return -1; }
 int pthread_create(long *t, const void *a, void *(*fn)(void *), void *g) { (void)t; (void)a; (void)fn; (void)g; return -1; }
 int clock_gettime(int c, void *t) { (void)c; (void)t; return -1; }
 int nanosleep(const void *r, void *m) { (void)r; (void)m; return -1; }
+int __system_property_get(const char *n, char *v) { (void)n; (void)v; return 0; }
+EOT
+# libhardware.so: the module that loaded hwcomposer.default.so; DT_NEEDED so that hw_get_module() resolves in the guest's linker
+cat > "$STUB/libhw.c" <<'EOT'
+int hw_get_module(const char *id, const void **m) { (void)id; (void)m; return -1; }
 EOT
 T="--target=thumb-linux-musleabi -mcpu=cortex_a8 -mfloat-abi=softfp -fPIC -shared -nostdlib -ffreestanding -fno-builtin"
 $ZIG cc $T -Os -Wl,-soname,libc.so -o "$STUB/libc.so" "$STUB/libc.c"
+$ZIG cc $T -Os -Wl,-soname,libhardware.so -o "$STUB/libhardware.so" "$STUB/libhw.c"
 $ZIG cc $T -Os -fvisibility=hidden -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
   -Wl,-z,norelro -Wl,--build-id=none -Wl,--hash-style=sysv -Wl,--no-undefined -Wl,-s -Wl,-soname,hwcomposer.default.so \
-  -L"$STUB" -o "$OUT" "$HERE/hwc1fb.c" -lc
-# nothing but the six libc calls may be imported (a libgcc helper such as __aeabi_uldivmod does not exist in the guest)
+  -o "$OUT" "$HERE/hwc1fb.c" "$STUB/libc.so" "$STUB/libhardware.so"
+# nothing but the six libc calls, __system_property_get (libc) and hw_get_module (libhardware) may be imported (a libgcc helper such as __aeabi_uldivmod does not exist in the guest)
 if command -v readelf >/dev/null 2>&1; then
-  BAD=$(readelf --dyn-syms "$OUT" | awk '$7 == "UND" && $8 != "" {print $8}' | grep -v -x -E 'open|close|ioctl|pthread_create|clock_gettime|nanosleep' || true)
+  BAD=$(readelf --dyn-syms "$OUT" | awk '$7 == "UND" && $8 != "" {print $8}' | grep -v -x -E 'open|close|ioctl|pthread_create|clock_gettime|nanosleep|__system_property_get|hw_get_module' || true)
   [ -z "$BAD" ] || { echo "error: $OUT imports $BAD, which the guest libc may not have" >&2; exit 1; }
 fi
 ls -l "$OUT"

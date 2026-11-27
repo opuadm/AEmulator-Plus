@@ -661,9 +661,8 @@ static void ms_drop(struct surf *s) {
     if (s->msfbo) { glDeleteFramebuffers(1, &s->msfbo); glDeleteRenderbuffers(1, &s->mscol); glDeleteRenderbuffers(1, &s->msds); }
     s->msfbo = s->mscol = s->msds = 0;
 }
-/* When the renderer was last started (monotonic ms), and how long after that new windows are cleared to black. */
+/* When the renderer was last started (monotonic ms). */
 static long long g_start_ms;
-#define CLEAR_NEW_SURFACES_MS 10000
 static long long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 static void surf_alloc(struct surf *s, int w, int h) {
     GLint rbo = 0;
@@ -702,9 +701,10 @@ static void surf_alloc(struct surf *s, int w, int h) {
         }
     }
     s->w = w; s->h = h;
-    /* For the first CLEAR_NEW_SURFACES_MS after the renderer starts, a new window starts black (transparent for a window with alpha): a renderbuffer's first contents are undefined, on some GPUs white,
-     * and a compositor with no layers yet (SurfaceFlinger's first frames, before the boot animation draws) swaps it out untouched. */
-    if (now_ms() - g_start_ms < CLEAR_NEW_SURFACES_MS) {
+    /* Every new or re-sized window starts black (transparent for a window with alpha), not only in the first seconds after the renderer starts: a renderbuffer's
+     * contents after glRenderbufferStorage are undefined (white on some GPUs, the leftovers of earlier frames and of other windows on Adreno), and a program that
+     * redraws only part of its window, or presents before drawing, would show them - wrong images, stray elements, flicker when the surface is re-made. */
+    {
         GLfloat cc[4]; GLfloat cd = 1; GLint cs = 0, sc = 0; GLboolean cm[4], dm = 1; GLint sm = 0xff;
         glGetFloatv(GL_COLOR_CLEAR_VALUE, cc); glGetFloatv(GL_DEPTH_CLEAR_VALUE, &cd);
         glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &cs); glGetIntegerv(GL_STENCIL_WRITEMASK, &sm);

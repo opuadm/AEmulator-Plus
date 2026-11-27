@@ -17,8 +17,11 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
         private set
     @Volatile var rejects = 0L
         private set
-    /** ctl.start / ctl.stop от гостя */
-    var onCtl: ((start: Boolean, service: String) -> Unit)? = null
+    /**
+     * ctl.start / ctl.stop / ctl.restart от гостя. start is true for ctl.start and ctl.restart; restart tells the two apart
+     * (AEmulator Plus 2026-11-23: init ignores a ctl.start of a running service, a ctl.restart stops it and starts it again).
+     */
+    var onCtl: ((start: Boolean, service: String, restart: Boolean) -> Unit)? = null
     /** наблюдатель за изменением свойств (например sys.boot_completed) */
     var onSet: ((String, String) -> Unit)? = null
 
@@ -135,11 +138,11 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
             // 10+: hwservicemanager asks for the service of an interface by the interface's name until it registers;
             // those services are started at boot here
             // (14+: servicemanager starts a lazy AIDL service the same way, as aidl/<name>; that one is not running yet)
-            if (what == "interface_start" && value.startsWith("aidl/")) { post("ctl.$what") { onCtl?.invoke(true, value) }; return }
+            if (what == "interface_start" && value.startsWith("aidl/")) { post("ctl.$what") { onCtl?.invoke(true, value, false) }; return }
             if (what.startsWith("interface_")) return
             val h = onCtl
             if (h == null) log("props: ctl.$what=$value (no services)")
-            else post("ctl.$what") { h(what == "start" || what == "restart", value) }
+            else post("ctl.$what") { h(what == "start" || what == "restart", value, what == "restart") }
             return
         }
         if (name.startsWith("ro.") && get(name) != null) { rejects++; return }

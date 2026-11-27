@@ -29,6 +29,19 @@ object DiagExport {
         val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
         val name = "aemu-logs-${vm.img.id.take(24)}-$stamp.zip"
         val (out, where, finish) = openDownloads(ctx, name)
+        writeZip(ctx, vm, out)
+        finish()
+        return where
+    }
+
+    /** Modified for AEmulator Plus: the file name the save picker suggests */
+    fun suggestedName(vm: GuestVm): String =
+        "aemu-logs-${vm.img.id.take(24)}-${java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())}.zip"
+
+    /** Modified for AEmulator Plus: the same zip written to a stream the caller opened (the save picker's file). Closes [out]. Throws. */
+    fun exportTo(ctx: Context, vm: GuestVm, out: OutputStream) = writeZip(ctx, vm, out)
+
+    private fun writeZip(ctx: Context, vm: GuestVm, out: OutputStream) {
         out.use { raw ->
             ZipOutputStream(raw.buffered()).use { zip ->
                 zip.setLevel(6)
@@ -129,8 +142,6 @@ object DiagExport {
                     ?.forEach { addFile(zip, "guest/data/${it.name}", it) }
             }
         }
-        finish()
-        return where
     }
 
     private class Target(val out: OutputStream, val where: String, val finish: () -> Unit) {
@@ -412,6 +423,40 @@ object DiagExport {
                 appendLine("first 32 bytes: ${head.joinToString("") { "%02x".format(it) }}")
             }
         }.onFailure { appendLine("[fb0 read failed: $it]") }
+        appendLine()
+        appendLine("-- device identity properties (the guest's live property area) --")
+        runCatching {
+            val a = PropArea.open(p.props)
+            if (a == null) appendLine("[property area not recognized]")
+            else {
+                for (k in listOf("ro.product.brand", "ro.product.model", "ro.product.name", "ro.product.device", "ro.product.marketname",
+                    "ro.product.odm.marketname", "ro.product.vendor.marketname", "ro.product.system.marketname", "ro.product.mod_device",
+                    "ro.miui.product.home", "ro.miui.cust_variant", "ro.miui.customized.region", "ro.miui.build.region", "persist.sys.miui_region",
+                    "ro.boot.hwc", "ro.boot.hwversion", "ro.boot.product.hardware.sku"))
+                    appendLine("$k=${a.get(k) ?: "<unset>"}")
+                a.close()
+            }
+        }.onFailure { appendLine("[property read failed: $it]") }
+        appendLine()
+        appendLine("-- identity properties as the firmware's own files define them (file: value) --")
+        runCatching {
+            val files = PropImports.FILES + listOf("vendor/default.prop", "system/etc/prop.default", "mi_ext/etc/build.prop")
+            for (rel in files) {
+                val f = java.io.File(p.root, rel)
+                if (!f.isFile) continue
+                val keep = f.readLines().map { it.trim() }.filter { ln ->
+                    ln.startsWith("import ") || ln.startsWith("ro.product.") && !ln.startsWith("ro.product.cpu") && !ln.startsWith("ro.product.first_api") ||
+                        ln.startsWith("ro.miui.product.home") || ln.startsWith("ro.miui.cust") || ln.startsWith("ro.miui.region") ||
+                        ln.startsWith("ro.miui.customized") || ln.startsWith("ro.miui.build.region") || ln.startsWith("persist.sys.miui_region") }
+                if (keep.isNotEmpty()) { appendLine("== $rel"); keep.take(60).forEach { appendLine("  $it") } }
+            }
+            for (dir in listOf("system", "system/product", "system/system_ext", "vendor", "vendor/odm/etc", "odm/etc", "product/etc", "system_ext/etc")) {
+                java.io.File(p.root, dir).listFiles { x -> x.isFile && x.name.startsWith("build_") && x.name.endsWith(".prop") }?.sortedBy { it.name }?.forEach { f ->
+                    appendLine("== $dir/${f.name}")
+                    f.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.take(40).forEach { appendLine("  $it") }
+                }
+            }
+        }.onFailure { appendLine("[identity files read failed: $it]") }
         appendLine()
         appendLine("-- hwui renderer properties (the guest's live property area) --")
         runCatching {

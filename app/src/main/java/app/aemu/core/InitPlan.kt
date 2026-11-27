@@ -1,4 +1,5 @@
 /* Modified for AEmulator Sunset, 2026-10-03: optional firmware boot media services.
+ * Modified for AEmulator Plus, 2026-11-24: Marvell FileMonitorService.
  * GPL-3.0; see LICENSE and NOTICE.md. */
 package app.aemu.core
 
@@ -226,6 +227,14 @@ object InitPlan {
         out.addAll(sf + hals.size, mmList.map { it.copy(delayMs = 100) })
         val z = out.indexOfFirst { it.name == "zygote" }.let { if (it < 0) out.size else it }
         out.addAll(z, rest)
+        // Added for AEmulator Plus (2026-11-24): Marvell PXA Samsung firmware (GT-I8250, 2.3.6). Its mediaserver's audio calibration
+        // thread asks the service manager for com.marvell.FileMonitorService once a second, for ever ("Waiting for service
+        // com.marvell.FileMonitorService..." 90+ times in a minute, "Reload audio calibration file failed!"). The daemon that
+        // registers it is in the tree, but the rc entry is oneshot/disabled or missing, so the filter above never started it.
+        marvellFileMonitor(root, out)?.let { fm ->
+            val at = listOf("mediaserver", "zygote").firstNotNullOfOrNull { n -> out.indexOfFirst { it.name == n }.takeIf { it >= 0 } } ?: out.size
+            out.add(at, fm)
+        }
         // Added for AEmulator Plus (2026-11-10): HyperOS 3 "Rust runtime". The launcher (com.miui.home) is started through
         // hyos_spawner's socket, not through zygote (its package has no dex of its own); init.hyos_spawner.rc starts the
         // service once zygote runs. Last in the plan, so after zygote. See HyperOsCompat.
@@ -234,6 +243,14 @@ object InitPlan {
         }
         // Samsung 2.x boot logo + sound (playlogos1 is a oneshot, so the filter above never picks it up)
         return BootMediaServices.withLegacyLogo(out, root, api)
+    }
+
+    /** Marvell's file monitor binder service, when the tree has the daemon and its library and nothing in [planned] runs it already */
+    internal fun marvellFileMonitor(root: File, planned: List<GuestService>): GuestService? {
+        val bin = "/system/bin/FileMonitorService"
+        if (!File(root, bin.removePrefix("/")).isFile || !File(root, "system/lib/libFileMonitorService.so").isFile) return null
+        if (planned.any { it.argv.firstOrNull() == bin || it.name == "FileMonitorService" }) return null
+        return GuestService("FileMonitorService", listOf(bin), delayMs = 200, optional = true)
     }
 
     /**

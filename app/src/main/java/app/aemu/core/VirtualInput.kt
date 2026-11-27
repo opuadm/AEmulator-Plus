@@ -1,3 +1,4 @@
+/* Modified for AEmulator Plus, 2026-11-25: Xperia Play input method (slider switch and gamepad keys). */
 package app.aemu.core
 
 import java.nio.ByteBuffer
@@ -91,6 +92,81 @@ object Keypad {
         PadKey("7", 8, "pqrs"), PadKey("8", 9, "tuv"), PadKey("9", 10, "wxyz"),
         PadKey("*", VirtualKeys.STAR), PadKey("0", 11, "+"), PadKey("#", VirtualKeys.POUND),
     )
+}
+
+/**
+ * The Xperia Play's slide-out gamepad (input method "Xperia Play", offered for an R800 machine): its keys go through the
+ * ordinary key device like the keypad's, so touch stays on. The codes are the ones the pad has on the real phone: the
+ * D-pad is DPAD_UP/DOWN/LEFT/RIGHT, Cross is DPAD_CENTER and Circle is BACK, the other buttons are the gamepad keycodes of
+ * Android 2.3 (BUTTON_X for Square, BUTTON_Y for Triangle, BUTTON_L1 / BUTTON_R1 for the shoulders, BUTTON_SELECT,
+ * BUTTON_START). Menu is MENU; the PlayStation-certified "Xperia Play" key is sent as BUTTON_MODE. Nothing here is read from
+ * the ROM's own gamepad.gl: the emulated key layout (see [keyLayout]) gives the scan codes below their labels.
+ *
+ * The two analog touchpads of the real phone are not emulated: the firmware reads them through a joystick device
+ * (/dev/input/js*) of its own, which the guest shim does not provide.
+ */
+object XperiaPlayPad {
+    /** Linux gamepad scan codes (BTN_X ...); the label each one gets in the guest is in [keyLayout]. */
+    const val BTN_X = 307; const val BTN_Y = 308; const val BTN_TL = 310; const val BTN_TR = 311
+    const val BTN_SELECT = 314; const val BTN_START = 315; const val BTN_MODE = 316
+
+    val up = PadKey("▲", VirtualKeys.UP)
+    val down = PadKey("▼", VirtualKeys.DOWN)
+    val left = PadKey("◀", VirtualKeys.LEFT)
+    val right = PadKey("▶", VirtualKeys.RIGHT)
+    val cross = PadKey("✕", VirtualKeys.SELECT)            // 232: DPAD_CENTER
+    val circle = PadKey("○", InputService.KEY_BACK)         // BACK
+    val square = PadKey("□", BTN_X)
+    val triangle = PadKey("△", BTN_Y)
+    val l = PadKey("L", BTN_TL)
+    val r = PadKey("R", BTN_TR)
+    val select = PadKey("Select", BTN_SELECT)
+    val start = PadKey("Start", BTN_START)
+    val menu = PadKey("Menu", InputService.KEY_MENU)
+    val play = PadKey("Play", BTN_MODE)
+
+    /** Every key of the window, for the tests and to release whatever is held when it closes. */
+    val all: List<PadKey> = listOf(up, down, left, right, cross, circle, square, triangle, l, r, select, start, menu, play)
+
+    /** First API level that knows the BUTTON_* labels (Android 2.3); an older layout parser drops the whole file at an unknown label. */
+    const val MIN_API = 9
+
+    /** Lines for the emulated key layout (dhd-touch.kl): the scan codes the keys above need and the stock layout does not give a label. */
+    fun keyLayout(): String = buildString {
+        append("# AEmulator: Xperia Play gamepad (input method \"Xperia Play\")\n")
+        append("key $BTN_X BUTTON_X\nkey $BTN_Y BUTTON_Y\nkey $BTN_TL BUTTON_L1\nkey $BTN_TR BUTTON_R1\n")
+        append("key $BTN_SELECT BUTTON_SELECT\nkey $BTN_START BUTTON_START\nkey $BTN_MODE BUTTON_MODE\n")
+    }
+}
+
+/**
+ * The Xperia Play's slider as a switch of its own: an evdev device named "AEmulator Slider" that only reports EV_SW / SW_LID
+ * (emulated in the guest shim, see native/guestshim/vinput.h, like the S-Pen's digitizer). A phone with a slider reports it as
+ * its lid: SW_LID 0 is "lid open" (slider out), 1 is "lid shut". The framework answers an open lid by dismissing the keyguard
+ * (config_bypass_keyguard_if_slider_open) and by making the D-pad reachable (config_lidNavigationAccessibility), a shut one
+ * by hiding them again. A VM boots with the slider shut; the shim's EVIOCGSW says so, and [InputService] sends the real state
+ * as the first event of every connection. Keep the codes in step with vinput.h.
+ */
+class SliderProtocol {
+    /** SW_LID then SYN_REPORT: the lid is open when the slider is out. */
+    fun frame(open: Boolean, nanos: Long): ByteArray {
+        val b = ByteBuffer.allocate(2 * EV).order(ByteOrder.LITTLE_ENDIAN)
+        fun put(type: Int, code: Int, value: Int) {
+            b.putInt((nanos / 1_000_000_000).toInt()).putInt(((nanos % 1_000_000_000) / 1000).toInt())
+            b.putShort(type.toShort()).putShort(code.toShort()).putInt(value)
+        }
+        put(EV_SW, SW_LID, if (open) 0 else 1)
+        put(EV_SYN, SYN_REPORT, 0)
+        return b.array()
+    }
+
+    companion object {
+        const val NODE_NAME = "AEmulator Slider"
+        const val SW_LID = 0
+        private const val EV = 16
+        private const val EV_SYN = 0; private const val EV_SW = 5
+        private const val SYN_REPORT = 0
+    }
 }
 
 /**
@@ -322,4 +398,18 @@ object VirtualInputPolicy {
      */
     fun spenSupported(recovery: Boolean, nativeUi: Boolean, preRelease: Boolean, api: Int): Boolean =
         !recovery && !nativeUi && !preRelease && api >= 14
+
+    /**
+     * Only an R800 machine (Sony Ericsson Xperia Play: R800i, R800a, R800at, R800x ...) is offered the Xperia Play input
+     * method: the model is what the image's ro.product.model says, "R800" followed by the variant letters.
+     */
+    fun isXperiaPlayModel(model: String): Boolean = XPERIA_PLAY_MODEL.matches(model.trim())
+    private val XPERIA_PLAY_MODEL = Regex("R800[a-z]{0,3}", RegexOption.IGNORE_CASE)
+
+    /**
+     * The slider switch ([SliderProtocol]) is a node of the guest shim on the qemu engines (ARM and x86-32 builds); the native
+     * arm64 engine's runner has no such node. The gamepad's keys need the BUTTON_* labels of Android 2.3 ([XperiaPlayPad.MIN_API]).
+     */
+    fun xperiaPlaySupported(engine: Engine, model: String, recovery: Boolean, nativeUi: Boolean, preRelease: Boolean, api: Int): Boolean =
+        isXperiaPlayModel(model) && engine != Engine.N64 && !recovery && !nativeUi && !preRelease && api >= XperiaPlayPad.MIN_API
 }

@@ -30,6 +30,19 @@ public final class ArcStreams {
     public static InputStream xz(InputStream in) throws IOException { return open(NativeArc.XZ, in); }
     public static InputStream lzma(InputStream in) throws IOException { return open(NativeArc.LZMA, in); }
     public static InputStream bzip2(InputStream in) throws IOException { return open(NativeArc.BZIP2, in); }
+    /**
+     * One bzip2 stream; whatever follows its end marker is ignored, as bspatch does. For the three blocks of a BSDIFF40 patch:
+     * the last block runs to the end of the patch buffer, which may carry padding or another patch behind it. [bzip2] reads
+     * concatenated streams and the Java decoder rejects trailing bytes that are not one.
+     */
+    public static InputStream bzip2Single(InputStream in) throws IOException {
+        if (NativeArc.AVAILABLE) {
+            try {
+                return new NativeInputStream(NativeArc.BZIP2, in);
+            } catch (UnsatisfiedLinkError e) { /* fall through to Java */ }
+        }
+        return new BZip2CompressorInputStream(new BufferedInputStream(in, 1 << 16), false);
+    }
     public static InputStream lz4(InputStream in) throws IOException { return open(NativeArc.LZ4F, in); }
     /** The LZ4 legacy format ({@code lz4 -l}, magic 02 21 4C 18): what Linux initramfs / old Android ramdisks use. */
     public static InputStream lz4Legacy(InputStream in) throws IOException { return open(NativeArc.LZ4L, in); }

@@ -53,6 +53,21 @@ class AdbServer(private val vm: GuestVm) {
         return false
     }
 
+    /**
+     * The user's choice (ADB dialog, adb intent): remembered for this VM and applied again at its next boot (see GuestVm, once adbd is up).
+     * [stop] alone does not remember anything: it also runs whenever the machine shuts down.
+     */
+    fun setEnabled(on: Boolean) {
+        if (on) start() else stop()
+        thread(name = "adb-pref", isDaemon = true) {
+            runCatching { ImageStore.update(vm.ctx, vm.img.id) { it.copy(settings = it.settings.copy(adbNet = on)) } }
+                .onFailure { vm.log("adb: cannot save the setting: ${it.message}") }
+        }
+    }
+
+    /** The saved choice for this VM (the image file, not [GuestVm.settings], which was read when the VM object was made). */
+    fun savedEnabled(): Boolean = runCatching { ImageStore.get(vm.ctx, vm.img.id)?.settings?.adbNet }.getOrNull() ?: false
+
     fun stop() {
         val s = server ?: return
         server = null; port = 0

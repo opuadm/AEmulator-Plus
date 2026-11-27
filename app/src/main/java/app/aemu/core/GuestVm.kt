@@ -1,4 +1,5 @@
-/* Modified for AEmulator Plus, 2026-11-09: per-slot process (several machines at once), scoped killLeftovers.
+/* Modified for AEmulator Plus, 2026-11-25: Xperia Play input method (slider switch and gamepad).
+ * Modified for AEmulator Plus, 2026-11-09: per-slot process (several machines at once), scoped killLeftovers.
  * Modified for AEmulator Sunset through 2026-10-03: motion and boot-media bridges,
  * live library status; 2026-10-04: native boot of framework-less MMI/FTM builds.
  * GPL-3.0; upstream attribution retained in NOTICE.md. */
@@ -144,10 +145,14 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
     @Volatile var surface: Surface? = null
         set(v) {
             field = v
-            // (x86-32 on the KK engine: the open bridge's host renderer, GlHost, shows the frames, as on the native engine)
-            if (EngineAssets.kkX86OpenBridge(ctx, engine, img.arch)) GlHost.surface(v)
+            // (the open bridge's host renderer, GlHost, shows the frames: x86-32 on the KK engine, and since 2026-11-25 ARM guests of 2.0+ on both
+            // 32-bit engines, as on the native engine)
+            if (openBridge) GlHost.surface(v)
             else if (engine == Engine.KK) GlBridge.surface(v) else if (engine == Engine.N64 && kernel.gpuBridge64) GlHost.surface(v)
         }
+
+    /** Added for AEmulator Plus (2026-11-25): this guest draws through the open GPU bridge (GlHost) and not through the engine's glserverd, see [OpenGl] */
+    private val openBridge: Boolean get() = OpenGl.any(ctx, img, paths.dir)
 
     private val lines = CopyOnWriteArrayList<String>()
     private val listeners = CopyOnWriteArrayList<(String) -> Unit>()
@@ -209,6 +214,9 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
     /** S-Pen: the sec_e-pen digitizer comes from libaemushim (qemu engines) or the native runner; not in recovery, framework-less boots or pre-1.0 builds, and only where the guest knows stylus tools (4.0+). */
     val spenSupported get() = VirtualInputPolicy.spenSupported(recoveryMode, nativeUi, LegacyFirmware.isPreRelease(img.release), img.api)
     val spenActive get() = settings.spen && spenSupported
+    /** Xperia Play (R800): the slider's switch node comes from libaemushim (qemu engines, not the native arm64 one); the gamepad's keys go through the key device. */
+    val xperiaPlaySupported get() = VirtualInputPolicy.xperiaPlaySupported(engine, img.model, recoveryMode, nativeUi, LegacyFirmware.isPreRelease(img.release), img.api)
+    val xperiaPlayActive get() = settings.xperiaPlay && xperiaPlaySupported
     val cameraSupported get() = engine == Engine.KK && img.api in 14..25 && !recoveryMode && !nativeUi
     private val camera = HostCameraBridge(ctx, paths, { settings.camera && cameraSupported }, ::log)
     fun cameraVisible(visible: Boolean) { camera.visible(visible) }
@@ -411,7 +419,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             android.system.Os.symlink(File(paths.root, "sys").path, sysLink.path)
         if (!props.prepare(ChargingBoot.properties + ("ro.aemu.host" to "qemu-user"))) error("property area not ready")
         props.onSet = { k, v -> if (k == "sys.powerctl") powerRequest(v) }
-        props.onCtl = { start, name ->
+        props.onCtl = { start, name, _ ->
             services.firstOrNull { it.name == name }?.let { service ->
                 if (start && !stopping) startService(ChargingBoot.runtimeService(paths.root, service))
                 else synchronized(procs) { procs.remove(name) }?.destroyForcibly()
@@ -487,7 +495,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         if (!props.prepare(overrides)) error("property area not ready")
         props.onSet = { k, v -> if (k == "sys.powerctl") powerRequest(v) }
         // the test program starts helper daemons (ztediag, getlog…) through ctl.start
-        props.onCtl = { start, name ->
+        props.onCtl = { start, name, _ ->
             val def = others[name]
             if (def == null) log("ctl.${if (start) "start" else "stop"} $name: not started (no guest binary)")
             else {
@@ -844,13 +852,18 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         }
         // Added for AEmulator Plus (2026-11-20): x86-32 firmware on the KK engine. The i386 bridge (TreeFixer.eglConfig put it under every
         // name libEGL looks for) is the whole EGL of the guest ("solo" mode): every context, SurfaceFlinger's too, goes to the host renderer.
-        if (s.gpu && EngineAssets.kkX86OpenBridge(ctx, engine, img.arch) && File(paths.root, "system/lib/egl/libGLES_aemu.so").isFile) {
+        if (s.gpu && openBridge && File(paths.root, if (img.arch == GuestArch.ARM) OpenGl.driverPath(img.api) else "system/lib/egl/libGLES_aemu.so").isFile) {
             paths.socket("aemu_gl").parentFile?.mkdirs()
             GlHost.identity(fixer.soc.gpuVendor, fixer.soc.gpuRenderer)
             val r = GlHost.start(paths.socket("aemu_gl").absolutePath)
-            log("GPU bridge (x86-32, open i386 bridge): $r")
+            log("GPU bridge (${img.arch.id}, open bridge): $r")
             glBridge = r.startsWith("ok"); glInfo = r
             if (!glBridge) log("GPU bridge: the host renderer did not start; the guest will find no GL")
+            // Added for AEmulator Plus (2026-11-25): 4.2 - 4.4 ARM firmware runs on the stand-in composer (native/hwc1fb, HWC 1.1), and with a 1.1
+            // composer SurfaceFlinger hands its frame to set(), not to the fb HAL. The engine's closed driver wrote fb0 itself, so set() did
+            // nothing; the open bridge only fills the window's buffer, so the composer must post it (fb0 stayed black without this).
+            // The closed driver never gets here, which is why the composer reads the property instead of always posting.
+            if (glBridge && engine == Engine.KK && img.arch == GuestArch.ARM) overrides["debug.aemu.fbpost"] = "1"
         }
         // 7.0+ libEGL ignores egl.cfg and takes the first libGLES_*.so it finds; without the bridge: the software one
         if (img.api >= 24 && !s.gpu) {
@@ -921,6 +934,30 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         val serial = VmSettings.cleanSerial(s.serial).ifBlank { VmSettings.DEFAULT_SERIAL }
         overrides["ro.serialno"] = serial
         overrides["ro.boot.serialno"] = serial
+        // what the phone's boot loader hands over (ro.boot.hwc, hwversion ...), typed in the settings: MIUI picks its region, wallpapers,
+        // preinstalled apps and marketing name by them
+        val extraBoot = VmSettings.parseBootProps(s.bootProps)
+        if (extraBoot.isNotEmpty()) log("props: ${extraBoot.size} extra boot properties from settings: ${extraBoot.keys.joinToString()}")
+        // the files a build.prop imports (Xiaomi: build_${ro.boot.product.hardware.sku}.prop holds the marketing name, brand, model); what
+        // the app manages itself, and what the settings say, wins over them
+        runCatching {
+            // Added for AEmulator Plus (2026-11-23): the SKU / hwc the boot loader would pass; the settings still win
+            val inf = PropImports.inferBootProps(paths.root, overrides + extraBoot)
+            inf.notes.forEach { log("props: $it") }
+            for ((k, v) in inf.props) if (k !in extraBoot) overrides[k] = v
+            val imp = PropImports.resolve(paths.root, overrides + extraBoot)
+            imp.notes.forEach { log("props: $it") }
+            var n = 0
+            for ((k, v) in imp.props) if (k !in overrides && k !in extraBoot) { overrides[k] = v; n++ }
+            if (n > 0) log("props: $n properties from imported prop files")
+            // Added for AEmulator Plus (2026-11-24): ro.product.brand / model / name / marketname out of the imported partition values
+            val order = PropImports.FILES.firstNotNullOfOrNull { rel ->
+                File(paths.root, rel).takeIf { it.isFile }?.let { f -> PropArea.parseProps(f.readText())["ro.product.property_source_order"] }
+            }
+            val derived = PropImports.deriveIdentity(imp.props, order)
+            for ((k, v) in derived) if (k !in extraBoot) { overrides[k] = v; log("props: $k=$v (derived from the imported partition properties)") }
+        }.onFailure { log("props: imports not read: ${it.message ?: it.cause?.message ?: it.javaClass.name}" + (it.cause?.let { c -> " (cause ${c.javaClass.simpleName})" } ?: "")) }
+        overrides.putAll(extraBoot)
         // baseband from the settings; the RIL stub answers the same string
         VmSettings.cleanBaseband(s.baseband).takeIf { it.isNotEmpty() }?.let { overrides["gsm.version.baseband"] = it }
         // ro.hardware from the settings (blank = the firmware's own value); the guest picks HAL libraries by it
@@ -1015,7 +1052,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         }
         // PBO для текстур шрифтов (hwui 4.4+ на GLES3) ломают часть драйверов (Mali) — грузим текстуры напрямую
         if (HostInfo.gpu().contains("mali")) overrides["ro.hwui.use_gpu_pixel_buffers"] = "false"
-        if (img.api in 19..20 && !isLpw39) overrides["persist.sys.dalvik.vm.lib"] = "libdvm.so"
+        if (img.api in 19..20 && !isLpw39 && !isLPreviewArt) overrides["persist.sys.dalvik.vm.lib"] = "libdvm.so"
         // Glass (4.0.x): CameraService's Gcam (HDR+) path pre-allocates 2592x1944 buffers in the OMAP format 0x100
         // (TI NV12); the emulated gralloc refuses it (EINVAL), dequeueBuffer fails and libgui then dereferences a null
         // buffer: mediaserver dies with SIGSEGV on the first camera open. Without Gcam the plain HAL path is used.
@@ -1087,7 +1124,8 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // skip it (verify-none: ART verifies classes lazily when an app runs) and use several threads; "full compilation" in the settings keeps machine code
         // Modified for AEmulator Plus (2026-11-17): our own "disable dex2oat" stub is put aside first, so that the wrappers
         // below (and TreeFixer's) see the firmware's real file; it is put in place again after them.
-        val disableD2o = img.api >= 21 && s.disableDex2oat
+        // Changed 2026-11-24: also the API 19/20 "L" previews (debugging: with dex2oat off their zygote cannot build a boot image and aborts)
+        val disableD2o = (img.api >= 21 || LPreviewArt.releaseMatches(img.release, img.api)) && s.disableDex2oat
         if (Dex2oatDisable.uninstall(paths.root) && !disableD2o) log("dex2oat: original binaries put back (dex2oat is no longer disabled)")
         if (img.api >= 21) {
             // (the native arm64 engine too: dex2oat is a 32-bit program there and runs translated; the boot image is
@@ -1135,10 +1173,15 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // art/runtime/class_linker.cc:3371 (Check failed: IsExceptionPending, android.util.Log) while running
         // SQLiteDebug.<clinit> at compile time. Initialising only the core-library classes of framework.jar's preloaded-classes
         // (java.*, libcore.*, ...) avoids that; framework classes are then simply loaded lazily from the dex files.
-        if (isLpw39 && img.api == 20) {
+        // Changed for AEmulator Plus (2026-11-24): also the API 19 "L" builds (AAU70): there dex2oat died in
+        // Class.forName("com.android.webview.chromium.WebViewChromiumFactoryProvider") (WebViewFactory$Preloader.<clinit> is
+        // in framework.jar's preloaded-classes, the WebView classes are not in the boot jars), zygote / aemu-sensorhub /
+        // aemu-bt all aborted (134), and the three of them raced to write the same boot.art. The wrapper now also
+        // forces the core-library image classes onto the command line and lets one image build run at a time.
+        if (isLPreviewArt) {
             overrides["dalvik.vm.dex2oat-flags"] = "--compiler-filter=interpret-only"
             // dex2oat finishes the image and then aborts in exit() (libsigchain: "Unable to find next sigaction"); see Lpw39Dex2oat
-            if (Lpw39Dex2oat.install(paths.root)) log("LPW39: dex2oat wrapped (SIGABRT after a complete write counts as success)")
+            if (Lpw39Dex2oat.install(paths.root)) log("L preview: dex2oat wrapped (image classes pinned to the core libraries, one image build at a time, SIGABRT after a complete write counts as success)")
             if (writeLpw39ImageClasses()) {
                 // later options win over the --image-classes* that libart puts on the dex2oat command line
                 overrides["dalvik.vm.image-dex2oat-flags"] = "--image-classes-zip=/system/framework/aemu-imgclasses.zip --image-classes=preloaded-classes"
@@ -1325,7 +1368,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         InitPlan.forgetLazyAidl()
         ctlPlan = null
         props.onSet = { k, v -> onProp(k, v) }
-        props.onCtl = { start, svc -> onCtl(start, svc) }
+        props.onCtl = { start, svc, restart -> onCtl(start, svc, restart) }
 
         // 3. службы хоста
         props.serve()
@@ -1337,6 +1380,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         input.trackballEnabled = settings.trackball
         input.mouseKeyboardEnabled = mouseKeyboardActive
         input.spenEnabled = spenActive
+        input.xperiaPlayEnabled = xperiaPlayActive
         input.api = img.api
         // 64-bit firmware on the native engine reads 24-byte events; a 32-bit-only one (qemu-arm) reads 16-byte ones
         input.wide = InputService.wideFor(engine, isPure32Tree(paths.root))
@@ -1517,9 +1561,12 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // translated start-up. It is not started at all: the stand-in below (aemu-keystore, which registers
         // "android.security.keystore" and answers "no error") is what system_server needs to come up, as on a 32-bit board
         // without a keymaster HAL. A firmware that does bring a keymaster service keeps its keystore.
-        val plan = if (engine == Engine.N64 && img.arch.foreign && img.api in 23..32 && logoPlan.any { it.name == "keystore" } &&
+        // Modified for AEmulator Plus (2026-11-23): a 32-bit-only firmware is the same case. The engine has no 32-bit software keymaster
+        // for 8.0 ("keymaster: the engine has no 32-bit software keymaster for this release") and the board's QSEE one is set aside,
+        // so the keystore daemon exited with code 255 in every start (restarted 12 times) while aemu-keystore already answered.
+        val plan = if (engine == Engine.N64 && (img.arch.foreign || isPure32Tree(paths.root)) && img.api in 23..32 && logoPlan.any { it.name == "keystore" } &&
             logoPlan.none { s -> isKeymasterHal(s.name) || isKeymasterHal(s.argv.firstOrNull().orEmpty()) }) {
-            log("keymaster: the firmware has no keymaster HAL service, so the keystore daemon is not started (it would abort in every start); the stand-in serves \"android.security.keystore\"")
+            log("keymaster: the firmware has no keymaster HAL service, so the keystore daemon is not started (it would exit in every start); the stand-in serves \"android.security.keystore\"")
             logoPlan.filter { it.name != "keystore" }
         } else logoPlan
         if (plan.any { it.name == BootMediaServices.LEGACY_LOGO }) log("boot logo: playlogos1 will run (Samsung 2.x boot animation and sound)")
@@ -1527,7 +1574,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         val wifiOn = settings.wifi && wifiSupported && File(paths.root, WifiEmu.JAR_PATH).isFile
         if (settings.wifi && wifiSupported && !wifiOn) log("wifi: ${WifiEmu.JAR_NAME} is not installed (build guest-wifi/build.sh), the guest keeps its normal network")
         WifiEmu.write(paths.root, settings, wifiOn)
-        if (wifiOn) log("wifi: emulated network \"${settings.wifiSsid}\" (${if (WifiEmu.secured(settings)) "WPA2" else "open"})")
+        if (wifiOn) log("wifi: emulated network \"${settings.wifiSsid}\" (${if (WifiEmu.secured(settings)) settings.wifiSecurity.id else "open"})")
         // (debugging, see Kernel64.syncLog: only the first N services are started, then the guest is left as it is)
         val stopAfter = if (engine == Engine.N64 && kernel.syncLog) runCatching { File(paths.root, "dev/.aemu-stop-after").readText().trim().toInt() }.getOrNull() else null
         if (stopAfter != null) log("stop-after $stopAfter of: " + plan.filter { !it.onDemand }.mapIndexed { i, s -> "$i ${s.name}" }.joinToString())
@@ -1537,10 +1584,18 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         // offered, however the rest of the boot goes.
         if (!stopping) {
             setAdbd(true)
+            if (adb.savedEnabled()) { log("adb: network ADB was on for this VM, starting it"); adb.start() }
             log("★ adbd initialized ${(System.currentTimeMillis() - bootAt) / 1000} s after start: adb shell is available before the system finishes booting")
         }
-        // Magisk (VmSettings.magisk): init's post-fs-data stage, run by the host before the first service starts
-        if (!stopping) magiskPostFsData()
+        // Magisk (VmSettings.magisk): init's post-fs-data stage, run by the host before the first service starts - except that real
+        // init has servicemanager running by then (it is started in `on init`, post-fs-data comes later). A module daemon started
+        // from a post-fs-data script (LSPosed's lspd) talks to servicemanager at once; with none yet, every transaction on its
+        // handle 0 failed with DeadObjectException for good ("error in addService", "service package is not started, wait 1s",
+        // then "Fail to get binder for system server": the module installed fine but never worked). So the stage runs right after
+        // servicemanager has been started; a plan without one keeps the old place.
+        var magiskStageDone = false
+        fun magiskStage() { if (!magiskStageDone) { magiskStageDone = true; if (!stopping) magiskPostFsData() } }
+        if (plan.none { !it.onDemand && it.name == "servicemanager" }) magiskStage()
         for (svc in plan) {
             if (stopping) return
             if (svc.onDemand) { props.put("init.svc.${svc.name}", "stopped"); continue }
@@ -1665,6 +1720,11 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             if (svc.name == "mediaserver" && img.api < 16) LegacyLogoPatch.provideHeadsetState(paths.root, ::log)
             if (svc.name == "zygote" && needsBatteryPropertiesGuard) ensureBatteryProperties(plan)
             startService(svc)
+            if (svc.name == "servicemanager") {
+                waitFor("servicemanager", 5_000) { alive().contains("servicemanager") }
+                Thread.sleep(700)           // it has to have taken the context-manager role before a module daemon calls it
+                magiskStage()
+            }
             svc.waitSocket?.let { sock -> waitFor("socket $sock", 20_000) { paths.socket(sock).exists() } }
             // The socket file only proves that dhdrun bound it. Do not start zygote (and with it system_server's NetdConnector)
             // until netd itself answers, and give a netd that never does a fresh start: see NetdProbe
@@ -1931,13 +1991,21 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             Engine.N64 -> {
                 log("native arm64: graphics are served by the engine's own HALs")
                 // ...except for 32-bit programs, which draw through the 4.4 engine's GPU bridge (its frame file is not shown)
-                if (kernel.gpuBridge32 != null && n64Has32) {
+                // (Modified for AEmulator Plus, 2026-11-25: not when the 32-bit programs' driver is the open bridge, which GlHost serves; the closed
+                // server had nothing to do there)
+                if (kernel.gpuBridge32 != null && !kernel.gpuBridge32Open && n64Has32) {
                     spawn("glserverd", listOf(paths.nativeBin(Engine.KK.glserverd).absolutePath,
                         "-s", paths.glSock.absolutePath, "-fb", File(paths.bin, "gl32.fb").absolutePath, "-w", "$w", "-h", "$h"), glServerEnv())
                     waitFor("GL bridge socket", 10_000) { paths.glSock.exists() }
                 }
             }
             Engine.GB -> {
+                if (openBridge) {
+                    // Added for AEmulator Plus (2026-11-25): the host renderer (GlHost) was started in settings preparation; there is no glserverd
+                    // slot and no fb0 writer of its own: frames go into the guest's window buffers and its gralloc posts them to fb0
+                    log("GPU bridge: open bridge, served by the host renderer (no glserverd)")
+                    return
+                }
                 // (Modified for AEmulator Plus, 2026-11-19: the slot's environment carries the GPU names of the chip, see glServerEnv)
                 Slot.start(ctx, VmSlots.glSlotClass(slot),
                     listOf("glserverd", "-s", paths.glSock.absolutePath, "-fb", paths.fb.absolutePath, "-w", "$w", "-h", "$h"),
@@ -1945,11 +2013,11 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
                 waitFor("GL bridge socket", 10_000) { paths.glSock.exists() }
             }
             Engine.KK -> {
-                if (EngineAssets.kkX86OpenBridge(ctx, engine, img.arch)) {
+                if (openBridge) {
                     // the host renderer (GlHost) was started in settings preparation; it needs the screen surface before the first frame
                     // (no wait for the screen surface: the setter above hands it to GlHost whenever it arrives, and a boot that held
                     // SurfaceFlinger back for 10 s waiting for it timed out)
-                    log("GPU bridge: x86-32, served by the host renderer (no glserverd)")
+                    log("GPU bridge: open bridge (${img.arch.id}), served by the host renderer (no glserverd)")
                     surface?.let { GlHost.surface(it) }
                     return
                 }
@@ -2077,6 +2145,16 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
      * every L-preview workaround is keyed on this exact ro.build.id so Dalvik-based 4.4 / 4.4W images are untouched.
      */
     private val isLpw39: Boolean by lazy { img.buildId.trim().equals("LPW39", ignoreCase = true) }
+
+    /**
+     * Added for AEmulator Plus (2026-11-24): any Android L preview whose ART has no boot image and has to build one on
+     * first boot: LPW39 (API 20) and the older AOSP "L" builds that still report API 19 (AAU70, aosp_x86 "IA Emulator";
+     * libdvm.so and libart.so side by side, ART chosen by persist.sys.dalvik.vm.lib.1). See [LPreviewArt].
+     */
+    private val isLPreviewArt: Boolean by lazy {
+        (isLpw39 && img.api == 20) || LPreviewArt.appliesTo(img.release, img.api,
+            File(paths.root, "system/lib/libart.so").isFile, File(paths.root, "system/bin/dex2oat").isFile || File(paths.root, "system/bin/dex2oat.real").isFile)
+    }
 
     /** app_process, or app_process32 on firmware that has only that. */
     private val appProcess: String get() = AppProcess.path(paths.root)
@@ -2871,7 +2949,17 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
 
     @Volatile private var ctlPlan: List<GuestService>? = null
 
-    private fun onCtl(start: Boolean, svc: String) {
+    private fun onCtl(start: Boolean, svc: String, restart: Boolean = false) {
+        // Added for AEmulator Plus (2026-11-27): Android 5.0 to 6.0 reboot to recovery in two steps. PowerManagerService.lowLevelReboot
+        // does not set sys.powerctl for "recovery": it sets "ctl.start pre-recovery", a service that runs /system/bin/uncrypt (turns the
+        // package into a block map) and only then asks init for "reboot,recovery". Here that service is missing from the plan, the log
+        // said "ctl.start pre-recovery: no such service", sys.powerctl never came and the OTA installer (OtaRecovery) was never reached,
+        // so the update did nothing on 5.x (4.4 sets sys.powerctl itself). uncrypt is skipped: the package is read from the command file.
+        if (start && !restart && svc == "pre-recovery") {
+            log("ctl.start pre-recovery: uncrypt skipped, rebooting to recovery")
+            powerRequest("reboot,recovery")
+            return
+        }
         if (svc.startsWith("aidl/")) {
             // a lazy AIDL service (artd of 14+, a skin's daemon): started when servicemanager is asked for it, and
             // a few times at most, as the question comes every second for as long as the client waits
@@ -2945,6 +3033,14 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
             if (start) { startBootSoundWhenAudioUp(def); return }
             bootSoundPending.remove(svc)
         }
+        // Added for AEmulator Plus (2026-11-23): init treats "ctl.start" of a service that is already running as a no-op; only
+        // "ctl.restart" (and "ctl.stop") ends the running process. Here every start was a restart: the running copy was killed
+        // and a new one launched. idmap2d showed it: it is started with the other main services, system_server's IdmapDaemon
+        // then asks for it with ctl.start, and the copy it had just connected to was killed under it (aemu.log: "idmap2d exited,
+        // code 143" / "started" right as the system comes up). OverlayManagerService, still in its constructor, then failed every
+        // overlay with DeadObjectException ("service 'idmap' died", "failed to check if idmap exists for GoogleConfigOverlay.apk"),
+        // so no overlay was applied by that boot. A service that has exited (the process is gone) is still started again.
+        if (start && !restart && synchronized(procs) { procs[svc]?.isAlive == true }) return
         synchronized(procs) { procs.remove(svc) }?.destroyForcibly()
         if (start) Thread { runCatching { startService(def) } }.start()
     }
@@ -3063,6 +3159,7 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         disableBrokenComponents()
         disableSharedConnectivity()
         skipInternetCheck()
+        ensureDialerRole()
         stopCrashLoopReboot()
         if (img.api >= 34) runCatching { switchToFullUserOnHsum() }.onFailure { log("headless system user check failed: $it") }
         if (img.api >= 24) runCatching { enableHome() }.onFailure { log("home screen check failed: $it") }
@@ -3273,6 +3370,46 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
                 "settings get global captive_portal_mode", 60_000)
             log("wifi: internet check off (captive_portal_mode=" + out.trim().lines().lastOrNull().orEmpty() + ")")
         }.onFailure { log("wifi: could not switch the internet check off: ${it.message}") }
+    }
+
+    /**
+     * Added for AEmulator Plus (2026-11-23), "calls do not work, everything else on the radio does" (Android 12 Google image): the
+     * radio side is fine (SIM loaded, registered, GET_CURRENT_CALLS returns the call, Telecom adds it), but nobody shows the call.
+     * Telecom asks the role manager for the DIALER role holder and gets null ("DefaultDialerCache: ... now null", "defaultDialer:
+     * null"). The image's dialer is com.android.dialer, but the role's default holder is com.google.android.dialer, which is not
+     * installed ("Role: Cannot get ApplicationInfo for default holder: com.google.android.dialer"), and unlike SMS (which fell back
+     * to com.android.messaging) the DIALER role gets no fallback holder. So the in-call screen is never bound: an incoming call
+     * rings with no UI, an outgoing one dies silently, and the dialer logs "not currently set to be default dialer". A fresh boot
+     * with idmap2d fixed (overlays applied) still ended the same way, so this is not an overlay problem.
+     * Once the system is up the holder is read and, when empty, the installed app that answers both ACTION_DIAL and InCallService
+     * becomes the holder. A holder the person chose is never touched.
+     */
+    private fun ensureDialerRole() {
+        if (img.api < 29) return   // the role manager is Android 10+; older systems read the default dialer from a setting
+        runCatching {
+            val sh = "export PATH=/system/bin:/system/xbin:\$PATH; "
+            val role = "android.app.role.DIALER"
+            val holders = guestShell(sh + "cmd role get-role-holders --user 0 $role 2>&1", 30_000).trim()
+            val pkgLine = Regex("^[\\w.]+$")
+            if (holders.lines().any { pkgLine.matches(it.trim()) }) {
+                log("dialer role: held by ${holders.lines().first().trim()}")
+                return
+            }
+            val comp = Regex("^([\\w.]+)/\\S+$")
+            fun owners(cmd: String) = guestShell(sh + cmd + " 2>&1", 60_000).lines()
+                .mapNotNull { comp.matchEntire(it.trim())?.groupValues?.get(1) }.toSet()
+            val dial = owners("cmd package query-activities --brief -a android.intent.action.DIAL")
+            val incall = owners("cmd package query-services --brief -a android.telecom.InCallService")
+            val both = dial intersect incall
+            val pick = listOf("com.google.android.dialer", "com.android.dialer").firstOrNull { it in both } ?: both.firstOrNull()
+            if (pick == null) {
+                log("dialer role: no holder and no installed app answers both DIAL and InCallService (dial=$dial, incall=$incall)")
+                return
+            }
+            val out = guestShell(sh + "cmd role add-role-holder --user 0 $role $pick 0 2>&1", 60_000).trim()
+            val now = guestShell(sh + "cmd role get-role-holders --user 0 $role 2>&1", 30_000).trim()
+            log("dialer role: no holder, $pick made the holder" + (if (out.isNotBlank()) " ($out)" else "") + "; now: ${now.ifEmpty { "none" }}")
+        }.onFailure { log("dialer role: ${it.message}") }
     }
 
     /**
@@ -4034,7 +4171,14 @@ class GuestVm(val ctx: Context, val img: GuestImage, val lowPowerBoot: Boolean =
         sb.toString()
     }
 
-    fun installApk(apkOnSdcard: String): String = guestShell("pm install -r $apkOnSdcard", 600_000)
+    /**
+     * Android 2.x/3.x stage the package in a secure container (/mnt/asec, made by vold) when the install location is "auto"
+     * or the app prefers the card; the emulator has no such container and the copy fails ("Failed to copy ... to
+     * /mnt/asec/smdl2tmp1/pkg.apk"). -f installs on internal flash, which skips the container.
+     */
+    val pmInstallFlags: String get() = if (img.api < 14) "-f -r" else "-r"
+
+    fun installApk(apkOnSdcard: String): String = guestShell("pm install $pmInstallFlags $apkOnSdcard", 600_000)
 
     // ---- Magisk (VmSettings.magisk, see MagiskCore): the host plays the part of init's boot stages ----------------
 

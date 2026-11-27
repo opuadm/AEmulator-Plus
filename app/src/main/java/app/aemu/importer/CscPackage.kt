@@ -126,15 +126,23 @@ internal object CscPackage {
                     val base = PartitionNames.stripOdinMd5(e.name.substringAfterLast('/'))
                     val t = target(e.name)
                     if (t != null) sink.put(t, NoClose(tar))
-                    else if (isCscContainer(base)) collect(NoClose(tar), base, scratch, depth + 1, sink)
+                    // a CSC tar of the first Samsung Androids names its volume cache.rfs, with nothing about CSC in the name
+                    else if (isCscContainer(base) || base.endsWith(".rfs", true)) collect(NoClose(tar), base, scratch, depth + 1, sink)
                 }
             }
             return
         }
-        if (FatReader.probe(h)) {
-            val img = Files.createTempFile(scratch.toPath(), "csc-", ".img").toFile()
+        // Samsung XSR raw flash dump (cache.rfs of the I5700 Spica and its generation): the FAT volume is inside it
+        val xsr = app.aemu.importer.tools.FirmwareToolset.isXsrDump(h)
+        if (xsr || FatReader.probe(h)) {
+            var img = Files.createTempFile(scratch.toPath(), "csc-", ".img").toFile()
+            var flat: File? = null
             try {
                 img.outputStream().use { src.copyTo(it, 1 shl 16) }
+                if (xsr) {
+                    flat = app.aemu.importer.tools.FirmwareToolset.unwrapXsr(img, scratch) { }
+                    img.delete(); img = flat
+                }
                 val fat = FatReader.open(img) ?: throw IOException("Not a FAT volume")
                 fat.use {
                     for (e in it.files()) {
@@ -153,7 +161,7 @@ internal object CscPackage {
                         }
                     }
                 }
-            } finally { img.delete() }
+            } finally { img.delete(); flat?.delete() }
             return
         }
         throw IOException("Not a CSC package")

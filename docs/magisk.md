@@ -74,6 +74,32 @@ With `su` working, the app ran `env_check` (`app_functions.sh`), which wants a b
 (exit code 2 = the app's "full fix" message; reinstalling cannot help, there is no boot image). `MagiskCore.prepareTmp` now leaves a
 block-device marker there (`b:259:1:600`, see vmount.h), so `[ -b ... ]` is true. Needs no shim rebuild beyond the one above.
 
+## Module installs (LSPosed) failed with "can't create /proc/self/fd/1" (fixed 2026-11-23)
+
+Installing `LSPosed-v1.9.2-7024-zygisk-release.zip` from the Magisk app ended in "! Installation failed", the log full of
+`update-binary: line 29: can't create /proc/self/fd/1: Permission denied` and `grep: /proc/cmdline: Permission denied`.
+Magisk's `util_functions.sh` sets `BOOTMODE` by looking for a process named zygote in `ps`; the guest's `ps` is the phone's and
+does not list the guest's zygote, so `BOOTMODE` was false and `ui_print` took the recovery path (`>> /proc/self/fd/$OUTFD`), which
+the phone refuses for the Magisk app's pipe. LSPosed's own `customize.sh` also aborts when `BOOTMODE` is false ("Install from
+recovery is NOT supported"). Now `MagiskCore.patchBootMode` makes the stock line `BOOTMODE=false` into `BOOTMODE=true` in
+`/data/adb/magisk/util_functions.sh` (at import, and again before every boot because the app's "additional setup" copies the
+stock script back; a `BOOTMODE` given by the caller still wins), and `prepareTmp` writes a plain `<root>/proc/cmdline`. The
+`chcon: can't change context` lines are harmless. **Needs the app rebuild only (no shim rebuild); not run on a device.** Modules
+already half-installed stay in `/data/adb/modules/zygisk_lsposed` (no `update` flag): remove that directory or just install again.
+
+## LSPosed installed but never came up: its daemon started before servicemanager (fixed 2026-11-23)
+
+After the install fix the module was complete on disk (`/data/adb/modules/zygisk_lsposed`, both Zygisk libraries, manager.apk) but
+LSPosed did not work: `lspd` logged `error in addService` / `DeadObjectException` on `IServiceManager`, then `service package is
+not started, wait 1s` forever, and system_server logged `Fail to get binder for system server` / `System server injection fails`.
+The VM ran `magisk --post-fs-data` before the first service, so servicemanager did not exist yet when LSPosed's `post-fs-data.sh`
+started `lspd`; its binder handle 0 never recovered (the `service.sh` copy then exits at once, one daemon is enough). Real init starts
+servicemanager in `on init`, before post-fs-data, so the stage now runs right after servicemanager has been started (plus 0.7 s to
+take the context-manager role); a plan without a servicemanager keeps the old place. Properties and module files are still in place
+before zygote and everything else. `GuestVm.kt` only (no shim rebuild); **not run on a device.** Left alone: `Check mount failed for
+/apex/com.android.art/bin/dex2oat32` (no 32-bit dex2oat in this guest, LSPosed just disables its dex2oat wrapper) and `Unsupported
+native bridge API in libzygisk.so` (normal for Zygisk).
+
 ## Zygisk (added 2026-11-21, not run on a device)
 
 Switch **Zygisk** on in the Magisk app (Settings), then do a full boot of the VM. Zygisk is a native bridge, so the host does what

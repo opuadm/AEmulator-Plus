@@ -2,6 +2,7 @@
  * Modified for AEmulator Super Plus, 2026-10-11: fake SIM card slots, Wi-Fi signal and neighbours.
  * Modified for AEmulator Super Plus, 2026-10-23: CDMA modem option.
  * Modified for AEmulator Plus, 2026-10-28: Android 14+ system_server watchdog option.
+ * Modified for AEmulator Plus, 2026-11-25: Xperia Play input method (slider and gamepad) setting.
  * GPL-3.0; see LICENSE and NOTICE.md. */
 package app.aemu.core
 
@@ -29,6 +30,8 @@ data class VmSettings(
     val netProxy: Boolean = true,
     /** HTTP debugger (netdebug): the guest's HTTP/HTTPS goes through a logging proxy with rules; applies at the next full VM boot */
     val netDebug: Boolean = false,
+    /** ADB over the network (AdbServer) was switched on for this VM: it is started again once the guest's adbd is up at every boot. Set from the ADB dialog, not the settings sheet. */
+    val adbNet: Boolean = false,
     val lowRam: Boolean = false,
     /** How eagerly the host kills cached guest processes: a [MemoryMode] id (light, medium, aggressive). Applies at the next full VM boot. */
     val memoryMode: String = MemoryMode.DEFAULT.id,
@@ -49,6 +52,14 @@ data class VmSettings(
      * of [mouseKeyboard] and [keypad]; applies at the next full VM boot (the guest only looks for input devices at boot).
      */
     val spen: Boolean = false,
+    /**
+     * Input method "Xperia Play" (offered only for an R800 machine, see [VirtualInputPolicy.isXperiaPlayModel]): the guest gets
+     * a slider switch (a device named AEmulator Slider reporting SW_LID), and a navigation-bar button slides the keypad out and in;
+     * while it is out a floating gamepad (D-pad, Cross/Circle/Square/Triangle, L, R, Start, Select, Menu, Play) sends its keys
+     * through the ordinary key device. Independent of the other input methods; applies at the next full VM boot (the guest only
+     * looks for input devices then).
+     */
+    val xperiaPlay: Boolean = false,
     val keepScreenOn: Boolean = true,
     /** the guest phone's notification LED drawn above its screen (0.0.0.3) */
     val showLed: Boolean = true,
@@ -72,6 +83,10 @@ data class VmSettings(
     /** With host motion sensors: 0 = disabled (real orientation), 1 = locked to 0°, 2 = locked to 180°, 3 = no gyroscope (see [GyroLock]). */
     val gyroLock: Int = GyroLock.DISABLED,
     val hostResolution: Boolean = false,
+    /** The device skin this machine wears (a [VmTheme] id); null = the skin chosen in the app settings. */
+    val skinId: String? = null,
+    /** The guest screen size follows the wearing skin's own resolution (its skinWidth x skinHeight), the way [hostResolution] follows the phone. */
+    val skinResolution: Boolean = false,
     val skipSetupWizard: Boolean = false,
     val disableGoogleApps: Boolean = false,
     val mtMode: Int = 0,
@@ -99,6 +114,8 @@ data class VmSettings(
     val imei: String = "",
     /** ro.serialno / ro.boot.serialno reported to the guest; blank = default sample serial */
     val serial: String = "",
+    /** Extra properties given to the guest at boot, one key=value per line: what a phone's boot loader passes (ro.boot.hwc ...) */
+    val bootProps: String = "",
     /** kernel version shown in /proc/version and uname -r; blank = built-in default. A full "Linux version ..." line is used as is */
     val kernel: String = "",
     /** branch/local-version suffix appended to the release (e.g. "perf" -> 3.0.31-aemu-perf); blank = none. Ignored when [kernel] is a full "Linux version ..." line */
@@ -145,8 +162,18 @@ data class VmSettings(
     val wifi: Boolean = false,
     /** Name of the emulated Wi-Fi network. */
     val wifiSsid: String = WifiEmu.DEFAULT_SSID,
-    /** WPA2 passphrase of the emulated network; blank = open network. */
+    /** Passphrase of the emulated network (not used when [wifiSecurity] is open). */
     val wifiPassword: String = "",
+    /** Joined to [wifiSsid] at boot; off = the guest starts without a connection and joins from its own Settings. */
+    val wifiAutoConnect: Boolean = true,
+    /** Speed limit of the emulated network as typed ("50 Mbps", "800 Kbps", "1 Gbps"); blank = no limit. See [WifiEmu.speedKbps]. */
+    val wifiSpeed: String = "",
+    /** Security type of the emulated network. */
+    val wifiSecurity: WifiSecurity = WifiSecurity.NONE,
+    /** Frequency band(s) of the emulated network (6 GHz only shows on Android 12+ guests). */
+    val wifiBand: WifiBand = WifiBand.GHZ24,
+    /** Wi-Fi standard the guest reports for the network (Android 11+); auto follows the band. */
+    val wifiStandard: WifiStandard = WifiStandard.AUTO,
     /** Fake SIM in slot 1 (see [SimCard]); blank fields = the operator of the firmware's APN list, as before. */
     val sim: SimCard = SimCard(),
     /** Second slot: only used with [dualSim] on firmware built for two SIMs. */
@@ -154,8 +181,8 @@ data class VmSettings(
     val dualSim: Boolean = false,
     /** Bars the emulated Wi-Fi shows, 1..4 (see [WifiEmu.rssiFor]). */
     val wifiSignal: Int = WifiEmu.MAX_BARS,
-    /** A scan also lists a few other (locked) networks nearby. */
-    val wifiNeighbors: Boolean = true,
+    /** More joinable networks next to [wifiSsid], each with its own name, password and signal (at most [WifiEmu.MAX_EXTRA]). */
+    val wifiExtra: List<WifiNetworkDef> = emptyList(),
     /** Guest thermal_zone17 shows the phone's real sensor; off (default) = a constant cool 30 C (see [ThermalSysfs]). */
     val thermalPassthrough: Boolean = false,
     /** Value of thermal_zone17/temp in millidegrees set by the user; null = follow [thermalPassthrough]. */
@@ -190,13 +217,13 @@ data class VmSettings(
     fun toJson(): JSONObject = JSONObject()
         .put("width", width).put("height", height).put("density", density)
         .put("gpu", gpu).put("hwui", hwui).put("jit", jit).put("fullDexopt", fullDexopt).put("fbHz", fbHz)
-        .put("touchHz", touchHz).put("netProxy", netProxy).put("netDebug", netDebug).put("lowRam", lowRam).put("memoryMode", memoryMode)
+        .put("touchHz", touchHz).put("netProxy", netProxy).put("netDebug", netDebug).put("adbNet", adbNet).put("lowRam", lowRam).put("memoryMode", memoryMode)
         .put("showFrame", showFrame).put("showNavBar", showNavBar)
         .put("hideMenuButton", hideMenuButton)
         .put("navButtons", NavControls.encode(NavControls.parse(navButtons)))
         .put("trackball", trackball).put("trackballDpad", trackballDpad)
         .put("trackballStepDp", trackballStepDp.coerceIn(4, 48))
-        .put("mouseKeyboard", mouseKeyboard).put("keypad", keypad).put("spen", spen)
+        .put("mouseKeyboard", mouseKeyboard).put("keypad", keypad).put("spen", spen).put("xperiaPlay", xperiaPlay)
         .put("keepScreenOn", keepScreenOn).put("showLed", showLed).put("native32", native32).put("translate32", translate32).put("mtMode", mtMode).put("legacyEngine", legacyEngine)
         .put("vibration", vibration)
         .put("hostBattery", hostBattery)
@@ -205,15 +232,17 @@ data class VmSettings(
         .put("bluetooth", bluetooth)
         .put("sfTombstone", sfTombstone)
         .put("magisk", magisk)
-        .put("motionSensors", motionSensors).put("disableSensors", disableSensors).put("guestNavBar", guestNavBar).put("gyroLock", gyroLock).put("hostResolution", hostResolution)
+        .put("motionSensors", motionSensors).put("disableSensors", disableSensors).put("guestNavBar", guestNavBar).put("gyroLock", gyroLock).put("hostResolution", hostResolution).put("skinResolution", skinResolution)
+        .apply { if (skinId != null) put("skinId", skinId) }
         .put("skipSetupWizard", skipSetupWizard)
         .put("disableGoogleApps", disableGoogleApps)
-        .put("ramMb", ramMb).put("storageGb", storageGb).put("storageType", storageType).put("ramType", ramType).put("radio", radio).put("imei", imei).put("serial", serial).put("kernel", kernel).put("kernelBranch", kernelBranch).put("kernelCommit", kernelCommit).put("kernelUser", kernelUser).put("kernelHost", kernelHost).put("kernelCompiler", kernelCompiler).put("kernelBuild", kernelBuild).put("kernelFlags", kernelFlags).put("kernelDate", kernelDate).put("baseband", baseband).put("networkType", networkType).apply { if (cdma != null) put("cdma", cdma) }.put("qemuArgs", qemuArgs).put("straceServices", straceServices)
+        .put("ramMb", ramMb).put("storageGb", storageGb).put("storageType", storageType).put("ramType", ramType).put("radio", radio).put("imei", imei).put("serial", serial).put("bootProps", bootProps).put("kernel", kernel).put("kernelBranch", kernelBranch).put("kernelCommit", kernelCommit).put("kernelUser", kernelUser).put("kernelHost", kernelHost).put("kernelCompiler", kernelCompiler).put("kernelBuild", kernelBuild).put("kernelFlags", kernelFlags).put("kernelDate", kernelDate).put("baseband", baseband).put("networkType", networkType).apply { if (cdma != null) put("cdma", cdma) }.put("qemuArgs", qemuArgs).put("straceServices", straceServices)
         .put("hardware", hardware)
         .put("soc", soc).apply { if (socCustom != null) put("socCustom", socCustom.toJson()) }
-        .put("wifi", wifi).put("wifiSsid", wifiSsid).put("wifiPassword", wifiPassword)
+        .put("wifi", wifi).put("wifiSsid", wifiSsid).put("wifiPassword", wifiPassword).put("wifiSecurity", wifiSecurity.id).put("wifiAutoConnect", wifiAutoConnect).put("wifiSpeed", wifiSpeed).put("wifiBand", wifiBand.id).put("wifiStandard", wifiStandard.id)
         .put("sim", sim.toJson()).put("sim2", sim2.toJson()).put("dualSim", dualSim)
-        .put("wifiSignal", wifiSignal).put("wifiNeighbors", wifiNeighbors)
+        .put("wifiSignal", wifiSignal)
+        .put("wifiExtra", JSONArray(wifiExtra.map { it.toJson() }))
         .put("thermalPassthrough", thermalPassthrough).put("thermalTemp", thermalTemp ?: JSONObject.NULL)
         .put("disableWatchdog", disableWatchdog)
         .put("glTrace", glTrace)
@@ -233,6 +262,28 @@ data class VmSettings(
 
         /** Characters allowed in a serial: safe for adb, Build.SERIAL and property values (max 91 bytes). */
         const val SERIAL_MAX = 32
+        /** Most lines / bytes of the extra boot properties (a value is at most 91 bytes, like any property). */
+        const val BOOT_PROPS_LINES = 64
+        private val PROP_KEY = Regex("[A-Za-z0-9_.\\-]{1,64}")
+
+        /** Keeps the well-formed `key=value` lines (comments and blanks go), at most [BOOT_PROPS_LINES], values of up to 91 bytes. */
+        fun parseBootProps(text: String): LinkedHashMap<String, String> {
+            val out = LinkedHashMap<String, String>()
+            for (raw in text.lineSequence()) {
+                val ln = raw.trim()
+                if (ln.isEmpty() || ln.startsWith("#")) continue
+                val i = ln.indexOf('=')
+                if (i <= 0) continue
+                val k = ln.substring(0, i).trim()
+                val v = ln.substring(i + 1).trim()
+                if (!PROP_KEY.matches(k) || v.toByteArray().size > 91 || v.any { it.code < 32 }) continue
+                out[k] = v
+                if (out.size >= BOOT_PROPS_LINES) break
+            }
+            return out
+        }
+        fun cleanBootProps(text: String): String = parseBootProps(text).entries.joinToString("\n") { "${it.key}=${it.value}" }
+
         /** Suggested ro.hardware values for the settings menu (any other value can be typed). */
         val HARDWARE_PRESETS = listOf("goldfish", "ranchu", "qcom")
 
@@ -333,6 +384,7 @@ data class VmSettings(
                 touchHz = o.optInt("touchHz", d.touchHz),
                 netProxy = o.optBoolean("netProxy", d.netProxy),
                 netDebug = o.optBoolean("netDebug", d.netDebug),
+                adbNet = o.optBoolean("adbNet", d.adbNet),
                 lowRam = o.optBoolean("lowRam", d.lowRam),
                 memoryMode = MemoryMode.parse(o.optString("memoryMode", d.memoryMode)).id,
                 showFrame = o.optBoolean("showFrame", d.showFrame),
@@ -345,6 +397,7 @@ data class VmSettings(
                 mouseKeyboard = o.optBoolean("mouseKeyboard", false),
                 keypad = o.optBoolean("keypad", false),
                 spen = o.optBoolean("spen", false),
+                xperiaPlay = o.optBoolean("xperiaPlay", false),
                 keepScreenOn = o.optBoolean("keepScreenOn", d.keepScreenOn),
                 showLed = o.optBoolean("showLed", d.showLed),
                 vibration = o.optBoolean("vibration", d.vibration),
@@ -359,6 +412,8 @@ data class VmSettings(
                 guestNavBar = o.optBoolean("guestNavBar", d.guestNavBar),
                 gyroLock = GyroLock.sanitize(o.optInt("gyroLock", GyroLock.DISABLED)),
                 hostResolution = o.optBoolean("hostResolution", false),
+                skinId = o.optString("skinId", "").trim().takeIf { it.isNotEmpty() && it.length <= 80 },
+                skinResolution = o.optBoolean("skinResolution", false),
                 skipSetupWizard = o.optBoolean("skipSetupWizard", d.skipSetupWizard),
                 disableGoogleApps = o.optBoolean("disableGoogleApps", false),
                 mtMode = o.optInt("mtMode", d.mtMode),
@@ -372,6 +427,7 @@ data class VmSettings(
                 translate32 = o.optBoolean("translate32", true),
                 imei = o.optString("imei", ""),
                 serial = cleanSerial(o.optString("serial", "")),
+                bootProps = cleanBootProps(o.optString("bootProps", "")),
                 kernel = cleanKernel(o.optString("kernel", "")),
                 kernelBranch = cleanToken(o.optString("kernelBranch", ""), TOKEN_MAX),
                 kernelCommit = cleanToken(o.optString("kernelCommit", ""), 40),
@@ -392,11 +448,16 @@ data class VmSettings(
                 wifi = o.optBoolean("wifi", d.wifi),
                 wifiSsid = WifiEmu.cleanSsid(o.optString("wifiSsid", d.wifiSsid)).ifEmpty { WifiEmu.DEFAULT_SSID },
                 wifiPassword = WifiEmu.cleanPassword(o.optString("wifiPassword", "")),
+                wifiAutoConnect = o.optBoolean("wifiAutoConnect", true),
+                wifiSpeed = WifiEmu.cleanSpeed(o.optString("wifiSpeed", "")),
+                wifiBand = WifiBand.fromId(o.optString("wifiBand", "")),
+                wifiStandard = WifiStandard.fromId(o.optString("wifiStandard", "")),
+                wifiSecurity = WifiSecurity.fromId(o.optString("wifiSecurity", ""), if (o.optString("wifiPassword", "").isEmpty()) WifiSecurity.NONE else WifiSecurity.WPA2),
                 sim = SimCard.fromJson(o.optJSONObject("sim")),
                 sim2 = o.optJSONObject("sim2")?.let { SimCard.fromJson(it) } ?: d.sim2,
                 dualSim = o.optBoolean("dualSim", false),
                 wifiSignal = o.optInt("wifiSignal", d.wifiSignal).coerceIn(1, WifiEmu.MAX_BARS),
-                wifiNeighbors = o.optBoolean("wifiNeighbors", d.wifiNeighbors),
+                wifiExtra = o.optJSONArray("wifiExtra")?.let { a -> (0 until minOf(a.length(), WifiEmu.MAX_EXTRA)).mapNotNull { a.optJSONObject(it)?.let(WifiNetworkDef::fromJson) } } ?: emptyList(),
                 thermalPassthrough = o.optBoolean("thermalPassthrough", d.thermalPassthrough),
                 thermalTemp = if (o.has("thermalTemp") && !o.isNull("thermalTemp")) o.optInt("thermalTemp").coerceIn(ThermalSysfs.MIN_MILLI_C, ThermalSysfs.MAX_MILLI_C) else null,
                 disableWatchdog = o.optBoolean("disableWatchdog", d.disableWatchdog),
@@ -410,6 +471,41 @@ data class VmSettings(
 }
 
 /** Служба гостя, которую мы запускаем вместо init. */
+/** One extra emulated Wi-Fi network: name, WPA2 passphrase (blank = open) and bars. */
+enum class WifiSecurity(val id: String) {
+    NONE("none"), WPA2("wpa2"), WPA_WPA2("wpa"), WPA3("wpa3");
+    companion object {
+        fun fromId(id: String, fallback: WifiSecurity) = entries.firstOrNull { it.id == id } ?: fallback
+    }
+}
+
+enum class WifiBand(val id: String) {
+    GHZ24("24"), GHZ5("5"), DUAL("dual"), GHZ6("6");
+    companion object {
+        fun fromId(id: String) = entries.firstOrNull { it.id == id } ?: GHZ24
+    }
+}
+
+enum class WifiStandard(val id: String) {
+    AUTO("auto"), N("n"), AC("ac"), AX("ax"), BE("be");
+    companion object {
+        fun fromId(id: String) = entries.firstOrNull { it.id == id } ?: AUTO
+    }
+}
+
+data class WifiNetworkDef(val ssid: String = "", val password: String = "", val signal: Int = WifiEmu.MAX_BARS, val security: WifiSecurity = WifiSecurity.WPA2, val speed: String = "",
+                          val band: WifiBand = WifiBand.GHZ24, val standard: WifiStandard = WifiStandard.AUTO) {
+    fun toJson(): JSONObject = JSONObject().put("ssid", ssid).put("password", password).put("signal", signal).put("security", security.id).put("speed", speed).put("band", band.id).put("standard", standard.id)
+    companion object {
+        fun fromJson(o: JSONObject) = WifiNetworkDef(
+            WifiEmu.cleanSsid(o.optString("ssid", "")), WifiEmu.cleanPassword(o.optString("password", "")),
+            o.optInt("signal", WifiEmu.MAX_BARS).coerceIn(1, WifiEmu.MAX_BARS),
+            WifiSecurity.fromId(o.optString("security", ""), if (o.optString("password", "").isEmpty()) WifiSecurity.NONE else WifiSecurity.WPA2),
+            WifiEmu.cleanSpeed(o.optString("speed", "")),
+            WifiBand.fromId(o.optString("band", "")), WifiStandard.fromId(o.optString("standard", "")))
+    }
+}
+
 data class GuestService(
     val name: String,
     val argv: List<String>,

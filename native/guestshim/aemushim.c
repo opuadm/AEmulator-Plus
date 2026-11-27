@@ -695,6 +695,53 @@ EXPORT int statvfs(const char *path, void *buf) { return storage_hook("statvfs",
 EXPORT int statvfs64(const char *path, void *buf) { return storage_hook("statvfs64", path, buf); }
 
 /*
+ * Added for AEmulator Plus (2026-11-26): the number of fb0 buffers some vendor libui builds read from the gralloc.
+ *
+ * HTC's Gingerbread libui (Wildfire S, "FramebufferNativeWindow: mNumBuffers = %d") takes the length of its buffer FIFO from
+ * framebuffer_device_t.reserved[0] (numFramebuffers, +0x68), which the vendor's own gralloc fills in. The AOSP-layout gralloc of
+ * the engine (and any generic gralloc.default.so a tree carries) never writes it, so the window got 0 buffers: SurfaceFlinger
+ * looked healthy in dumpsys (layers, wallpaper, dialogs), every dequeueBuffer failed, every eglSwapBuffers ended in
+ * EGL_BAD_SURFACE and fb0 stayed all zero, a black screen. The host sets AEMU_FB_BUFFERS (2, the FIFO of a double-buffered
+ * window; a single-page fb0 hands out plain buffers that post() copies, so any count works) for a tree whose libui logs that
+ * count, and the "fb0" device of the gralloc module gets it when the module left the field at 0 (a vendor gralloc that sets it
+ * keeps its own value). Not set: no hook, hw_get_module goes straight to libhardware.
+ */
+struct fbw_methods { int (*open)(const void *m, const char *name, void **dev); };
+static int (*g_fbw_open)(const void *, const char *, void **);
+static unsigned g_fbw_count;
+static int fbw_open(const void *m, const char *name, void **dev) {
+    int r = g_fbw_open(m, name, dev);
+    if (r == 0 && dev && *dev && name && name[0] == 'f' && name[1] == 'b' && name[2] == '0' && !name[3]) {
+        unsigned *d = (unsigned *)*dev;                  /* framebuffer_device_t: ..., minSwapInterval +0x60, maxSwapInterval +0x64, reserved[0] +0x68 */
+        if (!d[0x68 / 4]) d[0x68 / 4] = g_fbw_count;
+    }
+    return r;
+}
+static struct fbw_methods g_fbw_methods = { fbw_open };
+EXPORT int hw_get_module(const char *id, const void **module) {
+    static int (*real)(const char *, const void **);
+    static int init;
+    if (!init) {
+        void *h = dlopen("libhardware.so", 2 /* RTLD_NOW */);
+        real = h ? (int (*)(const char *, const void **))dlsym(h, "hw_get_module") : 0;
+        g_fbw_count = (unsigned)env_u64("AEMU_FB_BUFFERS");
+        init = 1;
+    }
+    if (!real) return -22;                               /* -EINVAL: no libhardware, nothing to load a module from */
+    int r = real(id, module);
+    if (r == 0 && g_fbw_count && id && id[0] == 'g' && id[1] == 'r' && id[2] == 'a' && id[3] == 'l' && id[4] == 'l' && id[5] == 'o' && id[6] == 'c' && !id[7] &&
+        module && *module) {
+        /* hw_module_t: tag, version_major / minor, id, name, author, methods (+0x14) */
+        struct fbw_methods **mp = (struct fbw_methods **)((char *)*module + 0x14);
+        if (*mp && (*mp)->open && (*mp)->open != fbw_open) {
+            g_fbw_open = (*mp)->open;
+            *mp = &g_fbw_methods;
+        }
+    }
+    return r;
+}
+
+/*
  * Added for AEmulator Plus (2026-11-21): sysinfo() scaled to the guest's RAM budget (AEMU_RAM_KB), like /proc/meminfo above.
  * Android's Process.getTotalMemory() (Settings, ActivityManager.MemoryInfo.totalMem) and sysconf(_SC_PHYS_PAGES) read sysinfo(),
  * not the file, so a guest given 2 GB still reported all of the phone's memory. The real call runs first; its memory fields

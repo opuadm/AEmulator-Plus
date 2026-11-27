@@ -1,4 +1,4 @@
-/* Added for AEmulator Plus, 2026-11-19: device specification (SoC) spoofing. GPL-3.0; see LICENSE and NOTICE.md. */
+/* Added for AEmulator Plus, 2026-11-19: device specification (SoC) spoofing. GPL-3.0; see LICENSE and NOTICE.md. Samsung Exynos support added 2026-11-21; Spreadtrum / Unisoc and NVIDIA Tegra support added 2026-11-22. */
 package app.aemu.core
 
 import org.json.JSONArray
@@ -15,9 +15,14 @@ data class SocCluster(
     val revision: Int,
     val maxMhz: Int,
     val minMhz: Int = 300,
+    /**
+     * Added 2026-11-27. BogoMIPS this cluster's cpus print when it differs from [SocSpec.bogoMips] (Exynos 5422 dump: A7 2585.19, A15 3380.63);
+     * blank = the spec's value. Only the generic ARMv7 layout reads it.
+     */
+    val bogoMips: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject().put("count", count).put("implementer", implementer).put("variant", variant)
-        .put("part", part).put("revision", revision).put("maxMhz", maxMhz).put("minMhz", minMhz)
+        .put("part", part).put("revision", revision).put("maxMhz", maxMhz).put("minMhz", minMhz).put("bogoMips", bogoMips)
 
     companion object {
         fun fromJson(o: JSONObject): SocCluster = SocCluster(
@@ -28,6 +33,7 @@ data class SocCluster(
             revision = o.optInt("revision", 0).coerceIn(0, 0xf),
             maxMhz = o.optInt("maxMhz", 1800).coerceIn(100, 6000),
             minMhz = o.optInt("minMhz", 300).coerceIn(100, 6000),
+            bogoMips = SocSpec.line(o.optString("bogoMips", ""), 12),
         )
     }
 }
@@ -59,7 +65,7 @@ data class SocSpec(
     val revision: String = "",
     /** /sys/devices/soc0/serial_number */
     val serialNumber: String = "",
-    /** 7 = ARMv7 (32-bit) core, 8 = ARMv8 (64-bit) core; decides the layout of /proc/cpuinfo */
+    /** 6 = ARMv6 (ARM11, 32-bit; always printed in the [CpuinfoStyle.ARM_K30] layout), 7 = ARMv7 (32-bit) core, 8 = ARMv8 (64-bit) core; decides the layout of /proc/cpuinfo */
     val arch: Int = 8,
     val clusters: List<SocCluster> = listOf(SocCluster(4, 0x41, 0, 0xd03, 4, 1500)),
     /** the "Features" line; blank = the usual one of [arch] */
@@ -94,6 +100,16 @@ data class SocSpec(
     val gpuMaxMhz: Int = 0,
     /** Added 2026-11-20. Further soc0 files of this chip (chip_family, nproduct_id, pmic_model...) that override the derived ones */
     val soc0Extra: Map<String, String> = emptyMap(),
+    /** Added 2026-11-21. Layout of /proc/cpuinfo of the chip's reference kernel when it differs from the generic one (Samsung Exynos, Tegra / Unisoc 32-bit kernels); see [CpuinfoStyle] */
+    val cpuinfoStyle: CpuinfoStyle = CpuinfoStyle.GENERIC,
+    /** Added 2026-11-21. The "Revision" line of an ARMv7 kernel's /proc/cpuinfo ("0022"); blank = "0000". Used by [CpuinfoStyle.ARM_K30] and (since 2026-11-27) the generic ARMv7 layout */
+    val hwRevision: String = "",
+    /** Added 2026-11-22. False = the chip's kernel prints no "Hardware" line (NVIDIA's arm64 3.10 / 3.18 kernels: Nexus 9, Pixel C). */
+    val hardwareLine: Boolean = true,
+    /** Added 2026-11-22. Lines a kernel appends at the end of /proc/cpuinfo, "key" -> "value" (Denver: "MTS version"). */
+    val cpuinfoTail: Map<String, String> = emptyMap(),
+    /** Added 2026-11-22. Kernel-specific sysfs / device-tree values (cpuidle / cpufreq drivers, DT model); null = nothing beyond the generic files. */
+    val kernel: ArmKernel? = null,
 ) {
     val cores: Int get() = clusters.sumOf { it.count }.coerceIn(1, SocProfiles.MAX_CORES)
 
@@ -107,6 +123,9 @@ data class SocSpec(
         .apply { if (extraProps.isNotEmpty()) put("extraProps", JSONObject(extraProps)) }
         .put("legacyKernel", legacyKernel).put("hwPlatform", hwPlatform).put("foundryId", foundryId).put("gpuMaxMhz", gpuMaxMhz)
         .apply { if (soc0Extra.isNotEmpty()) put("soc0Extra", JSONObject(soc0Extra)) }
+        .put("cpuinfoStyle", cpuinfoStyle.id).put("hwRevision", hwRevision).put("hardwareLine", hardwareLine)
+        .apply { if (cpuinfoTail.isNotEmpty()) put("cpuinfoTail", JSONObject(cpuinfoTail)) }
+        .apply { kernel?.let { put("kernel", it.toJson()) } }
 
     /** Printable single-line values of a sane length; property names built from them stay valid. */
     fun sanitized(): SocSpec = copy(
@@ -116,7 +135,7 @@ data class SocSpec(
         platform = token(platform, 32), hardware = line(hardware, 64),
         family = line(family, 32), machine = line(machine, 32), socId = line(socId, 16),
         revision = line(revision, 16), serialNumber = line(serialNumber, 24),
-        arch = if (arch == 7) 7 else 8,
+        arch = if (arch == 6 || arch == 7) arch else 8,
         features = line(features, 400), bogoMips = line(bogoMips, 12),
         gpuVendor = line(gpuVendor, 64), gpuRenderer = line(gpuRenderer, 96),
         x86 = if (isa == SocIsa.X86) x86?.sanitized() else null,
@@ -124,6 +143,9 @@ data class SocSpec(
         extraProps = cleanProps(extraProps),
         hwPlatform = line(hwPlatform, 16).ifBlank { "MTP" }, foundryId = foundryId.coerceIn(-1, 15), gpuMaxMhz = gpuMaxMhz.coerceIn(0, 4000),
         soc0Extra = cleanProps(soc0Extra).filterKeys { it.all { c -> c.isLetterOrDigit() || c == '_' } },
+        hwRevision = line(hwRevision, 8).filter { it.isLetterOrDigit() },
+        cpuinfoTail = cpuinfoTail.entries.take(4).map { line(it.key, 24) to line(it.value, 64) }.filter { it.first.isNotEmpty() && it.second.isNotEmpty() }.toMap(),
+        kernel = kernel?.sanitized(),
     )
 
     companion object {
@@ -158,8 +180,95 @@ data class SocSpec(
                 legacyKernel = o.optBoolean("legacyKernel", false), hwPlatform = o.optString("hwPlatform", "MTP"),
                 foundryId = o.optInt("foundryId", -1), gpuMaxMhz = o.optInt("gpuMaxMhz", 0),
                 soc0Extra = o.optJSONObject("soc0Extra")?.let { e -> e.keys().asSequence().associateWith { e.optString(it, "") } }.orEmpty(),
+                cpuinfoStyle = CpuinfoStyle.of(o.optString("cpuinfoStyle", "")), hwRevision = o.optString("hwRevision", ""),
+                hardwareLine = o.optBoolean("hardwareLine", true),
+                cpuinfoTail = o.optJSONObject("cpuinfoTail")?.let { e -> e.keys().asSequence().associateWith { e.optString(it, "") } }.orEmpty(),
+                kernel = ArmKernel.fromJson(o.optJSONObject("kernel")),
             ).sanitized()
         }
+    }
+}
+
+/**
+ * Added 2026-11-22. What the chip's own kernel shows in sysfs / the device tree beyond the generic files: the cpuidle and cpufreq drivers
+ * (checked on real dumps: Nexus 9 "denver_idle" + "tegra", Pixel C "arm_idle" + "cpufreq-tegra210", Galaxy Tab 3 Lite "sc_cpuidle" + "sprd"),
+ * the topology package id, and the device-tree root model / compatible list of a board. Every field may be blank / null = not reported.
+ */
+data class ArmKernel(
+    /** /sys/devices/system/cpu/cpuidle/current_driver */
+    val cpuidleDriver: String = "",
+    /** cpuN/cpufreq/scaling_driver; blank = no cpufreq nodes from here (the engine's own stay) */
+    val cpufreqDriver: String = "",
+    /** cpuN/cpufreq/scaling_available_governors, space separated */
+    val governors: String = "",
+    /** cpuN/cpufreq/cpuinfo_transition_latency in ns; 0 = not reported */
+    val transitionLatencyNs: Int = 0,
+    /** cpuN/topology/physical_package_id (Nexus 9 prints -1, Pixel C 0, Spreadtrum 3.10 15); null = not reported */
+    val packageId: Int? = null,
+    /** /proc/device-tree/model */
+    val dtModel: String = "",
+    /** /proc/device-tree/compatible entries, most specific first */
+    val dtCompatible: List<String> = emptyList(),
+    /** Added 2026-11-23. True = physical_package_id / core_id / core_siblings follow the clusters (Kirin 980 dump: packages 0, 1, 2; core_id restarts in every cluster). Overrides [packageId]. */
+    val packageIdPerCluster: Boolean = false,
+) {
+    fun toJson(): JSONObject = JSONObject().put("cpuidleDriver", cpuidleDriver).put("cpufreqDriver", cpufreqDriver).put("governors", governors)
+        .put("transitionLatencyNs", transitionLatencyNs).put("dtModel", dtModel).put("dtCompatible", JSONArray(dtCompatible)).put("packageIdPerCluster", packageIdPerCluster)
+        .apply { packageId?.let { put("packageId", it) } }
+
+    fun sanitized(): ArmKernel = ArmKernel(
+        cpuidleDriver = SocSpec.token(cpuidleDriver, 24), cpufreqDriver = SocSpec.token(cpufreqDriver, 32),
+        governors = SocSpec.line(governors, 120), transitionLatencyNs = transitionLatencyNs.coerceIn(0, 100_000_000),
+        packageId = packageId?.coerceIn(-1, 255), dtModel = SocSpec.line(dtModel, 96),
+        dtCompatible = dtCompatible.map { SocSpec.line(it, 64) }.filter { it.isNotEmpty() }.take(6),
+        packageIdPerCluster = packageIdPerCluster,
+    )
+
+    companion object {
+        fun fromJson(o: JSONObject?): ArmKernel? = o?.let {
+            ArmKernel(
+                cpuidleDriver = it.optString("cpuidleDriver", ""), cpufreqDriver = it.optString("cpufreqDriver", ""), governors = it.optString("governors", ""),
+                transitionLatencyNs = it.optInt("transitionLatencyNs", 0), packageId = if (it.has("packageId")) it.optInt("packageId") else null,
+                dtModel = it.optString("dtModel", ""),
+                dtCompatible = it.optJSONArray("dtCompatible")?.let { a -> (0 until a.length()).map { i -> a.optString(i, "") } }.orEmpty(),
+                packageIdPerCluster = it.optBoolean("packageIdPerCluster", false),
+            )
+        }
+    }
+}
+
+/**
+ * Added 2026-11-21. How the chip's reference kernel prints /proc/cpuinfo, where that differs from the generic layout. Checked against
+ * the kernel sources (arch/arm/kernel/setup.c, arch/arm64/kernel/cpuinfo.c) and real Samsung dumps (pytorch/cpuinfo test/mock: Nexus S,
+ * Galaxy J7 Prime, S7, S8, S9, A8 2018).
+ *  - ARM_K30: ARMv7 (or, for [SocSpec.arch] 6, ARMv6 "ARMv6-compatible processor rev N (v6l)" / "CPU architecture: 6TEJ") kernel 2.6.35 / 3.0: "Processor" header, "processor/BogoMIPS" per cpu (none on a single-core kernel), ONE shared
+ *    Features / CPU block with a trailing space after the last feature, then Hardware / Revision / Serial.
+ *  - A64_K310: Samsung arm64 3.10 (Exynos 7420, 7580): "Processor : AArch64 Processor rev N (aarch64)" header, all "processor" lines together, ONE shared
+ *    Features (with Samsung's extra 32-bit words and a trailing space) and CPU block of the boot cpu, then "Hardware"; no BogoMIPS; same output to a 32-bit task.
+ *  - A64_K310H (added 2026-11-25): the HiSilicon arm64 3.10 layout (Kirin 620 / 650 dumps, Huawei P8 Lite / P9 Lite). Identical to A64_K310 except that
+ *    the shared block says "CPU architecture: AArch64" where the Samsung kernel prints 8, and there is no BogoMIPS line.
+ *  - A64_K310M (added 2026-11-27): the MediaTek arm64 3.10 layout (Xperia C4 dump, MT6752): "Processor" header, a "processor" + "BogoMIPS" pair per cpu, ONE
+ *    shared Features / CPU block, "Hardware" last. No trailing space after Features in the 64-bit view; "CPU architecture: AArch64" there and 8 (plus the 32-bit
+ *    words "wp half thumb ... tlsi vfpv4 idiva idivt " with a trailing space) in the view of a 32-bit task. Put only the 64-bit words in [SocSpec.features].
+ *  - A64_K318M (added 2026-11-27): the MediaTek arm64 3.18 layout of the Alcatel Revvl dump (MT6750): "Processor" header once, then one block per cpu with
+ *    "model name: AArch64 Processor rev N (aarch64)" in BOTH views and the BogoMIPS line printed twice; "CPU architecture: 8"; "Hardware" last.
+ *  - A64_K318P (added 2026-11-27): the MT8167B layout of the Acer Iconia One 10 dump: every cpu block starts "processor", then "Processor" and "model name"
+ *    (AArch64 wording), a 32-bit task additionally sees a leading "model name: ARMv8 Processor rev N (v8l)"; "Hardware" last.
+ *  - A64_K318: Samsung arm64 3.18: per-cpu blocks without BogoMIPS and without "model name"; no Hardware line.
+ *  - A64_K44: arm64 4.4: per-cpu blocks with BogoMIPS; no "model name", no Hardware; no sysfs MIDR nodes.
+ *  - A64_K49: arm64 4.9 and newer: as K44, plus "model name" in the 32-bit view; sysfs MIDR / REVIDR nodes exist.
+ *  - ARM32 (added 2026-11-22): the generic layout (one full block per core; the "Processor" header only with [SocSpec.legacyKernel]) with the trailing
+ *    space a 32-bit kernel prints after the last Features word (Spreadtrum SC7731E). Ignored for 64-bit cores.
+ * ARM_K30 also covers the 2.6.3x - 3.4 SMP layout of Tegra 2 / 3 / 4 and Spreadtrum SC68xx (the "classic" layout of the earlier Tegra / Unisoc version).
+ */
+enum class CpuinfoStyle(val id: String, val cpuRegs: Boolean = false, val isolated: Boolean = false) {
+    GENERIC(""), ARM_K30("arm_k30"), ARM32("arm32"), A64_K310("a64_k310"), A64_K310H("a64_k310h"), A64_K318("a64_k318"),
+    A64_K310M("a64_k310m"), A64_K318M("a64_k318m"), A64_K318P("a64_k318p"),
+    A64_K44("a64_k44", isolated = true), A64_K49("a64_k49", cpuRegs = true, isolated = true);
+    /** True for the layouts [SocProfiles.cpuinfo] prints through its own routine (everything but GENERIC and ARM32). */
+    val styled: Boolean get() = this != GENERIC && this != ARM32
+    companion object {
+        fun of(id: String) = if (id == "classic") ARM_K30 else values().firstOrNull { it.id == id } ?: GENERIC
     }
 }
 
@@ -314,8 +423,12 @@ object SocProfiles {
     /** Features lines. A 64-bit kernel shows a 32-bit task the ARMv7 flags plus the crypto/crc ones the core has. */
     private const val V7 = "half thumb fastmult vfp edsp neon vfpv3 tls vfpv4 idiva idivt vfpd32 lpae evtstrm"
     private val COMPAT_EXTRA = listOf("aes", "pmull", "sha1", "sha2", "crc32")
+    /** The 32-bit view of a 64-bit kernel: V7 without "vfpd32" (only 32-bit kernels print it; no arm64 dump does) */
+    private const val COMPAT_BASE = "half thumb fastmult vfp edsp neon vfpv3 tls vfpv4 idiva idivt lpae evtstrm"
     private const val A64_BASE = "fp asimd evtstrm aes pmull sha1 sha2 crc32"
     private const val A64_LITE = "fp asimd evtstrm crc32"
+    /** The 32-bit words a MediaTek 3.10 arm64 kernel (A64_K310M) appends to Features for a 32-bit task (Xperia C4 dump) */
+    private const val MTK_K310_COMPAT = "wp half thumb fastmult vfp edsp neon vfpv3 tlsi vfpv4 idiva idivt"
     private const val A64_V82 = "$A64_BASE atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp"
     private const val A64_V9 = "$A64_V82 sha3 sm3 sm4 sha512 sve asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svei8mm svebf16 i8mm bf16 dgh bti"
     private const val A64_ORYON = "$A64_V82 jscvt fcma sha3 sm3 sm4 sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint i8mm bf16 dgh bti"
@@ -386,6 +499,8 @@ object SocProfiles {
      */
     fun cpuinfo(spec: SocSpec, guest32: Boolean): String {
         if (spec.isa == SocIsa.X86 && spec.x86 != null) return x86Cpuinfo(spec)
+        // (an ARMv6 core only exists on kernels of the ARM_K30 layout)
+        if ((spec.cpuinfoStyle.styled || spec.arch == 6) && spec.isa == SocIsa.ARM) return styledCpuinfo(spec, guest32)
         val v8 = spec.arch >= 8
         val aarch64 = v8 && !guest32
         val features = when {
@@ -393,7 +508,9 @@ object SocProfiles {
             aarch64 -> spec.features.ifBlank { A64_BASE }
             else -> compatFeatures(spec.features.ifBlank { A64_BASE })
         }
-        val bogo = spec.bogoMips.ifBlank { "38.40" }
+        val specBogo = spec.bogoMips.ifBlank { "38.40" }
+        // a 32-bit ARM kernel ends the Features line with a space ("... idiva idivt vfpd32 ")
+        val trail = if (!v8 && spec.cpuinfoStyle == CpuinfoStyle.ARM32) " " else ""
         return buildString {
             // kernels up to 4.9 print one summary line first ("Processor : AArch64 Processor rev 1 (aarch64)")
             if (spec.legacyKernel && (aarch64 || !v8))
@@ -403,25 +520,154 @@ object SocProfiles {
             for (c in spec.clusters) repeat(c.count) {
                 if (n >= MAX_CORES) return@repeat
                 append("processor\t: ").append(n++).append('\n')
+                // "none": the kernel prints no BogoMIPS line (NVIDIA's 3.18 arm64 kernel of the Pixel C); a cluster may carry its own value (Exynos 5422)
+                val bogo = c.bogoMips.ifBlank { specBogo }
+                val showBogo = !bogo.equals("none", true)
                 if (!aarch64) append("model name\t: ARMv").append(if (v8) "8" else "7").append(" Processor rev ").append(c.revision)
                     .append(if (v8) " (v8l)" else " (v7l)").append('\n')
-                append("BogoMIPS\t: ").append(bogo).append('\n')
-                append("Features\t: ").append(features).append('\n')
+                if (showBogo) append("BogoMIPS\t: ").append(bogo).append('\n')
+                append("Features\t: ").append(features).append(trail).append('\n')
                 append("CPU implementer\t: ").append(hex(c.implementer, 2)).append('\n')
                 append("CPU architecture: ").append(if (v8) 8 else 7).append('\n')
                 append("CPU variant\t: ").append(hex(c.variant)).append('\n')
                 append("CPU part\t: ").append(hex(c.part, 3)).append('\n')
                 append("CPU revision\t: ").append(c.revision).append("\n\n")
             }
-            append("Hardware\t: ").append(spec.hardware.ifBlank { spec.model.ifBlank { "unknown" } }).append('\n')
+            if (spec.hardwareLine) append("Hardware\t: ").append(spec.hardware.ifBlank { spec.model.ifBlank { "unknown" } }).append('\n')
+            for ((k, v) in spec.cpuinfoTail) append(k).append("\t: ").append(v).append('\n')
             // an ARMv7 kernel also prints Revision and Serial; an AArch64 kernel ends the file with the Hardware line
-            if (!v8) append("Revision\t: 0000\nSerial\t\t: ").append(serialHex(spec.serialNumber)).append('\n')
+            if (!v8) append("Revision\t: ").append(spec.hwRevision.ifBlank { "0000" }).append("\nSerial\t\t: ").append(serialHex(spec.serialNumber)).append('\n')
         }
     }
 
-    /** The Serial line of an ARMv7 /proc/cpuinfo: the 32-bit soc0 serial number as hex, 16 digits. */
+    /** /proc/cpuinfo in one of the kernel layouts of [CpuinfoStyle] (everything but GENERIC). */
+    private fun styledCpuinfo(spec: SocSpec, guest32: Boolean): String {
+        val style = if (spec.arch == 6) CpuinfoStyle.ARM_K30 else spec.cpuinfoStyle
+        if (style == CpuinfoStyle.ARM_K30) {
+            val v6 = spec.arch == 6
+            val c = spec.clusters.first()
+            val bogo = spec.bogoMips.ifBlank { "38.40" }
+            // "none": the kernel prints no BogoMIPS line
+            val showBogo = !bogo.equals("none", true)
+            return buildString {
+                if (v6) append("Processor\t: ARMv6-compatible processor rev ").append(c.revision).append(" (v6l)\n")
+                else append("Processor\t: ARMv7 Processor rev ").append(c.revision).append(" (v7l)\n")
+                // Changed for AEmulator Plus (2026-11-23): a single core also gets its "processor : 0" block. A real uniprocessor 2.6.3x
+                // kernel prints only a bare "BogoMIPS" line, but a program of today may count the processors by those lines and find
+                // none (CPU-Z crashed with a null object in its onActivityResult on the one-core SC6820 only; assumed cause, not
+                // confirmed); every SMP layout, and this one for two cores and up, has them.
+                for (n in 0 until spec.cores) {
+                    append("processor\t: ").append(n).append('\n')
+                    if (showBogo) append("BogoMIPS\t: ").append(bogo).append('\n')
+                    append('\n')
+                }
+                // the kernel prints every feature followed by a space
+                append("Features\t: ").append(spec.features.ifBlank { V7 }).append(" \n")
+                append("CPU implementer\t: ").append(hex(c.implementer, 2)).append('\n')
+                append("CPU architecture: ").append(if (v6) "6TEJ" else "7").append('\n')
+                append("CPU variant\t: ").append(hex(c.variant)).append('\n')
+                append("CPU part\t: ").append(hex(c.part, 3)).append('\n')
+                append("CPU revision\t: ").append(c.revision).append("\n\n")
+                if (spec.hardwareLine) append("Hardware\t: ").append(spec.hardware.ifBlank { spec.model.ifBlank { "unknown" } }).append('\n')
+                for ((k, v) in spec.cpuinfoTail) append(k).append("\t: ").append(v).append('\n')
+                append("Revision\t: ").append(spec.hwRevision.ifBlank { "0000" }).append('\n')
+                append("Serial\t\t: ").append(serialHex(spec.serialNumber)).append('\n')
+            }
+        }
+        if (style == CpuinfoStyle.A64_K310M) {
+            val c = spec.clusters.first()
+            val bogo = spec.bogoMips.ifBlank { "26.00" }
+            val f = spec.features.ifBlank { A64_LITE }
+            return buildString {
+                append("Processor\t: AArch64 Processor rev ").append(c.revision).append(" (aarch64)\n")
+                for (n in 0 until spec.cores) {
+                    append("processor\t: ").append(n).append('\n')
+                    if (!bogo.equals("none", true)) append("BogoMIPS\t: ").append(bogo).append('\n')
+                }
+                append("Features\t: ").append(if (guest32) "$f $MTK_K310_COMPAT " else f).append('\n')
+                append("CPU implementer\t: ").append(hex(c.implementer, 2)).append('\n')
+                append(if (guest32) "CPU architecture: 8\n" else "CPU architecture: AArch64\n")
+                append("CPU variant\t: ").append(hex(c.variant)).append('\n')
+                append("CPU part\t: ").append(hex(c.part, 3)).append('\n')
+                append("CPU revision\t: ").append(c.revision).append("\n\n")
+                if (spec.hardwareLine) append("Hardware\t: ").append(spec.hardware.ifBlank { spec.model.ifBlank { "unknown" } }).append('\n')
+                for ((k, v) in spec.cpuinfoTail) append(k).append("\t: ").append(v).append('\n')
+            }
+        }
+        if (style == CpuinfoStyle.A64_K318M || style == CpuinfoStyle.A64_K318P) {
+            val bogo = spec.bogoMips.ifBlank { "26.00" }
+            val f = spec.features.ifBlank { A64_BASE }
+            val features = if (guest32) compatFeatures(f) else f
+            val perCpuHeader = style == CpuinfoStyle.A64_K318P
+            return buildString {
+                if (!perCpuHeader) append("Processor\t: AArch64 Processor rev ").append(spec.clusters.first().revision).append(" (aarch64)\n")
+                var n = 0
+                for (c in spec.clusters) repeat(c.count) {
+                    if (n >= MAX_CORES) return@repeat
+                    append("processor\t: ").append(n++).append('\n')
+                    if (perCpuHeader) {
+                        if (guest32) append("model name\t: ARMv8 Processor rev ").append(c.revision).append(" (v8l)\n")
+                        append("Processor\t: AArch64 Processor rev ").append(c.revision).append(" (aarch64)\n")
+                    }
+                    append("model name\t: AArch64 Processor rev ").append(c.revision).append(" (aarch64)\n")
+                    if (!bogo.equals("none", true)) {
+                        append("BogoMIPS\t: ").append(bogo).append('\n')
+                        // the Alcatel Revvl's 3.18 kernel prints the line twice; the Iconia One 10's once
+                        if (!perCpuHeader) append("BogoMIPS\t: ").append(bogo).append('\n')
+                    }
+                    append("Features\t: ").append(features).append('\n')
+                    append("CPU implementer\t: ").append(hex(c.implementer, 2)).append('\n')
+                    append("CPU architecture: 8\n")
+                    append("CPU variant\t: ").append(hex(c.variant)).append('\n')
+                    append("CPU part\t: ").append(hex(c.part, 3)).append('\n')
+                    append("CPU revision\t: ").append(c.revision).append("\n\n")
+                }
+                if (spec.hardwareLine) append("Hardware\t: ").append(spec.hardware.ifBlank { spec.model.ifBlank { "unknown" } }).append('\n')
+                for ((k, v) in spec.cpuinfoTail) append(k).append("\t: ").append(v).append('\n')
+            }
+        }
+        if (style == CpuinfoStyle.A64_K310 || style == CpuinfoStyle.A64_K310H) {
+            val c = spec.clusters.first()
+            return buildString {
+                append("Processor\t: AArch64 Processor rev ").append(c.revision).append(" (aarch64)\n")
+                for (n in 0 until spec.cores) append("processor\t: ").append(n).append('\n')
+                append("Features\t: ").append(spec.features.ifBlank { A64_BASE }).append(" \n")
+                append("CPU implementer\t: ").append(hex(c.implementer, 2)).append('\n')
+                append(if (style == CpuinfoStyle.A64_K310H) "CPU architecture: AArch64\n" else "CPU architecture: 8\n")
+                append("CPU variant\t: ").append(hex(c.variant)).append('\n')
+                append("CPU part\t: ").append(hex(c.part, 3)).append('\n')
+                append("CPU revision\t: ").append(c.revision).append("\n\n")
+                if (spec.hardwareLine) append("Hardware\t: ").append(spec.hardware.ifBlank { spec.model.ifBlank { "unknown" } }).append('\n')
+                for ((k, v) in spec.cpuinfoTail) append(k).append("\t: ").append(v).append('\n')
+            }
+        }
+        // arm64 kernels: one block per cpu, no Hardware line, no "Processor" header
+        val aarch64 = !guest32
+        val base = spec.features.ifBlank { A64_BASE }
+        val features = if (aarch64) base else compatFeatures(base)
+        val bogo = spec.bogoMips.ifBlank { "52.00" }
+        return buildString {
+            var n = 0
+            for (c in spec.clusters) repeat(c.count) {
+                if (n >= MAX_CORES) return@repeat
+                append("processor\t: ").append(n++).append('\n')
+                if (!aarch64 && style == CpuinfoStyle.A64_K49) append("model name\t: ARMv8 Processor rev ").append(c.revision).append(" (v8l)\n")
+                if (style != CpuinfoStyle.A64_K318) append("BogoMIPS\t: ").append(bogo).append('\n')
+                append("Features\t: ").append(features).append('\n')
+                append("CPU implementer\t: ").append(hex(c.implementer, 2)).append('\n')
+                append("CPU architecture: 8\n")
+                append("CPU variant\t: ").append(hex(c.variant)).append('\n')
+                append("CPU part\t: ").append(hex(c.part, 3)).append('\n')
+                append("CPU revision\t: ").append(c.revision).append("\n\n")
+            }
+            for ((k, v) in spec.cpuinfoTail) append(k).append("\t: ").append(v).append('\n')
+        }
+    }
+
+    /** The Serial line of an ARMv7 /proc/cpuinfo: a 16-digit hex id as it is, else the 32-bit soc0 serial number as hex, 16 digits. */
     private fun serialHex(serial: String): String =
-        serial.toLongOrNull()?.let { String.format("%08x", it and 0xffffffffL) + "00000000" } ?: "0000000000000000"
+        if (serial.length == 16 && serial.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) serial.lowercase()   // Tegra / Spreadtrum print a 64-bit id
+        else serial.toLongOrNull()?.let { String.format("%08x", it and 0xffffffffL) + "00000000" } ?: "0000000000000000"
 
     /**
      * /proc/cpuinfo of an x86 chip, in the layout of a Linux x86 kernel: one block per logical cpu, no Hardware line. Line order is
@@ -475,7 +721,7 @@ object SocProfiles {
     /** What an AArch32 task sees of an AArch64 core's feature list. */
     fun compatFeatures(a64: String): String {
         val have = a64.split(' ').filter { it.isNotEmpty() }.toSet()
-        return (V7.split(' ') + COMPAT_EXTRA.filter { it in have }).joinToString(" ")
+        return (COMPAT_BASE.split(' ') + COMPAT_EXTRA.filter { it in have }).joinToString(" ")
     }
 
     /**
@@ -523,8 +769,26 @@ object SocProfiles {
      * /sys/devices/soc0/. Every Qualcomm chip gets the node set a Qualcomm kernel registers (checked against the soc0 directory of
      * real Snapdragon 835 / 845 phones); the values that tell one board from another are neutral reference-board ones.
      */
+    private val NO_SOC0 = setOf("HiSilicon", "Texas Instruments", "JLQ", "Xiaomi", "Google", "Marvell")
+    /** Vendors whose real dumps (Mate 20, Pandaboard) carry no ro.hardware.chipname */
+    private val NO_CHIPNAME = setOf("Samsung", "HiSilicon", "Texas Instruments", "JLQ", "Xiaomi", "Google", "Marvell")
+
     fun soc0Files(spec: SocSpec): Map<String, String> {
         if (spec.isa == SocIsa.X86) return emptyMap()
+        // Tegra (kernels from 3.10: tegra_soc_device_register): family "Tegra", the revision name ("A02"), soc_id = the chip id in decimal;
+        // no machine, no serial_number. Tegra 2 / 3 / 4 kernels (2.6.36 - 3.4) register no soc device: those rows leave family blank.
+        if (spec.manufacturer == "NVIDIA")
+            return linkedMapOf("family" to spec.family, "soc_id" to spec.socId, "revision" to spec.revision).apply { putAll(spec.soc0Extra) }.filterValues { it.isNotBlank() }
+        // Added 2026-11-23: HiSilicon (Kirin 980 EMUI 9 dump), TI OMAP (2.6.35 / 3.0), JLQ and XRING: no soc0 source found, so none is reported
+        if (spec.manufacturer in NO_SOC0) return spec.soc0Extra.filterValues { it.isNotBlank() }
+        // Spreadtrum / Unisoc kernels register no soc device either (no soc0 in the dumps and device trees checked)
+        if (spec.manufacturer == "UNISOC") return spec.soc0Extra.filterValues { it.isNotBlank() }
+        // Samsung kernels (4.4+ show family "Samsung Exynos", machine, soc_id "EXYNOS8895", revision; never a serial_number). Only what a row sets is reported.
+        if (spec.manufacturer == "Samsung") {
+            val s = linkedMapOf("family" to spec.family, "machine" to spec.machine, "soc_id" to spec.socId, "revision" to spec.revision)
+            s.putAll(spec.soc0Extra)
+            return s.filterValues { it.isNotBlank() }
+        }
         val m = linkedMapOf(
             "family" to spec.family, "machine" to spec.machine.ifBlank { spec.model }, "soc_id" to spec.socId,
             "revision" to spec.revision, "serial_number" to spec.serialNumber,
@@ -578,7 +842,8 @@ object SocProfiles {
      */
     fun props(spec: SocSpec, api: Int): Map<String, String> = linkedMapOf<String, String>().apply {
         if (spec.platform.isNotBlank()) put("ro.board.platform", spec.platform)
-        if (spec.model.isNotBlank()) put("ro.hardware.chipname", spec.model)
+        // (no Samsung dump has ro.hardware.chipname: Exynos phones use ro.chipname / ro.arch, set by the row)
+        if (spec.model.isNotBlank() && spec.manufacturer !in NO_CHIPNAME) put("ro.hardware.chipname", spec.model)
         if (api >= 31) {
             if (spec.manufacturer.isNotBlank()) put("ro.soc.manufacturer", spec.manufacturer)
             if (spec.model.isNotBlank()) put("ro.soc.model", spec.model)
@@ -593,16 +858,22 @@ object SocProfiles {
                 }
                 put("ro.opengles.version", glesVersion(spec).toString())
             }
+            // Tegra: the board name is both the "Hardware" line and ro.hardware (grouper, tegratab ...); the platform comes from the row
+            "NVIDIA" -> if (spec.hardware.isNotBlank() && ' ' !in spec.hardware) { put("ro.hardware", spec.hardware); put("ro.boot.hardware", spec.hardware) }
             "MediaTek" -> {
                 val chip = spec.model.uppercase()
                 val low = spec.platform.ifBlank { chip.lowercase() }
-                put("ro.hardware", low); put("ro.boot.hardware", low)
-                put("ro.mediatek.platform", chip); put("ro.mediatek.chip_ver", "S01"); put("ro.mediatek.version.sdk", "4")
-                put("mediatek.wlan.chip", "CONSYS_$chip"); put("mediatek.wlan.module.postfix", "_consys_" + chip.lowercase())
-                if (api >= 26) put("ro.vendor.mediatek.platform", chip)
-                put("ro.hardware.egl", "mali")
+                // a row's own value wins (MT6750 reports MT6755, MT8167B MT8167, MT6595's WLAN chip is a bare MT6630: real dumps)
+                fun mtk(k: String, v: String) { if (k !in spec.extraProps) put(k, v) }
+                val plat = spec.extraProps["ro.mediatek.platform"] ?: chip
+                mtk("ro.hardware", low); mtk("ro.boot.hardware", low)
+                mtk("ro.mediatek.platform", chip); mtk("ro.mediatek.chip_ver", "S01"); mtk("ro.mediatek.version.sdk", "4")
+                mtk("mediatek.wlan.chip", "CONSYS_$plat"); mtk("mediatek.wlan.module.postfix", "_consys_" + plat.lowercase())
+                if (api >= 26) put("ro.vendor.mediatek.platform", plat)
+                // only Mali parts: the PowerVR dumps (Vibe X2, Iconia One 10) carry no ro.hardware.egl
+                if (spec.gpuRenderer.startsWith("Mali")) mtk("ro.hardware.egl", "mali")
                 if (spec.gpuRenderer.startsWith("Mali-G")) put("ro.hardware.vulkan", "mali")
-                put("ro.opengles.version", glesVersion(spec).toString())
+                mtk("ro.opengles.version", glesVersion(spec).toString())
             }
         }
         for ((k, v) in spec.extraProps) if (api >= 26 || !k.startsWith("ro.vendor.")) if (k !in this) put(k, v)
@@ -614,8 +885,9 @@ object SocProfiles {
     private val HWCAP64 = listOf(
         "fp", "asimd", "evtstrm", "aes", "pmull", "sha1", "sha2", "crc32", "atomics", "fphp", "asimdhp", "cpuid", "asimdrdm", "jscvt", "fcma",
         "lrcpc", "dcpop", "sha3", "sm3", "sm4", "asimddp", "sha512", "sve", "asimdfhm", "dit", "uscat", "ilrcpc", "flagm", "ssbs", "sb", "paca",
-        "pacg", "dcpodp", "sve2", "sveaes", "svepmull", "svebitperm", "svesha3", "svesm4", "flagm2", "frint", "svei8mm", "svebf16", "i8mm",
-        "bf16", "dgh", "rng", "bti", "mte",
+        "pacg", "dcpodp", "sve2", "sveaes", "svepmull", "svebitperm", "svesha3", "svesm4", "flagm2", "frint", "svei8mm", "svef32mm", "svef64mm",
+        "svebf16", "i8mm", "bf16", "dgh", "rng", "bti", "mte", "ecv", "afp", "rpres", "mte3", "sme", "smei16i64", "smef64f64", "smei8i32",
+        "smef16f32", "smeb16f32", "smef32f32", "smefa64", "wfxt",
     )
 
     /** The kgsl clock steps of a GPU whose top clock is [maxMhz] (the shape of the Adreno 630's seven steps: 710 .. 257 MHz). */
@@ -636,17 +908,47 @@ object SocProfiles {
         out["$cpu/kernel_max"] = "${n - 1}\n"
         for (f in listOf("possible", "present", "online")) out["$cpu/$f"] = (if (n > 1) "0-${n - 1}" else "0") + "\n"
         out["$cpu/offline"] = "\n"
+        if (spec.cpuinfoStyle.isolated) out["$cpu/isolated"] = "\n"
         if (spec.arch >= 8) {
             var i = 0
+            val regs = !spec.cpuinfoStyle.styled || spec.cpuinfoStyle.cpuRegs
             for (c in spec.clusters) repeat(c.count) {
                 if (i >= MAX_CORES) return@repeat
+                if (!regs) { i++; return@repeat }
                 val midr = (c.implementer.toLong() shl 24) or (c.variant.toLong() shl 20) or (0xfL shl 16) or (c.part.toLong() shl 4) or c.revision.toLong()
                 out["$cpu/cpu$i/regs/identification/midr_el1"] = "0x" + midr.toString(16).padStart(16, '0') + "\n"
+                if (spec.cpuinfoStyle.styled) out["$cpu/cpu$i/regs/identification/revidr_el1"] = "0x0000000000000000\n"
                 i++
             }
             val have = spec.features.ifBlank { A64_BASE }.split(' ').filter { it.isNotEmpty() }.toSet()
             out["$cpu/modalias"] = "cpu:type:aarch64:feature:" +
                 HWCAP64.withIndex().filter { it.value in have }.joinToString("") { ",%04X".format(it.index) } + "\n"
+        }
+        spec.kernel?.let { k ->
+            if (k.cpuidleDriver.isNotBlank()) out["$cpu/cpuidle/current_driver"] = k.cpuidleDriver + "\n"
+            // cluster of every cpu: start cpu and size
+            val starts = ArrayList<Pair<Int, Int>>().also { l -> var f = 0; for (c in spec.clusters) { l += f to c.count; f += c.count } }
+            for (i in 0 until n) {
+                if (k.packageIdPerCluster) {
+                    val ci = starts.indexOfLast { it.first <= i }
+                    val (from, cnt) = starts[ci]
+                    val t = "$cpu/cpu$i/topology"
+                    out["$t/physical_package_id"] = "$ci\n"; out["$t/core_id"] = "${i - from}\n"
+                    out["$t/core_siblings"] = cpuMask(from, cnt).padStart(2, '0') + "\n"
+                    out["$t/core_siblings_list"] = (if (cnt > 1) "$from-${from + cnt - 1}" else "$from") + "\n"
+                    out["$t/thread_siblings"] = java.lang.Long.toHexString(1L shl i).padStart(2, '0') + "\n"; out["$t/thread_siblings_list"] = "$i\n"
+                } else k.packageId?.let { out["$cpu/cpu$i/topology/physical_package_id"] = "$it\n" }
+                if (k.cpufreqDriver.isNotBlank()) {
+                    val f = "$cpu/cpu$i/cpufreq"
+                    out["$f/scaling_driver"] = k.cpufreqDriver + "\n"
+                    if (k.governors.isNotBlank()) out["$f/scaling_available_governors"] = k.governors + " \n"
+                    if (k.transitionLatencyNs > 0) out["$f/cpuinfo_transition_latency"] = "${k.transitionLatencyNs}\n"
+                }
+            }
+            if (k.dtModel.isNotBlank()) {
+                out["/proc/device-tree/model"] = k.dtModel + "\u0000"
+                if (k.dtCompatible.isNotEmpty()) out["/proc/device-tree/compatible"] = k.dtCompatible.joinToString("") { it + "\u0000" }
+            }
         }
         when (spec.manufacturer) {
             "QTI" -> {

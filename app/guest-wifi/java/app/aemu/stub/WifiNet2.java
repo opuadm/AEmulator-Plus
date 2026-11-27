@@ -14,8 +14,21 @@ import android.os.Looper;
  * does it for the Ethernet placeholder.
  */
 final class WifiNet2 extends NetworkAgent implements WifiLink {
+    private final NetworkCapabilities caps;
+
     private WifiNet2(Context c, Looper l, NetworkCapabilities nc, LinkProperties lp, NetworkAgentConfig cfg, WifiNet.Identity id) {
         super(c, l, id == WifiNet.Identity.WIFI ? "AEmuWifi" : "AEmuNet", nc, lp, 60, cfg, null);
+        caps = nc;
+    }
+
+    @Override
+    public void setBandwidth(int kbps) {
+        WifiNet.pushBandwidth(this, caps, kbps);
+    }
+
+    @Override
+    public android.net.Network network() {
+        return WifiNet.networkOf(this);
     }
 
     @Override

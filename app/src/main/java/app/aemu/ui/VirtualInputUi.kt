@@ -13,6 +13,7 @@ import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.RadioButtonChecked
+import androidx.compose.material.icons.rounded.SportsEsports
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -47,29 +48,32 @@ import app.aemu.core.Keypad
 import app.aemu.core.PadKey
 import app.aemu.core.VKey
 import app.aemu.core.VirtualKeyboardLayout
+import app.aemu.core.XperiaPlayPad
 import app.aemu.core.VmTheme
 import kotlin.math.roundToInt
 
 /** A key of the navigation bar that opens one of the floating input windows; lit while its window is open. */
 @Composable
-internal fun ExtraNavButton(icon: ImageVector, label: String, active: Boolean, theme: VmTheme, iconRotation: Float, onClick: () -> Unit) {
+internal fun ExtraNavButton(icon: ImageVector, label: String, active: Boolean, theme: VmTheme, iconRotation: Float, compact: Float = 1f, onClick: () -> Unit) {
     val press = Color(theme.pressColor)
     val ink = theme.iconColor?.let { Color(it) } ?: LocalContentColor.current
     val click by rememberUpdatedState(onClick)
     Box(
-        Modifier.size(48.dp * theme.iconScale)
+        Modifier.size(48.dp * theme.iconScale * compact)
             .background(if (active) press else Color.Transparent, RoundedCornerShape(8.dp))
             .semantics { contentDescription = label; role = Role.Button }
             .pointerInput(Unit) { detectTapGestures(onTap = { click() }) },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, null, Modifier.size(24.dp * theme.iconScale).rotate(iconRotation), tint = ink)
+        Icon(icon, null, Modifier.size(24.dp * theme.iconScale * compact).rotate(iconRotation), tint = ink)
     }
 }
 
 internal val KeyboardIcon: ImageVector get() = Icons.Rounded.Keyboard
 internal val KeypadIcon: ImageVector get() = Icons.Rounded.Dialpad
 internal val SPenIcon: ImageVector get() = Icons.Rounded.Edit
+/** the Xperia Play slider: slides the gamepad out (and back in) */
+internal val XperiaPlayIcon: ImageVector get() = Icons.Rounded.SportsEsports
 /** the S-Pen's side (action) button: a tap presses and releases it while the pen hovers, which opens Air Command */
 internal val SPenButtonIcon: ImageVector get() = Icons.Rounded.RadioButtonChecked
 
@@ -243,5 +247,43 @@ internal fun KeypadWindow(send: (Int, Boolean) -> Unit, homeCode: Int, onClose: 
         PadRow { Spacer(Modifier.weight(1f)); Cap(Keypad.down); Spacer(Modifier.weight(1f)) }
         PadRow { Cap(Keypad.call); Cap(home); Cap(Keypad.end) }
         Keypad.digits.chunked(3).forEach { r -> PadRow { r.forEach { Cap(it) } } }
+    }
+}
+
+/**
+ * The Xperia Play's slid-out gamepad ([XperiaPlayPad]): shoulders on top, the D-pad on the left, Select/Start/Menu/Play in
+ * the middle, the four face buttons on the right. Its keys are real key events of the guest's key device; touch stays on.
+ * Closing the window slides the keypad back in ([onClose] shuts the slider).
+ */
+@Composable
+internal fun XperiaPlayWindow(send: (Int, Boolean) -> Unit, onClose: () -> Unit) {
+    val held = remember { mutableSetOf<Int>() }
+    DisposableEffect(Unit) { onDispose { held.toList().forEach { send(it, false) }; held.clear() } }
+    fun down(k: PadKey) { if (held.add(k.code)) send(k.code, true) }
+    fun up(k: PadKey) { if (held.remove(k.code)) send(k.code, false) }
+    @Composable fun RowScope.Cap(k: PadKey, weight: Float = 1f) =
+        KeyCap(k.label, k.sub, Modifier.weight(weight).padding(2.dp).fillMaxHeight(), onDown = { down(k) }, onUp = { up(k) }, fontSize = if (k.label.length > 2) 11 else 16)
+    @Composable fun RowScope.Gap(weight: Float = 1f) = Spacer(Modifier.weight(weight))
+    @Composable fun ColumnScope.PadRow(weight: Float = 1f, content: @Composable RowScope.() -> Unit) = Row(Modifier.fillMaxWidth().weight(weight), content = content)
+    FloatingWindow(stringResource(R.string.vi_xperia_play_title), 440.dp, 250.dp, 0.5f, 0.55f, onClose) {
+        PadRow(0.8f) { Cap(XperiaPlayPad.l, 2f); Gap(3f); Cap(XperiaPlayPad.r, 2f) }
+        Row(Modifier.fillMaxWidth().weight(3f)) {
+            Column(Modifier.weight(3f).fillMaxHeight()) {
+                PadRow { Gap(); Cap(XperiaPlayPad.up); Gap() }
+                PadRow { Cap(XperiaPlayPad.left); Gap(); Cap(XperiaPlayPad.right) }
+                PadRow { Gap(); Cap(XperiaPlayPad.down); Gap() }
+            }
+            Column(Modifier.weight(2f).fillMaxHeight()) {
+                PadRow { Cap(XperiaPlayPad.select) }
+                PadRow { Cap(XperiaPlayPad.start) }
+                PadRow { Cap(XperiaPlayPad.menu) }
+                PadRow { Cap(XperiaPlayPad.play) }
+            }
+            Column(Modifier.weight(3f).fillMaxHeight()) {
+                PadRow { Gap(); Cap(XperiaPlayPad.triangle); Gap() }
+                PadRow { Cap(XperiaPlayPad.square); Gap(); Cap(XperiaPlayPad.circle) }
+                PadRow { Gap(); Cap(XperiaPlayPad.cross); Gap() }
+            }
+        }
     }
 }

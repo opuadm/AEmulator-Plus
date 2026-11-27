@@ -174,3 +174,38 @@ Emulated `sec_e-pen` digitizer (VM settings, opt-in) and a navigation-bar toggle
 `core/VirtualInput.kt` (`SPenProtocol`), `core/InputService.kt`, `core/GuestVm.kt`, `core/GuestRunner.kt`, `ui/GuestScreen.kt`,
 `ui/VmActivity.kt`, `ui/NavigationSettings.kt`. Guest side: `native/guestshim/vinput.h` (ARM and x86-32 shims) and every
 `native/guest64/*/run64.c`.
+
+## 2026-11-24: YAFFS2 page-only dumps
+
+`importer/Yaffs2Reader.kt` reads spare-less (no OOB) NAND dumps through the YAFFS2 checkpoint (marker search, object records,
+tnode chunk maps, chunk size / start chunk detection); tests in `Yaffs2ReaderTest.kt`, notes in `docs/yaffs2-import.md`.
+
+## 2026-11-25: Xperia Play slider and gamepad input method
+
+Opt-in setting shown only for an R800 machine, a navigation-bar button that slides the keypad out and in, and a floating gamepad.
+Host side: `core/VirtualInput.kt` (`XperiaPlayPad`, `SliderProtocol`, policy), `core/InputService.kt`, `core/GuestVm.kt`,
+`core/GuestImage.kt`, `core/TreeFixer.kt`, `ui/VirtualInputUi.kt`, `ui/VmActivity.kt`, `ui/NavigationSettings.kt`,
+`ui/SettingsSheet.kt`, strings in `res/values/sunset_controls.xml`. Guest side: `native/guestshim/vinput.h` (switch device
+`AEmulator Slider`); `libaemushim.so` of `common` and `common-x86` were rebuilt with `build-zig.sh` / `build-x86.sh` (the same
+sources without this change rebuild bit-identical to the previous binaries). The native arm64 runners are not changed and the
+feature is off there. The Kotlin app code was not compiled with Gradle and nothing was run on a device or in qemu (only
+`VirtualInput.kt` and `XperiaPlayTest.kt` were compiled with a stand-alone kotlinc, and `tests/vinput-slider-ioctl.c` run on
+the host); the strings exist in English only.
+
+
+## 2026-11-25: Open GL bridge for the 32-bit engines
+
+ARM firmware of every released Android (1.0 - 7.x, not pre-1.0 builds) on the KK and GB engines draws through the open GPU bridge
+(`native/glbridge`, served by `GlHost`) instead of the closed `glserverd` / `libGLES.so` / `libGLES_dhd.so` pair; x86 firmware on the KK
+engine already did and now shares the same `egl.cfg` rule. A file `glclosed` in the image's directory puts one machine back on the closed
+driver. Host side: `core/OpenGl.kt` (new), `core/TreeFixer.kt` (`eglConfig`), `core/GuestVm.kt` (`openBridge`, no `glserverd` for these
+machines and none for the 32-bit programs of a kernel whose `gpuBridge32Open` is set). Guest side: `native/glbridge/guest.c` now reads the
+window's call table by `common.version` (2.0 - 4.1: `dequeueBuffer` / `lockBuffer` / `queueBuffer` slots, no fences, as AOSP's libagl; before,
+the 4.2+ slots were called and are empty there), and handles the `egl_native_window_t` of 1.0 - 1.6 (`bridge_swap_egl`; the driver is installed
+as `libagl.so`, the original kept as `libagl.so.aemu-sw`); `poll` and `prctl` are weak imports. Analysis of the AOSP sources it is based on,
+and the list of what is not verified, in `docs/open-gl-bridge.md`; test `OpenGlTest.kt`.
+
+The two drivers are **not part of this change**: `engines/kk/libGLES_aemu.so` (armv7) and `engines/common-x86_64/system#lib#egl#libGLES_aemu.so`
+(i386, the x86-kk one) have to be rebuilt from the new `guest.c` with `native/glbridge/build32-zig.sh` and `build-x86-zig.sh i386`; the
+binaries in the shipped asset directory are the previous ones until then. The Kotlin app code was not compiled with Gradle and nothing was
+run on a device or in qemu (only the two drivers were built, not loaded in a guest); 1.0 / 1.1 / 1.5 are taken from the 1.6 sources.

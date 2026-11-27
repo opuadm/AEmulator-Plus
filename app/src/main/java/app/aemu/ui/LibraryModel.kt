@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import app.aemu.core.GuestImage
 import app.aemu.core.ImageStore
 import app.aemu.core.VmSettings
+import app.aemu.core.WifiEmu
 import app.aemu.importer.Importer
 import app.aemu.importer.PartitionChooser
 import app.aemu.importer.PartitionPrompt
@@ -125,7 +126,16 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
         val answer = java.util.concurrent.CompletableFuture<Int>()
         pendingChoice = answer
         _import.value = _import.value.copy(choice = prompt)
-        return try { answer.get() } catch (_: InterruptedException) { PartitionChooser.CANCEL } finally {
+        // polled, not a bare get(): if the import was cancelled (or the screen that shows the question is gone) nothing would ever
+        // complete the future, and the import thread would wait for ever with the import still marked active
+        return try {
+            var r: Int? = null
+            while (r == null) {
+                r = try { answer.get(250, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: java.util.concurrent.TimeoutException) { null }
+                if (r == null && importer?.cancelled == true) r = PartitionChooser.CANCEL
+            }
+            r!!
+        } catch (_: InterruptedException) { PartitionChooser.CANCEL } finally {
             pendingChoice = null
             _import.value = _import.value.copy(choice = null)
         }
@@ -157,8 +167,25 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
     fun rename(img: GuestImage, name: String) = update(img) { it.copy(name = name) }
 
     /** [name] is the new machine name from the settings sheet; null or blank keeps the current one. */
-    fun updateSettings(img: GuestImage, s: VmSettings, name: String? = null) =
-        update(img) { it.copy(settings = s, name = name?.trim()?.takeIf { n -> n.isNotEmpty() } ?: it.name) }
+    fun updateSettings(img: GuestImage, s: VmSettings, name: String? = null) {
+        pushWifi(img, s)
+        updateImage(img, s, name)
+    }
+
+    /** A guest that booted with the emulated Wi-Fi picks the rewritten file up within a second (see guest-wifi WifiStub). */
+    private fun pushWifi(img: GuestImage, s: VmSettings) {
+        if (!s.wifi) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val root = app.aemu.core.VmPaths(getApplication(), img.id).root
+                if (java.io.File(root, WifiEmu.FILE).isFile) WifiEmu.write(root, s, true)
+            }
+        }
+    }
+
+    // adbNet is the ADB dialog's choice, not the settings sheet's: a sheet opened before it changed must not undo it
+    private fun updateImage(img: GuestImage, s: VmSettings, name: String?) =
+        update(img) { it.copy(settings = s.copy(adbNet = it.settings.adbNet), name = name?.trim()?.takeIf { n -> n.isNotEmpty() } ?: it.name) }
 
     private fun update(img: GuestImage, f: (GuestImage) -> GuestImage) {
         viewModelScope.launch(Dispatchers.IO) {

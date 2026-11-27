@@ -38,6 +38,10 @@ class GuestRunner(
      * see LegacyFirmware.runtimeVm). The runtime reads ANDROIDVM before it asks the property service.
      */
     private val jamVm: Boolean by lazy { LegacyFirmware.usesJamVm(paths.root) }
+    // Added for AEmulator Plus (2026-11-26): HTC's Gingerbread libui reads its buffer count from the gralloc's fb0 device (see GrallocProbe.libuiTakesFbCount)
+    private val fbCountFromGralloc: Boolean by lazy {
+        arch == GuestArch.ARM && runCatching { GrallocProbe.libuiTakesFbCount(File(paths.root, "system/lib/libui.so").readBytes()) }.getOrDefault(false)
+    }
 
     val engine: Engine get() = img.engine
     /** instruction set of the guest's programs: picks the translator, the preload set and whether DHD_NO_SMC may be sent */
@@ -269,6 +273,8 @@ class GuestRunner(
         e["AEMU_RAM_KB"] = (guestRamMb(img.api, s.ramMb) * 1024L).toString()
         // Added for AEmulator Plus (2026-11-19): size of the disk the guest reports; libaemushim takes the free space from the phone
         if (s.storageGb > 0) e["AEMU_STORAGE_BYTES"] = StorageSpoof.bytes(s.storageGb).toString()
+        // Added for AEmulator Plus (2026-11-26): the fb0 buffer count libui expects from the gralloc (libaemushim's hw_get_module sets it when the gralloc left it 0)
+        if (fbCountFromGralloc) e["AEMU_FB_BUFFERS"] = GrallocProbe.FB_BUFFERS.toString()
         // Added for AEmulator Plus (2026-11-19): libaemushim answers /proc/cpuinfo from the cpuinfo of the chip the VM reports,
         // which TreeFixer.cpuinfoAlias put in the tree (only for a chosen chip: the host's own keeps the real file)
         if (File(paths.root, "data/.cpuinf").isFile) e["AEMU_CPUINFO"] = "/data/.cpuinf"

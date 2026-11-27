@@ -19,12 +19,16 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -75,6 +79,13 @@ import app.aemu.core.SocIsa
 import app.aemu.core.X86Cpu
 import kotlin.math.roundToInt
 import app.aemu.core.VmSettings
+import app.aemu.core.VmThemes
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Palette
+import app.aemu.core.WifiNetworkDef
+import app.aemu.core.WifiBand
+import app.aemu.core.WifiSecurity
+import app.aemu.core.WifiStandard
 import app.aemu.core.WifiEmu
 import app.aemu.core.VmStorageLease
 import app.aemu.core.VmDataReset
@@ -88,7 +99,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private val RESOLUTIONS = ResolutionPreset.entries
+// "The skin's resolution" first, then the fixed sizes and Host (see ResolutionPreset)
+private val RESOLUTIONS = listOf(ResolutionPreset.SKIN) + ResolutionPreset.entries
 
 // Modified for AEmulator Plus (2026-11-04): automatic, the presets, host / max, then "custom" (a box for an MB amount).
 // RAM_CUSTOM only marks the last slider position; it is never stored.
@@ -120,10 +132,20 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
     var resetMessage by remember { mutableStateOf<String?>(null) }
     val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = { if (!resetting) onDismiss() }, sheetState = state) {
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).navigationBarsPadding()) {
-            Text(stringResource(R.string.settings), style = MaterialTheme.typography.headlineSmall)
-            Text(img.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(16.dp))
+        Column(Modifier.navigationBarsPadding()) {
+            // fixed header: title on the left, Save on the right, so it never scrolls away
+            // fields that are not shown cannot hold Save back
+            val wifiOk = !(s.wifi && wifiOffered) || (WifiEmu.cleanSsid(s.wifiSsid).isNotEmpty() && WifiEmu.mainValid(s) && WifiEmu.extrasValid(s))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(stringResource(R.string.settings), style = MaterialTheme.typography.headlineSmall)
+                    Text(img.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.width(12.dp))
+                Button(enabled = !resetting && wifiOk, onClick = { onSave(s, name) }) { Text(stringResource(R.string.save)) }
+            }
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(8.dp))
 
             // rename the machine; a blank name keeps the current one (see LibraryModel.updateSettings)
             OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true,
@@ -131,6 +153,32 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
             Spacer(Modifier.height(16.dp))
 
             Text(stringResource(R.string.vs_screen), style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+
+            // the device skin of this machine: its own, or the default skin of the app settings. A skin brings the guest screen size of the
+            // phone or tablet it shows, which is applied when the skin is picked (and followed with the "Skin's resolution" size below).
+            val skinFirmwareDensity = remember(img.id) { ResolutionPreset.buildPropDensity(app.aemu.core.VmPaths(ctx, img.id).root) }
+            var skinPicker by remember { mutableStateOf(false) }
+            val wornSkin = VmThemes.forVm(ctx, s)
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.vs_skin)) },
+                supportingContent = {
+                    Column {
+                        Text(if (s.skinId == null || wornSkin.id != s.skinId) stringResource(R.string.vs_skin_default, VmThemes.displayName(ctx, wornSkin))
+                            else VmThemes.displayName(ctx, wornSkin))
+                        VmThemes.guestSize(wornSkin)?.let { (w, h) -> Text(stringResource(R.string.vs_skin_size, w, h), style = MaterialTheme.typography.bodySmall) }
+                    }
+                },
+                leadingContent = { Icon(Icons.Rounded.Palette, null) },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                modifier = Modifier.clickable { skinPicker = true },
+            )
+            if (skinPicker) ThemeSheet(onDismiss = { skinPicker = false }, vmChoice = VmSkinChoice(s.skinId) { picked ->
+                val next = s.copy(skinId = picked)
+                // a skin that knows its device's resolution sets this machine's guest screen to it (not for the fixed-size 2.x engine)
+                val sized = picked != null && VmThemes.guestSize(VmThemes.forVm(ctx, next)) != null && !(next.legacyEngine && img.api < 14)
+                s = if (sized) VmThemes.withSkinResolution(ctx, next.copy(skinResolution = true), skinFirmwareDensity) else next
+            })
             Spacer(Modifier.height(8.dp))
             if (s.legacyEngine && img.api < 14) {
                 Text(stringResource(R.string.vs_fixed_2x), style = MaterialTheme.typography.bodyMedium)
@@ -143,14 +191,21 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                     val (hostWidth, hostHeight) = app.aemu.core.DisplayGeometry.natural(point.x, point.y, wm.defaultDisplay.rotation)
                     Triple(hostWidth, hostHeight, ctx.resources.displayMetrics.densityDpi)
                 }
-                fun followingHost(value: VmSettings) = value.copy(width = hostScreen.first and -2,
-                    height = hostScreen.second and -2, density = hostScreen.third)
+                fun followingHost(value: VmSettings): VmSettings {
+                    val (hw, hh) = app.aemu.core.DisplayGeometry.hostGuestSize(hostScreen.first, hostScreen.second)
+                    return value.copy(width = hw, height = hh, density = hostScreen.third)
+                }
                 LaunchedEffect(img.id, s.hostResolution) { if (s.hostResolution) s = followingHost(s) }
+                // "the skin's resolution" keeps following the skin this machine wears (its own, or the app's default skin)
+                LaunchedEffect(img.id, s.skinResolution, s.skinId) { if (s.skinResolution && !s.hostResolution) s = VmThemes.withSkinResolution(ctx, s, firmwareDensity) }
                 var presetMenu by remember { mutableStateOf(false) }
                 val current = RESOLUTIONS.firstOrNull { it.selected(s) }
                 val hostLabel = stringResource(R.string.vs_resolution_host)
                 val customLabel = stringResource(R.string.vs_resolution_custom)
-                fun name(r: ResolutionPreset) = if (r.isHost) hostLabel else r.label
+                val skinSize = VmThemes.guestSize(VmThemes.forVm(ctx, s))
+                val skinLabel = if (skinSize != null) stringResource(R.string.vs_resolution_skin_size, skinSize.first, skinSize.second)
+                    else stringResource(R.string.vs_resolution_skin_none)
+                fun name(r: ResolutionPreset) = if (r.isHost) hostLabel else if (r.isSkin) skinLabel else r.label
                 Box(Modifier.fillMaxWidth()) {
                     OutlinedButton(onClick = { presetMenu = true }, modifier = Modifier.fillMaxWidth()) {
                         Text(current?.let(::name) ?: customLabel, modifier = Modifier.weight(1f), maxLines = 1)
@@ -161,7 +216,11 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                             DropdownMenuItem(
                                 text = { Text(name(r), fontWeight = if (r == current) FontWeight.Bold else null) },
                                 onClick = {
-                                    s = if (r.isHost) followingHost(s.copy(hostResolution = true)) else r.apply(s, firmwareDensity)
+                                    s = when {
+                                        r.isHost -> followingHost(r.apply(s))
+                                        r.isSkin -> VmThemes.withSkinResolution(ctx, r.apply(s), firmwareDensity)
+                                        else -> r.apply(s, firmwareDensity)
+                                    }
                                     presetMenu = false
                                 },
                             )
@@ -170,9 +229,9 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    NumField(stringResource(R.string.vs_width), s.width, Modifier.weight(1f)) { s = s.copy(width = it.coerceAtLeast(2) and 0x7ffffffe, hostResolution = false) }
-                    NumField(stringResource(R.string.vs_height), s.height, Modifier.weight(1f)) { s = s.copy(height = it.coerceAtLeast(2) and 0x7ffffffe, hostResolution = false) }
-                    NumField(stringResource(R.string.vs_dpi), s.density, Modifier.weight(1f)) { s = s.copy(density = it.coerceIn(96, 640), hostResolution = false) }
+                    NumField(stringResource(R.string.vs_width), s.width, Modifier.weight(1f)) { s = s.copy(width = it.coerceAtLeast(2) and 0x7ffffffe, hostResolution = false, skinResolution = false) }
+                    NumField(stringResource(R.string.vs_height), s.height, Modifier.weight(1f)) { s = s.copy(height = it.coerceAtLeast(2) and 0x7ffffffe, hostResolution = false, skinResolution = false) }
+                    NumField(stringResource(R.string.vs_dpi), s.density, Modifier.weight(1f)) { s = s.copy(density = it.coerceIn(96, 640), hostResolution = false, skinResolution = false) }
                 }
                 Text(stringResource(R.string.vs_screen_hint), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
@@ -188,8 +247,8 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
             if (s.gpu) Toggle(stringResource(R.string.vs_gl_trace), stringResource(R.string.vs_gl_trace_sub), s.glTrace) { s = s.copy(glTrace = it) }
             if (img.api >= 14) Toggle(stringResource(R.string.vs_hwui), stringResource(R.string.vs_hwui_sub), s.hwui) { s = s.copy(hwui = it) }
             Toggle(stringResource(R.string.vs_jit), stringResource(R.string.vs_jit_sub), s.jit) { s = s.copy(jit = it) }
-            if (img.api >= 21) Toggle(stringResource(R.string.vs_fulldex), stringResource(R.string.vs_fulldex_sub), s.fullDexopt) { s = s.copy(fullDexopt = it) }
-            if (img.api >= 21) Toggle(stringResource(R.string.vs_no_dex2oat), stringResource(R.string.vs_no_dex2oat_sub), s.disableDex2oat) { s = s.copy(disableDex2oat = it) }
+            if (img.api >= 21 || img.runtime == "dalvik") Toggle(stringResource(R.string.vs_fulldex), stringResource(R.string.vs_fulldex_sub), s.fullDexopt) { s = s.copy(fullDexopt = it) }
+            if (img.api >= 21 || app.aemu.core.LPreviewArt.releaseMatches(img.release, img.api)) Toggle(stringResource(R.string.vs_no_dex2oat), stringResource(R.string.vs_no_dex2oat_sub), s.disableDex2oat) { s = s.copy(disableDex2oat = it) }
             if (img.api < 14) Toggle(stringResource(R.string.vs_legacy), stringResource(R.string.vs_legacy_sub), s.legacyEngine) { s = s.copy(legacyEngine = it) }
             if (img.api >= 26 && img.abi.startsWith("armeabi")) Toggle(
                 "Translate on the native engine",
@@ -268,7 +327,7 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
             if (img.api in 29..33) Toggle(stringResource(R.string.vs_skip_perm_wait), stringResource(R.string.vs_skip_perm_wait_sub), s.skipPermissionWait) { s = s.copy(skipPermissionWait = it) }
             if (wifiOffered) {
                 Toggle(stringResource(R.string.vs_wifi), stringResource(R.string.vs_wifi_sub), s.wifi) { s = s.copy(wifi = it) }
-                if (s.wifi) WifiFields(s) { s = it }
+                if (s.wifi) WifiFields(s, img.api) { s = it }
             }
             if (img.api in 14..25) {
                 Toggle(stringResource(R.string.vs_camera), stringResource(R.string.vs_camera_sub), s.camera) { s = s.copy(camera = it) }
@@ -299,6 +358,10 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii), modifier = Modifier.weight(1f))
                 TextButton(onClick = { s = s.copy(serial = VmSettings.randomSerial()) }) { Text(stringResource(R.string.vs_random)) }
             }
+            OutlinedTextField(value = s.bootProps, onValueChange = { v -> s = s.copy(bootProps = v.take(4096)) },
+                label = { Text(stringResource(R.string.vs_boot_props)) }, placeholder = { Text("ro.boot.hwc=GL") },
+                supportingText = { Text(stringResource(R.string.vs_boot_props_sub)) }, minLines = 2, maxLines = 8,
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
             OutlinedTextField(value = s.kernel, onValueChange = { v -> s = s.copy(kernel = VmSettings.cleanKernel(v)) },
                 label = { Text(stringResource(R.string.vs_kernel)) }, placeholder = { Text(VmSettings.DEFAULT_KERNEL) },
                 supportingText = { Text(stringResource(R.string.vs_kernel_sub)) }, singleLine = true,
@@ -373,7 +436,7 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
             Toggle(stringResource(R.string.vs_nav), stringResource(R.string.vs_nav_sub), s.showNavBar) { s = s.copy(showNavBar = it) }
             Toggle(stringResource(R.string.vs_guest_nav), stringResource(R.string.vs_guest_nav_sub), s.guestNavBar) { s = s.copy(guestNavBar = it) }
             Toggle(stringResource(R.string.vs_hide_menu), stringResource(R.string.vs_hide_menu_sub), s.hideMenuButton) { s = s.copy(hideMenuButton = it) }
-            NavigationSettings(s, app.aemu.core.LegacyFirmware.isPreRelease(img.release)) { s = it }
+            NavigationSettings(s, app.aemu.core.LegacyFirmware.isPreRelease(img.release), app.aemu.core.VirtualInputPolicy.isXperiaPlayModel(img.model)) { s = it }
             Toggle(stringResource(R.string.vs_awake), stringResource(R.string.vs_awake_sub), s.keepScreenOn) { s = s.copy(keepScreenOn = it) }
             Toggle(stringResource(R.string.as_led), stringResource(R.string.as_led_sub), s.showLed) { s = s.copy(showLed = it) }
             Toggle(stringResource(R.string.vs_single), stringResource(R.string.vs_single_sub), s.mtMode == 4) { s = s.copy(mtMode = if (it) 4 else 0) }
@@ -386,10 +449,8 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings, S
                 Text(stringResource(R.string.vm_reset_data), color = MaterialTheme.colorScheme.error)
             }
             resetMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            // fields that are not shown cannot hold Save back
-            val wifiOk = !(s.wifi && wifiOffered) || (WifiEmu.cleanSsid(s.wifiSsid).isNotEmpty() && WifiEmu.passwordValid(s.wifiPassword))
-            Button(enabled = !resetting && wifiOk, onClick = { onSave(s, name) }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(stringResource(R.string.save)) }
             Spacer(Modifier.height(16.dp))
+            }
         }
     }
     if (resetConfirm) AlertDialog(
@@ -432,40 +493,187 @@ internal fun Toggle(title: String, sub: String, on: Boolean, set: (Boolean) -> U
     )
 }
 
-/** Name and optional password of the emulated Wi-Fi network (blank password = open network). */
 @Composable
-private fun WifiFields(s: VmSettings, set: (VmSettings) -> Unit) {
-    var show by remember { mutableStateOf(false) }
-    OutlinedTextField(value = s.wifiSsid, onValueChange = { set(s.copy(wifiSsid = WifiEmu.cleanSsid(it))) },
-        label = { Text(stringResource(R.string.vs_wifi_ssid)) }, singleLine = true,
-        isError = s.wifiSsid.isEmpty(),
-        supportingText = { Text(stringResource(if (s.wifiSsid.isEmpty()) R.string.vs_wifi_ssid_error else R.string.vs_wifi_ssid_sub)) },
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
-    OutlinedTextField(value = s.wifiPassword, onValueChange = { set(s.copy(wifiPassword = WifiEmu.cleanPassword(it))) },
-        label = { Text(stringResource(R.string.vs_wifi_password)) }, singleLine = true,
-        isError = !WifiEmu.passwordValid(s.wifiPassword),
-        supportingText = { Text(stringResource(if (WifiEmu.passwordValid(s.wifiPassword)) R.string.vs_wifi_password_sub else R.string.vs_wifi_password_error)) },
-        visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        trailingIcon = { TextButton(onClick = { show = !show }) { Text(stringResource(if (show) R.string.vs_wifi_hide else R.string.vs_wifi_show)) } },
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+private fun SecurityPicker(sec: WifiSecurity, set: (WifiSecurity) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    fun bars(n: Int) = "▂▄▆█".take(n) + "·".repeat(WifiEmu.MAX_BARS - n)
+    fun label(v: WifiSecurity) = when (v) {
+        WifiSecurity.NONE -> R.string.vs_wifi_sec_none
+        WifiSecurity.WPA2 -> R.string.vs_wifi_sec_wpa2
+        WifiSecurity.WPA_WPA2 -> R.string.vs_wifi_sec_wpa
+        WifiSecurity.WPA3 -> R.string.vs_wifi_sec_wpa3
+    }
     ListItem(
-        headlineContent = { Text(stringResource(R.string.vs_wifi_signal)) },
-        supportingContent = { Text(stringResource(R.string.vs_wifi_signal_sub)) },
+        headlineContent = { Text(stringResource(R.string.vs_wifi_security)) },
         trailingContent = {
             Box {
-                TextButton(onClick = { open = true }) { Text(bars(s.wifiSignal)) }
+                TextButton(onClick = { open = true }) { Text(stringResource(label(sec))) }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                    for (n in WifiEmu.MAX_BARS downTo 1) DropdownMenuItem(text = { Text(bars(n)) }, onClick = { open = false; set(s.copy(wifiSignal = n)) })
+                    for (v in WifiSecurity.entries) DropdownMenuItem(text = { Text(stringResource(label(v))) }, onClick = { open = false; set(v) })
                 }
             }
         },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.fillMaxWidth(),
     )
-    Toggle(stringResource(R.string.vs_wifi_neighbors), stringResource(R.string.vs_wifi_neighbors_sub), s.wifiNeighbors) { set(s.copy(wifiNeighbors = it)) }
+}
+
+@Composable
+private fun <T> ChoicePicker(title: Int, value: T, options: List<T>, label: (T) -> Int, set: (T) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ListItem(
+        headlineContent = { Text(stringResource(title)) },
+        trailingContent = {
+            Box {
+                TextButton(onClick = { open = true }) { Text(stringResource(label(value))) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    for (v in options) DropdownMenuItem(text = { Text(stringResource(label(v))) }, onClick = { open = false; set(v) })
+                }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+private fun bandLabel(b: WifiBand) = when (b) {
+    WifiBand.GHZ24 -> R.string.vs_wifi_band_24
+    WifiBand.GHZ5 -> R.string.vs_wifi_band_5
+    WifiBand.DUAL -> R.string.vs_wifi_band_dual
+    WifiBand.GHZ6 -> R.string.vs_wifi_band_6
+}
+
+private fun standardLabel(v: WifiStandard) = when (v) {
+    WifiStandard.AUTO -> R.string.vs_wifi_std_auto
+    WifiStandard.N -> R.string.vs_wifi_std_n
+    WifiStandard.AC -> R.string.vs_wifi_std_ac
+    WifiStandard.AX -> R.string.vs_wifi_std_ax
+    WifiStandard.BE -> R.string.vs_wifi_std_be
+}
+
+@Composable
+private fun BandPicker(band: WifiBand, api: Int, set: (WifiBand) -> Unit) =
+    ChoicePicker(R.string.vs_wifi_band, band, WifiBand.entries.filter { it != WifiBand.GHZ6 || api >= WifiEmu.BAND6_API }, ::bandLabel, set)
+
+@Composable
+private fun StandardPicker(v: WifiStandard, api: Int, set: (WifiStandard) -> Unit) =
+    ChoicePicker(R.string.vs_wifi_standard, v, WifiStandard.entries.filter { it != WifiStandard.BE || api >= WifiEmu.WIFI7_API }, ::standardLabel, set)
+
+private fun signalBars(n: Int) = "▂▄▆█".take(n) + "·".repeat(WifiEmu.MAX_BARS - n)
+
+@Composable
+private fun SignalPicker(bars: Int, set: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_wifi_signal)) },
+        supportingContent = { Text(stringResource(R.string.vs_wifi_signal_sub)) },
+        trailingContent = {
+            Box {
+                TextButton(onClick = { open = true }) { Text(signalBars(bars)) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    for (n in WifiEmu.MAX_BARS downTo 1) DropdownMenuItem(text = { Text(signalBars(n)) }, onClick = { open = false; set(n) })
+                }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+@Composable
+private fun SpeedField(text: String, set: (String) -> Unit) {
+    val kbps = WifiEmu.speedKbps(text)
+    val (number, unit) = WifiEmu.speedParts(text)
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.Top) {
+        OutlinedTextField(value = number,
+            onValueChange = { v -> set(WifiEmu.speedJoin(v.filter { it.isDigit() || it == '.' || it == ',' }.take(12), unit)) },
+            label = { Text(stringResource(R.string.vs_wifi_speed)) }, singleLine = true,
+            placeholder = { Text(stringResource(R.string.vs_wifi_speed_hint)) },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            isError = kbps == null,
+            supportingText = { Text(when {
+                kbps == null -> stringResource(R.string.vs_wifi_speed_error)
+                kbps == 0 -> stringResource(R.string.vs_wifi_speed_none)
+                else -> stringResource(R.string.vs_wifi_speed_set, WifiEmu.speedText(kbps))
+            }) },
+            modifier = Modifier.weight(1f))
+        Box(Modifier.padding(start = 8.dp, top = 8.dp)) {
+            OutlinedButton(onClick = { open = true }) { Text(unit) }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                for (u in WifiEmu.SPEED_UNITS) DropdownMenuItem(text = { Text(u) }, onClick = { open = false; set(WifiEmu.speedJoin(number, u)) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun NetworkHeader(title: String, onRemove: (() -> Unit)?) {
+    HorizontalDivider(Modifier.padding(top = 8.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 8.dp))
+        if (onRemove != null) TextButton(onClick = onRemove) { Text(stringResource(R.string.vs_wifi_extra_remove)) }
+    }
+}
+
+/** The emulated Wi-Fi networks: a count with + / -, then one block per network (name, security, password, signal). */
+@Composable
+private fun WifiFields(s: VmSettings, api: Int, set: (VmSettings) -> Unit) {
+    var show by remember { mutableStateOf(false) }
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.vs_wifi_count)) },
+        supportingContent = { Text(stringResource(R.string.vs_wifi_count_sub)) },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(enabled = s.wifiExtra.isNotEmpty(), onClick = { set(s.copy(wifiExtra = s.wifiExtra.dropLast(1))) }) { Text("−") }
+                Text((s.wifiExtra.size + 1).toString(), modifier = Modifier.padding(horizontal = 12.dp))
+                OutlinedButton(enabled = s.wifiExtra.size < WifiEmu.MAX_EXTRA, onClick = { set(s.copy(wifiExtra = s.wifiExtra + WifiNetworkDef())) }) { Text("+") }
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    NetworkHeader(stringResource(R.string.vs_wifi_network_n, 1), null)
+    OutlinedTextField(value = s.wifiSsid, onValueChange = { set(s.copy(wifiSsid = WifiEmu.cleanSsid(it))) },
+        label = { Text(stringResource(R.string.vs_wifi_ssid)) }, singleLine = true,
+        isError = s.wifiSsid.isEmpty(),
+        supportingText = { Text(stringResource(if (s.wifiSsid.isEmpty()) R.string.vs_wifi_ssid_error else R.string.vs_wifi_ssid_sub)) },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+    SecurityPicker(s.wifiSecurity) { set(s.copy(wifiSecurity = it)) }
+    if (s.wifiSecurity != WifiSecurity.NONE) OutlinedTextField(value = s.wifiPassword, onValueChange = { set(s.copy(wifiPassword = WifiEmu.cleanPassword(it))) },
+        label = { Text(stringResource(R.string.vs_wifi_password)) }, singleLine = true,
+        isError = !WifiEmu.mainValid(s),
+        supportingText = { Text(stringResource(if (WifiEmu.mainValid(s)) R.string.vs_wifi_secure_sub else R.string.vs_wifi_password_need)) },
+        visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        trailingIcon = { TextButton(onClick = { show = !show }) { Text(stringResource(if (show) R.string.vs_wifi_hide else R.string.vs_wifi_show)) } },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+    SignalPicker(s.wifiSignal) { set(s.copy(wifiSignal = it)) }
+    BandPicker(s.wifiBand, api) { set(s.copy(wifiBand = it)) }
+    if (api >= WifiEmu.STANDARD_API) StandardPicker(s.wifiStandard, api) { set(s.copy(wifiStandard = it)) }
+    SpeedField(s.wifiSpeed) { set(s.copy(wifiSpeed = it)) }
+    s.wifiExtra.forEachIndexed { i, n ->
+        fun upd(v: WifiNetworkDef) = set(s.copy(wifiExtra = s.wifiExtra.toMutableList().also { it[i] = v }))
+        val dup = WifiEmu.cleanSsid(n.ssid).let { it.isNotEmpty() && (it == WifiEmu.cleanSsid(s.wifiSsid) || s.wifiExtra.take(i).any { p -> WifiEmu.cleanSsid(p.ssid) == it }) }
+        NetworkHeader(stringResource(R.string.vs_wifi_network_n, i + 2)) { set(s.copy(wifiExtra = s.wifiExtra.filterIndexed { j, _ -> j != i })) }
+        OutlinedTextField(value = n.ssid, onValueChange = { upd(n.copy(ssid = WifiEmu.cleanSsid(it))) },
+            label = { Text(stringResource(R.string.vs_wifi_ssid)) }, singleLine = true,
+            isError = n.ssid.isEmpty() || dup,
+            supportingText = { Text(stringResource(if (n.ssid.isEmpty()) R.string.vs_wifi_ssid_error else if (dup) R.string.vs_wifi_extra_dup else R.string.vs_wifi_ssid_sub)) },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+        SecurityPicker(n.security) { upd(n.copy(security = it)) }
+        if (n.security != WifiSecurity.NONE) OutlinedTextField(value = n.password, onValueChange = { upd(n.copy(password = WifiEmu.cleanPassword(it))) },
+            label = { Text(stringResource(R.string.vs_wifi_password)) }, singleLine = true,
+            isError = !WifiEmu.credentialValid(n.security, n.password),
+            supportingText = { Text(stringResource(if (WifiEmu.credentialValid(n.security, n.password)) R.string.vs_wifi_secure_sub else R.string.vs_wifi_password_need)) },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+        SignalPicker(n.signal) { upd(n.copy(signal = it)) }
+        BandPicker(n.band, api) { upd(n.copy(band = it)) }
+        if (api >= WifiEmu.STANDARD_API) StandardPicker(n.standard, api) { upd(n.copy(standard = it)) }
+        SpeedField(n.speed) { upd(n.copy(speed = it)) }
+    }
+    HorizontalDivider(Modifier.padding(top = 8.dp))
+    Toggle(stringResource(R.string.vs_wifi_auto), stringResource(R.string.vs_wifi_auto_sub), s.wifiAutoConnect) { set(s.copy(wifiAutoConnect = it)) }
 }
 
 /**
@@ -938,7 +1146,9 @@ private fun OtaSection(img: GuestImage, busy: Boolean, setBusy: (Boolean) -> Uni
     var prepared by remember { mutableStateOf<app.aemu.core.DeltaOta.Prepared?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var picking by remember { mutableStateOf(false) }
+    var baseUri by remember { mutableStateOf<android.net.Uri?>(null) }
     androidx.compose.runtime.DisposableEffect(Unit) { onDispose { prepared?.close() } }
+    val pickBase = rememberSingleFilePicker { uri -> if (uri != null) baseUri = uri }
     val pick = rememberSingleFilePicker { uri ->
         picking = false
         if (uri == null) return@rememberSingleFilePicker
@@ -947,7 +1157,7 @@ private fun OtaSection(img: GuestImage, busy: Boolean, setBusy: (Boolean) -> Uni
         scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { app.aemu.core.DeltaOta.prepare(ctx, img.id, uri) } }
             setBusy(false)
-            result.onSuccess { prepared?.close(); prepared = it; message = null }
+            result.onSuccess { prepared?.close(); prepared = it; baseUri = null; message = null }
                 .onFailure { message = ctx.getString(R.string.vs_ota_failed, it.userMessage(ctx)) }
         }
     }
@@ -968,10 +1178,19 @@ private fun OtaSection(img: GuestImage, busy: Boolean, setBusy: (Boolean) -> Uni
             title = { Text(stringResource(R.string.vs_ota_confirm_title)) },
             text = {
                 val base = stringResource(R.string.vs_ota_confirm, p.fromBuild, p.toBuild)
-                Text(if (p.partial) base + "\n\n" + stringResource(R.string.vs_ota_partial) else base)
+                androidx.compose.foundation.layout.Column {
+                    Text(if (p.partial) base + "\n\n" + stringResource(R.string.vs_ota_partial) else base)
+                    if (p.needsBase.isNotEmpty()) {
+                        Text("\n" + stringResource(R.string.vs_ota_needs_base, p.needsBase.joinToString()))
+                        TextButton(onClick = { pickBase.launch(arrayOf("*/*")) }) {
+                            Text(baseUri?.let { stringResource(R.string.vs_ota_base_chosen) } ?: stringResource(R.string.vs_ota_pick_base))
+                        }
+                    }
+                }
             },
             dismissButton = { TextButton(onClick = { p.close(); prepared = null }) { Text(stringResource(R.string.cancel)) } },
-            confirmButton = { TextButton(onClick = {
+            confirmButton = { TextButton(enabled = p.needsBase.isEmpty() || baseUri != null, onClick = {
+                p.base = baseUri
                 prepared = null
                 setBusy(true)
                 message = ctx.getString(R.string.vs_ota_working, "")
